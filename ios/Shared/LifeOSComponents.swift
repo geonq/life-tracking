@@ -47,22 +47,32 @@ public struct LifeOSCard<Content: View>: View {
         self.content = content()
     }
 
-    public var body: some View {
+    private var baseContent: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let hairlineWidth = displayScale.isFinite && displayScale > 0 ? 1 / displayScale : 1
-        let shadowOpacity = colorScheme == .dark ? 0.35 : 0.18
 
-        content
+        return content
             .padding(padding)
             .background(level.fill, in: shape)
-            .overlay(shape.stroke(LifeOSTokens.subtleBorder, lineWidth: hairlineWidth))
-            .shadow(
-                color: level.usesShadow ? Color.black.opacity(shadowOpacity) : .clear,
-                radius: level.usesShadow ? 32 : 0,
-                x: 0,
-                y: level.usesShadow ? 12 : 0
-            )
+            .overlay(shape.stroke(LifeOSTokens.hairlineBorder, lineWidth: hairlineWidth))
             .contentShape(shape)
+    }
+
+    @ViewBuilder
+    public var body: some View {
+        if level.usesShadow {
+            baseContent
+                .shadow(
+                    color: colorScheme == .dark
+                        ? Color.black.opacity(0.24)
+                        : Color.black.opacity(0.12),
+                    radius: 16,
+                    x: 0,
+                    y: 8
+                )
+        } else {
+            baseContent
+        }
     }
 }
 

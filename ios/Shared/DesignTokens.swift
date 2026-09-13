@@ -39,11 +39,13 @@ enum LifeOSPalette {
     static let taxPurpleDarkHex: UInt32 = 0xC853E2
     static let taxPurpleLightHex: UInt32 = 0x650177
     static let canvasDarkHex: UInt32 = 0x000000
-    static let canvasLightHex: UInt32 = 0xF7F7F8
-    static let surfaceDarkHex: UInt32 = 0x08080A
+    static let canvasLightHex: UInt32 = 0xFAFAFA
+    static let surfaceDarkHex: UInt32 = 0x131315
     static let surfaceLightHex: UInt32 = 0xFFFFFF
-    static let borderDarkHex: UInt32 = 0x29292F
-    static let borderLightHex: UInt32 = 0xD0D0D6
+    static let raisedDarkHex: UInt32 = 0x1B1B1E
+    static let raisedLightHex: UInt32 = 0xF4F4F5
+    static let borderDarkHex: UInt32 = 0x232329
+    static let borderLightHex: UInt32 = 0xE4E4E7
     static let transparentWidgetBackingOpacity: Double = 0.60
     static let transparentWidgetSupportingHex: UInt32 = 0xE6E6E6
 }
@@ -426,7 +428,7 @@ public extension Color {
     )
 
     // Brand canvases
-    /// Neutral dark canvas #000000 (reserved for the tab-bar underlay).
+    /// Neutral dark canvas #000000.
     static let lifeOSDarkCanvas = Color(hex: LifeOSPalette.canvasDarkHex)
     /// Neutral light canvas #FAFAFA.
     static let lifeOSLightCanvas = Color(hex: LifeOSPalette.canvasLightHex)
@@ -434,10 +436,10 @@ public extension Color {
     /// Neutral structural roles used by the shared foundation.
     static let lifeOSDarkSurface = Color(hex: LifeOSPalette.surfaceDarkHex)
     static let lifeOSLightSurface = Color(hex: LifeOSPalette.surfaceLightHex)
-    static let lifeOSDarkRaised = lifeOSDarkSurface
-    static let lifeOSLightRaised = lifeOSLightSurface
-    static let lifeOSDarkFloatingOverlay = lifeOSDarkSurface
-    static let lifeOSLightFloatingOverlay = lifeOSLightSurface
+    static let lifeOSDarkRaised = Color(hex: LifeOSPalette.raisedDarkHex)
+    static let lifeOSLightRaised = Color(hex: LifeOSPalette.raisedLightHex)
+    static let lifeOSDarkFloatingOverlay = lifeOSDarkRaised
+    static let lifeOSLightFloatingOverlay = lifeOSLightRaised
 
     static let lifeOSPrimaryText = lifeOSAdaptiveColor(
         darkRed: 0xF5/255, darkGreen: 0xF5/255, darkBlue: 0xF7/255,
@@ -467,7 +469,7 @@ public extension Color {
         lightRed: 0xA1/255, lightGreen: 0xA1/255, lightBlue: 0xAA/255
     )
 
-    /// THE structural border (#29292F / #D0D0D6), solid, drawn at 1pt.
+    /// THE structural border (#232329 / #E4E4E7), solid, drawn at one hairline.
     static let lifeOSSubtleBorder = lifeOSAdaptiveColor(
         darkRed: Double((LifeOSPalette.borderDarkHex >> 16) & 0xFF)/255,
         darkGreen: Double((LifeOSPalette.borderDarkHex >> 8) & 0xFF)/255,
@@ -611,10 +613,13 @@ public extension Color {
         light: LifeOSPalette.surfaceLightHex
     )
 
-    /// Compatibility aliases intentionally resolve to the one structural
-    /// surface. Interaction states add transient overlays at call sites.
-    static let lifeOSNeutralRaised = lifeOSNeutralSurface
-    static let lifeOSNeutralFloatingOverlay = lifeOSNeutralSurface
+    /// Compatibility aliases reuse the shared raised neutral fill.
+    /// Interaction states add transient overlays at call sites.
+    static let lifeOSNeutralRaised = lifeOSAdaptiveHex(
+        dark: LifeOSPalette.raisedDarkHex,
+        light: LifeOSPalette.raisedLightHex
+    )
+    static let lifeOSNeutralFloatingOverlay = lifeOSNeutralRaised
 
     /// Accent hover: lighter on dark, darker on light (inverted direction).
     static let lifeOSAccentHover = lifeOSAdaptiveColor(
