@@ -62,9 +62,10 @@ Updated 2026-09-13 Europe/Berlin.
 
 - Windows gateway access remains fail-closed with scoped credentials, protected
   snapshots, atomic recovery, identity-bound bounded reads, ACL checks, and
-  journal-bound Node staging. `6baa1f3` passed source, candidate, static, and
-  behavior checks; Astra rejected a later optimization for a mutating
-  reconcile-only path and validation-context TOCTOU gap. Do not merge it.
+  journal-bound Node staging. `6baa1f3` passed source/candidate/static/behavior;
+  diagnostics at `14a3b7f` are Astra-reviewed GREEN and were validated only in
+  a disposable Windows copy; Astra rejected a mutating reconcile-only path and
+  TOCTOU optimization; do not merge it.
 - Gateway and native calendar limits are both 1,024. Oversized incoming or
   persisted state fails closed without destructive truncation.
 - Calendar icon publication must perform bounded PNG/JPEG structure and CRC

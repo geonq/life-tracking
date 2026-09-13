@@ -3,7 +3,7 @@
 Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Source checkpoint: `6baa1f3`; current branch HEAD is `fdbc5e5` on
+- Source checkpoint: `6baa1f3`; current branch HEAD is `14a3b7f` on
   `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
@@ -32,6 +32,11 @@ Updated 2026-09-13 Europe/Berlin.
   Windows source suite remains **61 passed, 1 skipped**. The pushed
   `6baa1f3` candidate verifier passed 108 files; remote static and behavior
   suites also passed.
+- Bounded recovery diagnostics are committed at `14a3b7f`, with opt-in
+  session ownership, fixed redacted records, counter/memory bounds, and
+  failure-path parity. Native Windows PowerShell 5.1 static, behavior,
+  failure-parity, and legacy Serve suites passed with exit 0; Astra Medium
+  reviewed this tranche **GREEN**. This does not certify canonical recovery.
 - Personal device installer security slice is Astra scoped GREEN at `1d1af18`:
   **13/13 tests**, `bash -n`, exact production command allowlist, minimal
   environment, and toolchain/Python injection regressions pass. Physical
@@ -60,7 +65,8 @@ Updated 2026-09-13 Europe/Berlin.
   earlier 985 MB peak. The marker is still active and `LifeOSAPI` is stopped.
   Candidate verification passes, but reinstall, listener/health, Tailscale
   Serve, and live banking remain open. The follow-up runtime patch is rejected
-  and is not in the branch.
+  and is not in the branch; the diagnostics tranche was tested only in a
+  disposable copy.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 

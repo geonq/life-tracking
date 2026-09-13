@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `fdbc5e5 Record usage visual verification checkpoint`;
+- HEAD and origin: `14a3b7f Add bounded recovery diagnostics instrumentation`;
   deployable code checkpoint remains `6baa1f3`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
@@ -45,8 +45,9 @@ evidence is still incomplete.
   macOS route tests **2/2, exit 0**; full macOS snapshot run executed
   **51/51 test cases with 0 failures** before its result-archive I/O crash.
 - Windows source suite: **61 passed, 1 skipped, 0 failures**; the pushed
-  `6baa1f3` candidate verifier passed **108 files**, and the remote static and
-  behavior suites passed.
+  `6baa1f3` candidate verifier passed **108 files**. Native PowerShell 5.1
+  static, behavior, failure-parity, and legacy Serve suites passed exit 0 for
+  diagnostics at `14a3b7f`; Astra Medium reviewed it **GREEN**.
 - Personal installer security slice: Astra Medium scoped GREEN at `1d1af18`;
   **13/13 tests** and `bash -n` pass. Exact Apple command allowlisting,
   minimal child environment, hostile Python-startup rejection, toolchain
@@ -70,12 +71,11 @@ evidence is still incomplete.
   checkpoint appeared after 45 minutes, so it was safely stopped. The durable
   marker remains `active`, the journal remains `artifacts-complete`, and
   `LifeOSAPI` remains stopped. Install and live Enable Banking readback remain
-  uncertified.
-- Astra rejected an uncommitted follow-up optimization: its second service
-  check could delete a service and its validation context had a TOCTOU gap.
-  That patch was removed from the tree and preserved at
-  `/private/tmp/lifeos-red-runtime-optimization-20260913.patch`; it is not
-  part of the release.
+  uncertified; diagnostics were tested only in a disposable copy, and the
+  canonical transaction was not resumed or installed.
+- Astra rejected an uncommitted runtime optimization for a mutating
+  reconcile-only path and TOCTOU gap; it is preserved at
+  `/private/tmp/lifeos-red-runtime-optimization-20260913.patch` and excluded.
 - The calendar Astra review found and the source fixed one P2 compatibility
   issue: a valid SF Symbol name unavailable on the receiving OS must survive
   decode and render through a local fallback. The targeted Astra re-review was
@@ -94,7 +94,7 @@ evidence is still incomplete.
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. Next: implement and review the non-mutating recovery validation
-needed to avoid repeated full-journal scans, then resume recovery and close
-live provider, device/signing, whole-app visual, Zepp, Obsidian, and security
-gates with evidence.
+`070b7db`. Next: use the bounded diagnostics in disposable non-mutating
+recovery validation, resolve the full-journal scan performance gate, then
+resume recovery and close live provider, device/signing, whole-app visual,
+Zepp, Obsidian, and security gates with evidence.

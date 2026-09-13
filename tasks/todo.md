@@ -13,11 +13,13 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
    responsive hierarchy at `fd8ccfb`, each with scoped evidence. Finish the
    remaining Finance live-data/interaction pass, then SF Symbols, motion,
    calendar scroll/pinch, and widget states against the approved design plan.
-3. Finish the Windows recovery, install the verified `6baa1f3` candidate, and
+3. Use the bounded recovery diagnostics in a disposable validation, finish the
+   Windows recovery, install the verified `6baa1f3` candidate, and
    verify service listeners, health, ACLs, Tailscale Serve, and live Enable
    Banking reads on the reachable PC. The first real resume reached journal
    unit 31,400 but stopped after 45 minutes without a stage checkpoint; design
-   and review non-mutating validation before retrying.
+   and review non-mutating validation before retrying. Diagnostics at `14a3b7f`
+   passed native Windows PowerShell 5.1 failure-parity and cleanup checks.
 4. Verify iPhone install, App Group/HealthKit, personal signing renewal, and
    the native Shortcut flows.
 5. Resolve Zepp/workout evidence and implement the Obsidian Canvas mind-map
@@ -27,13 +29,15 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
 
 ## Verified checkpoint
 
-`6baa1f3` is pushed; the Finance source change is `fd8ccfb`. Calendar hardening is pushed at `8942b8e`; its focused
+`14a3b7f` is pushed; the deployable Windows source checkpoint is `6baa1f3`.
+The Finance source change is `fd8ccfb`. Calendar hardening is pushed at `8942b8e`; its focused
 iPhone 17 suite is 107/107 with exit 0 and the macOS production build exits 0.
 Usage visual/source, macOS route, and personal installer security slices have
 source evidence; the Usage focused visual run is 3/3 with seven inspected
 captures. macOS route tests are 2/2 with exit 0; the full macOS snapshot run
 executed 51/51 cases with zero test failures before result-archive I/O failure.
-Windows source tests are 61 passed, 1 skipped.
+Windows source tests are 61 passed, 1 skipped; native static, behavior,
+failure-parity, and legacy Serve suites pass for the diagnostics tranche.
 The installer has 13/13 tests and `bash -n`; this does not prove physical
 signing, installation, or whole-product completion. Backend boundary security
 is also Astra-reviewed GREEN at `87e7db6` with 148/148 API tests; native
