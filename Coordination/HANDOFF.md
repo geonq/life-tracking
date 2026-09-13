@@ -1,6 +1,6 @@
 # HANDOFF — LifeOS native app
 
-Updated 2026-09-13 Europe/Berlin.
+Updated 2026-09-14 Europe/Berlin.
 
 ## Release state
 
@@ -12,14 +12,13 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `e8bbefa Refine compact usage presentation and chart contract`;
-  the source checkpoint remains `0a8d5b6 Instrument recovery runtime phases safely`;
-  deployable code checkpoint remains `6baa1f3`. The branch is remote-synced;
-  later docs-only commits may advance branch HEAD without changing this source
-  checkpoint. The last verified GitHub CLI
-  observation showed PR #1 OPEN, DRAFT, and MERGEABLE against `main` at
-  `e234af9`, with no submitted reviews; recheck its live state before every
-  dispatch or merge.
+- Application source checkpoint: `e8bbefa Refine compact usage presentation and
+  chart contract`; Windows recovery-instrumentation checkpoint: `0a8d5b6`;
+  historical deployable code candidate: `6baa1f3`. Current branch checkpoint is
+  `93ea88e`; later documentation-only commits may advance branch HEAD without
+  changing the application source checkpoint. GitHub CLI currently reports PR #1
+  OPEN, DRAFT, and MERGEABLE against `main` at `93ea88e`, with no submitted
+  reviews; recheck its live state before merge.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
@@ -147,12 +146,14 @@ evidence is still incomplete.
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. Current next step: continue the bounded T11 Home/Usage/Clipper
-visual pass from the reviewed foundation and shell; the latest committed
-Usage tranche is `e8bbefa`. The Calendar gesture tranche must be re-planned
-with a smaller verified scope before dispatch. The two broad security workers
-returned no report, so any further security reconciliation must use a different,
-completed execution method before code changes. Keep the Windows marker untouched until a
-fresh strict recovery observation, identity/ACL checks, and reviewed performance
-run authorize mutation. Live bank readback, physical signing/widgets, whole-app
-visual/runtime, Zepp, Obsidian, and final release evidence remain open.
+`070b7db`. Current next step: execute the T0 contract/security reconciliation,
+T10a capability preflight, and T1a measured disposable recovery preparation;
+conforming T11 source remains subject to runtime verification. The latest
+committed Usage tranche is `e8bbefa`. Calendar gesture work is not accepted and
+must use the smaller T12 packets in `tasks/final-execution-plan.md`. The two
+broad security workers returned no report, so any further reconciliation must
+use a completed bounded execution method before code changes. Keep the Windows
+marker untouched until fresh strict recovery observation, identity/ACL checks,
+and reviewed performance authorize mutation. Live bank readback, physical
+signing/widgets, whole-app visual/runtime, Zepp, Obsidian, and final release
+evidence remain open.

@@ -1,6 +1,6 @@
 # DECISIONS — LifeOS native app
 
-Updated 2026-09-13 Europe/Berlin.
+Updated 2026-09-14 Europe/Berlin.
 
 ## Product and design
 
@@ -89,8 +89,9 @@ Updated 2026-09-13 Europe/Berlin.
   transport remain verification items.
 - Keep secrets out of source, prompts, logs, and archives. Do not claim
   provider, Windows-native, physical-device, or visual evidence from source
-  checks alone. Final Astra Medium source review is GREEN at `eb9ca620…`;
-  operational and device gates remain open.
+  checks alone. The recorded Astra Medium source review at `eb9ca620…` is
+  scoped GREEN, not integrated operational/security acceptance; operational and
+  device gates remain open.
 - Native Shortcuts may open Zepp and report LifeOS refresh/status; public Zepp API is not assumed; Personal Team signing and seven-day renewal remain platform-managed.
 
 ## Workflow
@@ -98,7 +99,7 @@ Updated 2026-09-13 Europe/Berlin.
 - Use Luna Max for bounded implementation and Astra Medium for batched review;
   keep write scopes disjoint, native builds serialized with `-jobs 1`, and
   close completed workers and processes immediately.
-- Keep coordination files below 100 lines where practical; use live production
+- Keep coordination files below 200 lines; use live production
   reads, isolate fixtures, and treat subagent reports as hypotheses until the
   parent reviews the diff and runs relevant checks.
 - Do not add a Claude usage-limit watcher, overnight supervisor, demo fallback, generic assistant, or unrelated conversational AI; do not merge PR #1 while Windows, provider, physical-device, and visual gates remain unresolved.
