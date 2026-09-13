@@ -1,7 +1,7 @@
 # Active LifeOS full-design execution
 
 Status: IN PROGRESS
-Updated: 2026-09-12
+Updated: 2026-09-13
 Mode: prospective implementation of the complete LifeOS design plan; one verified, publishable tranche at a time.
 
 ## Authority order
@@ -24,11 +24,12 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current working checkpoint: `87e7db6` on `lifeos-foundation-checkpoint-20260812`.
+- Current working checkpoint: `6f421f8` on `lifeos-foundation-checkpoint-20260812`.
   The branch push succeeded; PR #1 is the matching open draft checkpoint.
-  Backend boundary security is Astra scoped GREEN at this checkpoint; the
-  uncommitted Calendar repair remains RED pending queued-revocation and
-  creation-identity compatibility fixes.
+  Backend boundary security is Astra scoped GREEN at `87e7db6`. Calendar
+  security and merge hardening is committed at `8942b8e`, with 107/107 focused
+  iPhone tests and a passing macOS build. Usage hierarchy is committed at
+  `6f421f8`, with 3/3 focused macOS visual tests and seven inspected captures.
 
 ## Execution phases
 
