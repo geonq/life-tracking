@@ -874,6 +874,59 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertFalse(persisted.items.contains { $0.isDeleted })
     }
 
+    func testPublicStoreMergeSanitizesFutureMutationClocksAndAcceptsNewerEdit() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CalendarStore(url: directory.appendingPathComponent("calendar.json"))
+        let now = Date()
+        let localUpdateID = UUID()
+        let localDeleteID = UUID()
+        let createdAt = now.addingTimeInterval(-120)
+        let localUpdate = try CalendarItem(
+            id: localUpdateID,
+            title: "local update",
+            start: now.addingTimeInterval(-600),
+            end: now.addingTimeInterval(-540),
+            createdAt: createdAt,
+            updatedAt: now.addingTimeInterval(-60)
+        )
+        let localDelete = try CalendarItem(
+            id: localDeleteID,
+            title: "local delete",
+            start: now.addingTimeInterval(-300),
+            end: now.addingTimeInterval(-240),
+            createdAt: createdAt,
+            updatedAt: now.addingTimeInterval(-60)
+        )
+        try await store.save(CalendarSnapshot(items: [localUpdate, localDelete]))
+
+        let future = now.addingTimeInterval(CalendarRemoteMergePolicy.maximumClockSkew + 1)
+        let futureUpdate = try CalendarItem(
+            id: localUpdateID,
+            title: "future overwrite",
+            start: localUpdate.start,
+            end: localUpdate.end,
+            createdAt: localUpdate.createdAt,
+            updatedAt: future
+        )
+        let futureDeletion = localDelete.deleting(at: future)
+        _ = try await store.merge(CalendarSnapshot(items: [futureUpdate, futureDeletion]))
+
+        let preserved = try await store.load()
+        XCTAssertEqual(preserved.items.first(where: { $0.id == localUpdateID })?.title, localUpdate.title)
+        XCTAssertFalse(preserved.items.first(where: { $0.id == localDeleteID })?.isDeleted ?? true)
+
+        let validNewer = try localUpdate.updating(
+            title: "valid remote edit",
+            at: now.addingTimeInterval(-10)
+        )
+        _ = try await store.merge(CalendarSnapshot(items: [validNewer]))
+
+        let merged = try await store.load()
+        XCTAssertEqual(merged.items.first(where: { $0.id == localUpdateID })?.title, "valid remote edit")
+        XCTAssertFalse(merged.items.first(where: { $0.id == localDeleteID })?.isDeleted ?? true)
+    }
+
     func testRemoteMergeAcceptsValidMatchingTombstone() throws {
         let current = try CalendarItem(
             title: "meeting",

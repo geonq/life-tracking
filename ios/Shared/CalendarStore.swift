@@ -93,7 +93,12 @@ public actor CalendarStore {
         let operation = { [self] in
             try remote.validatedForPersistence()
             let current = try self.load()
-            let merged = current.merged(with: remote)
+            let sanitized = CalendarRemoteMergePolicy.sanitize(
+                remote,
+                against: current,
+                now: .now
+            )
+            let merged = current.merged(with: sanitized.snapshot)
             guard merged != current else { return current }
             return try self.save(merged)
         }
