@@ -13,8 +13,9 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
    responsive hierarchy at `fd8ccfb`, each with scoped evidence. Finish the
    remaining Finance live-data/interaction pass, then SF Symbols, motion,
    calendar scroll/pinch, and widget states against the approved design plan.
-3. Run Windows recovery/install and verify service listeners, health, ACLs,
-   Tailscale Serve, and live Enable Banking reads on the reachable PC.
+3. Finish the active Windows recovery, install the verified `a0b60ac`
+   candidate, and verify service listeners, health, ACLs, Tailscale Serve, and
+   live Enable Banking reads on the reachable PC.
 4. Verify iPhone install, App Group/HealthKit, personal signing renewal, and
    the native Shortcut flows.
 5. Resolve Zepp/workout evidence and implement the Obsidian Canvas mind-map
@@ -24,7 +25,7 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
 
 ## Verified checkpoint
 
-`3bb4f2c` is pushed; the Finance source change is `fd8ccfb`. Calendar hardening is pushed at `8942b8e`; its focused
+`a0b60ac` is pushed; the Finance source change is `fd8ccfb`. Calendar hardening is pushed at `8942b8e`; its focused
 iPhone 17 suite is 107/107 with exit 0 and the macOS production build exits 0.
 Usage visual/source, macOS route, and personal installer security slices have
 source evidence; the Usage focused visual run is 3/3 with seven inspected

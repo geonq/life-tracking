@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `3bb4f2c Refresh LifeOS Finance handoff`.
+- HEAD and origin: `a0b60ac Correct LifeOS handoff checkpoint`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
@@ -58,8 +58,10 @@ evidence is still incomplete.
 ## Still open
 
 - Windows is reachable and BitLocker was last read fully encrypted/protected.
-  The stale rollback marker/process has been cleared; the service remains
-  stopped and no reinstall retry or live Enable Banking readback is certified.
+  An explicit rollback is currently reconciling the abandoned transaction
+  marker; the service remains stopped. The immutable candidate verifier and
+  installer-created fresh-venv preflight pass, but install and live Enable
+  Banking readback remain uncertified until recovery reaches `recovered`.
 - The calendar Astra review found and the source fixed one P2 compatibility
   issue: a valid SF Symbol name unavailable on the receiving OS must survive
   decode and render through a local fallback. The targeted Astra re-review was
@@ -78,6 +80,6 @@ evidence is still incomplete.
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. Next: continue the Finance and whole-app visual/runtime pass, then
-close the Windows backend, live provider, device/signing, Zepp, Obsidian, and
-security gates with evidence.
+`070b7db`. Next: finish the active Windows recovery, retry the verified
+candidate install, then close live provider, device/signing, whole-app visual,
+Zepp, Obsidian, and security gates with evidence.

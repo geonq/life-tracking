@@ -24,8 +24,10 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current working checkpoint: `3bb4f2c` on `lifeos-foundation-checkpoint-20260812`.
-  The branch push succeeded; PR #1 is the matching open draft checkpoint.
+- Current working checkpoint: `a0b60ac` on `lifeos-foundation-checkpoint-20260812`.
+  The branch push succeeded; PR #1 is the matching open draft checkpoint. The
+  current Windows candidate matches this checkpoint; recovery is active before
+  its authorized install.
   Backend boundary security is Astra scoped GREEN at `87e7db6`. Calendar
   security and merge hardening is committed at `8942b8e`, with 107/107 focused
   iPhone tests and a passing macOS build. Usage hierarchy is committed at
