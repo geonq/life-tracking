@@ -1,9 +1,10 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-13; current trusted HEAD **e8bbefa**. Documentation records the current execution state; remaining dispatch below is prospective.
+Planning baseline: 2026-09-13; current trusted source checkpoint **e8bbefa**. Documentation records the current execution state; remaining dispatch below is prospective.
 
 ## 1. Current truth and explicit gates
-- **NO-GO.** Local HEAD and origin now match `e8bbefa`; the last GitHub CLI
-  PR observation predates this push and must be refreshed before merge. A
+- **NO-GO.** The source checkpoint is `e8bbefa`; the branch is remote-synced
+  with later docs-only commits. The last GitHub CLI
+  PR observation predates this documentation update and must be refreshed before merge. A
   serialized Mac Usage build succeeded; the focused XCTest command compiled
   but the sandbox blocked `testmanagerd` before assertions. The last verified
   PR state was OPEN/DRAFT/MERGEABLE against `main` with no submitted reviews.

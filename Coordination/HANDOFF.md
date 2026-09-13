@@ -12,9 +12,11 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `e8bbefa Refine compact usage presentation and chart contract`;
+- Source checkpoint: `e8bbefa Refine compact usage presentation and chart contract`;
   the source checkpoint remains `0a8d5b6 Instrument recovery runtime phases safely`;
-  deployable code checkpoint remains `6baa1f3`. The last verified GitHub CLI
+  deployable code checkpoint remains `6baa1f3`. The branch is remote-synced;
+  later docs-only commits may advance branch HEAD without changing this source
+  checkpoint. The last verified GitHub CLI
   observation showed PR #1 OPEN, DRAFT, and MERGEABLE against `main` at
   `e234af9`, with no submitted reviews; recheck its live state before every
   dispatch or merge.
