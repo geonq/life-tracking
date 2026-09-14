@@ -87,6 +87,12 @@ Updated 2026-09-14 Europe/Berlin.
   CalendarStore merge boundary is fixed at `e07a0a4`, Astra Medium reviewed the
   two-file patch **GREEN**, and the focused iPhone 17 simulator suite is
   **96/96 with 0 failures**. Peer transport identity remains open.
+- T1/A1 Windows recovery review is recorded at
+  `artifacts/final/T0/t1-a1-review.md` and is **RED**: four recovery-boundary
+  source defects block canonical recovery and full-size measurement.
+- The scoped A1.4 truthfulness repair is pushed at `9539841` and reviewed
+  **GREEN**: every affected failure branch reports `recovery_required` without
+  claiming an unverified writer state. A1.1–A1.3 remain open.
 - The current 191-line visual contract is committed at `5ebc17e`. A prior Mac
   shell candidate passed compile and 6 selected tests but was Astra RED for
   missing shell-state evidence and a possible collapsed-header overflow; it was
@@ -116,9 +122,9 @@ Updated 2026-09-14 Europe/Berlin.
   journal receipt is not treated as current. Reinstall, listener/health,
   Tailscale Serve, and live banking remain open; disposable
   diagnostics/strict-reader/phase-telemetry validation passed.
-- Three T1a Luna Max recovery-preparation workers were stopped without usable
-  reports and without source or Windows mutation. Measured recovery remains a
-  SOURCE GAP; the current source-owner packet is T1b.
+- Three T1a/T1b Luna Max recovery-preparation workers were stopped without
+  usable reports and without source or Windows mutation. A1 is RED; the T1
+  owner repair must land before disposable measurement or T2.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 - T12 Calendar gesture work is not accepted: two Luna Max attempts left

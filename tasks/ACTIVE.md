@@ -91,8 +91,9 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   T10a capability preflight completed as **SOURCE GAP** and is retained at
   `artifacts/final/T0/t10a-capability-preflight.md`; three T1a recovery review
   attempts produced no usable report and made no mutation. The next dispatch is
-  the bounded T1b source-owner packet after the pushed CalendarStore fix. The
-  calendar reconciliation receipt is at
+  the bounded T1 owner repair for the A1 RED findings after the pushed
+  CalendarStore fix. A1.4 truthfulness is pushed at `9539841`; A1.1–A1.3
+  still block recovery. The calendar reconciliation receipt is at
   `artifacts/final/T0/calendar-security-reconciliation.md`.
 
 ## Execution phases

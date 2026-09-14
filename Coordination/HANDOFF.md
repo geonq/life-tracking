@@ -84,6 +84,13 @@ evidence is still incomplete.
   CalendarStore merge bypass is fixed and pushed at `e07a0a4`; Astra Medium
   reviewed the two-file patch **GREEN**. The focused iPhone 17 simulator
   receipt is **96/96 with 0 failures**. Peer transport identity remains open.
+- T1/A1 Windows recovery review is recorded at
+  `artifacts/final/T0/t1-a1-review.md` and is **RED**. Astra found four
+  blocking recovery-boundary defects; no canonical Windows state was changed.
+- A1.4 is now a scoped **GREEN** subpacket at `9539841`: install/rollback
+  failure messages no longer claim an unverified stopped/disabled writer
+  state, and exact branch assertions cover the changed messages. A1.1–A1.3
+  remain RED; this does not authorize canonical recovery.
 - Mac Tax accessibility repair is committed at `66953af`: macOS exposes one
   direct `import-tax-pdf` button, platform-specific empty-state actions
   compile, and the exact artifact passed direct AX inspection and native picker
@@ -124,10 +131,10 @@ evidence is still incomplete.
   treated as current. Install and live Enable Banking readback remain
   uncertified; diagnostics and phase telemetry were tested only in a
   disposable copy, and the canonical transaction was not resumed or installed.
-- Three bounded T1a Luna Max recovery-preparation attempts were stopped after
-  producing no usable report. They made no source or Windows mutation.
-  Measured recovery remains a SOURCE GAP until a bounded disposable receipt
-  exists; the current source-owner packet is T1b.
+- Three bounded T1a/T1b Luna Max recovery-preparation attempts were stopped
+  after producing no usable report. They made no source or Windows mutation.
+  The T1/A1 review is RED with four source blockers; the current source-owner
+  packet must repair those boundaries before any disposable measurement.
 - Astra rejected an uncommitted runtime optimization for a mutating
   reconcile-only path and TOCTOU gap; it is preserved at
   `/private/tmp/lifeos-red-runtime-optimization-20260913.patch` and excluded.
@@ -159,8 +166,8 @@ Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
 `070b7db`. The bounded T0 CalendarStore security reconciliation is pushed at
-`e07a0a4`; current next step is the smaller T1a source review, followed by a
-  separately bounded disposable recovery measurement;
+`e07a0a4`; current next step is the T1 owner repair for the A1 RED findings,
+  followed by a separately bounded disposable recovery measurement;
 conforming T11 source remains subject to runtime verification. The latest
 committed Usage tranche is `e8bbefa`. Calendar gesture work is not accepted and
 must use the smaller T12 packets in `tasks/final-execution-plan.md`. The two
