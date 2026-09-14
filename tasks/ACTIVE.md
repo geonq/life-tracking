@@ -24,8 +24,9 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint: `16e0855` (bounded CalendarStore
-  reads before decode), pushed to `origin/main`; it includes the
+- Current application source checkpoint: `f0d59a5` (synced compensating
+  calendar undo), on local `main`; `origin/main` remains at the pushed D1
+  checkpoint `16e0855` until the approved remote push. It includes the
   security reconciliation and production dependency audit updates. The
   feature branch push and merge succeeded; GitHub CLI reports PR #1 merged
   into `main`. The deployable Windows candidate is the verified `6baa1f3`
@@ -69,7 +70,8 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   stops at actool because no iphonesimulator runtime is available. T12d,
   simulator execution, physical gestures, and widgets remain open. D1 at
   `16e0855` bounds local store reads before decode and is Astra-reviewed
-  MERGE; D2 coordinator reconciliation is the next source packet.
+  MERGE; D2a/D2b at `f0d59a5` add normalized revision ceilings and synced
+  one-item undo compensation, with an Astra Medium **MERGE**. D3 is next.
   Bounded recovery diagnostics are committed at `14a3b7f`; strict progress
   validation is committed at `4e14e38`; strict journal observation is committed
   at `9e43dd7`. Bounded phase telemetry is committed at `0a8d5b6`; the current
@@ -104,8 +106,9 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   `artifacts/final/T0/t10a-capability-preflight.md`; three T1a recovery review
   attempts produced no usable report and made no mutation. T12c is now source
   reviewed and pushed; the bounded T12d D1 store-bound repair is now pushed at
-  `16e0855`; the next calendar dispatch is D2 revision/undo reconciliation,
-  followed by transient occurrence and DST series mutation. The T1 owner
+  `16e0855`; D2 revision/undo reconciliation is complete locally at `f0d59a5`;
+  the next calendar dispatch is transient occurrence and DST series mutation.
+  The T1 owner
   repair for A1 RED findings remains required before
   canonical recovery. A1.4 truthfulness is pushed at `9539841`; A1.1–A1.3
   still block recovery. The calendar reconciliation receipt is at

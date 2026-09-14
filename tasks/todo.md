@@ -1,8 +1,8 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-14 Europe/Berlin. Release: **NO-GO**. Main is pushed at
-`16e0855`; T12c has an Astra Medium source **MERGE**, D1 has an Astra Medium
-source **MERGE**, and the serialized Mac build-for-testing passes.
+Updated 2026-09-14 Europe/Berlin. Release: **NO-GO**. Local `main` is at
+`f0d59a5`; `origin/main` remains at pushed `16e0855` pending the approved
+remote push. T12c and D1/D2 have Astra Medium source **MERGE** reviews.
 
 ## Ordered work
 
@@ -13,7 +13,8 @@ source **MERGE**, and the serialized Mac build-for-testing passes.
 2. Continue serialized native runtime captures. The Usage visual slice is
    checked in at `33c74c9`, Fitness Recovery at `03a78a1`, and Finance
    responsive hierarchy at `fd8ccfb`, each with scoped evidence. T12c now
-   covers Mac calendar scroll/pinch source wiring; finish T12d D2–D5
+   covers Mac calendar scroll/pinch source wiring; D2 revision/undo is locally
+   complete at `f0d59a5`; finish T12d D3–D5
    reconciliation,
    then continue the remaining Finance/live, motion, and widget evidence.
 3. Use the bounded recovery diagnostics and strict journal observation in a
@@ -57,8 +58,10 @@ tested, while a targeted Astra re-review was blocked by worker file access and
 is not claimed as a sign-off. T12c is pushed at `fc1b3c1`; its frontend parses
 pass, the Mac build-for-testing exits 0, and the iOS lane is blocked at actool
 by the missing simulator runtime.
-The D1 store-bound repair is pushed at `16e0855`; exact-limit, overflow, and
-replacement-preservation regressions pass on the Mac build lane. These results
+The D1 store-bound repair is pushed at `16e0855`; D2a/D2b is locally merged at
+`f0d59a5` with normalized revision ceilings and synced one-item undo
+compensation. Mac build-for-testing passes; the latest iOS lane is blocked at
+actool by the missing simulator runtime. These results
 do not prove live, runtime, device, visual, or operational
 completion.
 

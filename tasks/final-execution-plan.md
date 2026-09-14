@@ -1,8 +1,10 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-14; current pushed main checkpoint is **16e0855** and the latest reviewed source checkpoint is **16e0855**. Approved planning artifact; documentation only. Windows service facts below are the last recorded read-only observation. Release remains NO-GO.
+Planning baseline: 2026-09-14; local `main` is **f0d59a5**, pushed remote is
+**16e0855** pending approval, and D2a/D2b is Astra Medium **MERGE**. Approved
+documentation-only plan; Windows facts are read-only. Release remains NO-GO.
 
 ## 1. Current truth and explicit gates
-- **NO-GO.** The current main checkpoint is `16e0855`, including the reviewed
+- **NO-GO.** The current local checkpoint is `f0d59a5`, including the reviewed
   dashboard refinement at `0d094ee`, calendar zoom safety, the T12b calendar
   viewport/midnight correction, T13a bounded widget snapshot I/O, visual
   foundation at `5b90539`, and the clean production dependency audit.
@@ -151,13 +153,11 @@ Planning baseline: 2026-09-14; current pushed main checkpoint is **16e0855** and
 - Final future operator verifies local branch/index/base, origin, PR#1 head/base/diff/CI/comments and exact candidate/signed/deployed provenance. Documentation-only commits may follow code only with recorded source-tree equality. Draft/open/mergeable status remains historical until rechecked; no Windows/GitHub access here.
 - Release requires operational recovery/restart/backup/restore, live bank/import/health proof, permitted physical Mac+iPhone/widgets, every matrix, final security review, registry and geonq product acceptance. geonq has authorized merging this personal checkpoint; merge is an integration action and does not close G6 or convert NO-GO into release acceptance. Resolve review comments before merge when present, then retain NO-GO/blocked-external leaves until the release gates pass.
 
-**Immediate next dispatch:** bounded T12d D2 coordinator security/reconciliation
-  repair after reviewed T12c `CalendarView.swift` pinch wiring and merged D1 bounded
-  `CalendarStore` reads at `16e0855`. T10a remains a source-gap
+**Immediate next dispatch:** bounded T12d D3 transient occurrence/DST mutation repair after T12c/D1 and local D2a/D2b at `f0d59a5`. T10a remains a source-gap
   receipt, and the T1 owner repair for A1 RED findings must precede canonical recovery mutation. Remaining
   blockers are live provider data, Personal Team capability/signing/devices,
   Zepp fidelity, vault/writer/plugin decisions, runtime/visual/security/registry
-  and final operator evidence. This review marks no item complete.
+  and final operator evidence.
 
 ## 10. Dispatch contract replacing broad one-worker tranches
 - Sections 3 paths are exclusive OWNER inventories, not permission to dispatch an entire row. Every invocation gets one packet below, exact expanded paths, current symbol/line anchors from `rg -n`, its own focused tests, and at most one behavior change. NEW paths are proposals; verify absence before creating. No line numbers are invented here.

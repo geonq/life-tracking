@@ -11,10 +11,11 @@ evidence is still incomplete.
 
 ## Current source checkpoint
 
-- Application source checkpoint: `16e0855 Bound calendar store reads before
-  decode`;
-  it is pushed to `origin/main`, with PR #1 merged and no open PRs. The
-  reviewed source includes the dashboard, calendar, usage, finance,
+- Application source checkpoint: `f0d59a5 Make calendar undo a synced
+  compensating mutation`; local `main` is ahead of `origin/main` by the
+  reviewed D2a/D2b source commits plus this checkpoint. `16e0855` remains the
+  pushed remote checkpoint; PR #1 is merged and no open PRs are recorded.
+  The reviewed source includes the dashboard, calendar, usage, finance,
   backend-security, and installer slices.
   Windows recovery-instrumentation checkpoint remains `0a8d5b6`, and the
   historical deployable candidate remains `6baa1f3`.
@@ -144,14 +145,6 @@ evidence is still incomplete.
 - Astra rejected an uncommitted runtime optimization for a mutating
   reconcile-only path and TOCTOU gap; it is preserved at
   `/private/tmp/lifeos-red-runtime-optimization-20260913.patch` and excluded.
-- The calendar Astra review found and the source fixed one P2 compatibility
-  issue: a valid SF Symbol name unavailable on the receiving OS must survive
-  decode and render through a local fallback. The targeted Astra re-review was
-  blocked by that worker's inability to read the files, so it is not recorded
-  as a green sign-off; local focused tests and the macOS build pass.
-- The first Finance worker patch was rejected before commit for a duplicated
-  hero hierarchy and a zero-width responsive preference loop; the parent
-  replaced it with the viewport-derived implementation above.
 - Runtime route transitions, whole-app visual captures at all review widths,
   calendar gestures, widgets, physical iPhone, signing, and Shortcuts.
 - Zepp workout fidelity/sync and the Obsidian Canvas mind map; see issue #2.
@@ -173,8 +166,13 @@ evidence is still incomplete.
   reaches changed Swift parsing/compilation but stops at asset compilation
   because no iphonesimulator runtime is available. T12d D1 is pushed at
   `16e0855` with bounded CalendarStore reads and exact-limit/overflow/store-
-  preservation regressions. D2–D5, physical gesture, simulator execution, and
-  widget evidence remain open.
+  preservation regressions. D2a/D2b at `f0d59a5` add normalized revision
+  ceilings and atomic one-item undo compensation with stale-target rejection,
+  create tombstones, unrelated-record preservation, and peer broadcast. Astra
+  Medium reviewed the source **MERGE**; the serialized Mac build-for-testing
+  passes. Generic iOS compilation reached the target, but actool/runtime
+  verification is blocked by the unavailable simulator runtime and full disk.
+  D3–D5, physical gesture, simulator execution, and widget evidence remain open.
 
 ## Boundaries and next action
 
@@ -182,12 +180,13 @@ Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
 `070b7db`. The bounded T0 CalendarStore security reconciliation is pushed at
-`e07a0a4`; current source is `16e0855` with the dashboard refinement, T11a
+`e07a0a4`; current local source is `f0d59a5` with the dashboard refinement, T11a
   visual foundation, T12a zoom safety, T12b timeline rollover/viewport pass,
   T12c Mac header pinch/settle wiring, and T13a widget snapshot boundary
   integrated. The next source step is the bounded T12d calendar
-  reconciliation/security pass; D1 bounded local reads are complete and D2
-  coordinator reconciliation is the next source packet;
+  reconciliation/security pass; D1 bounded local reads and D2 revision/undo
+  reconciliation are complete; D3 transient occurrence/DST mutation is the
+  next source packet;
   the T1 owner repair for the A1 RED findings remains required before canonical
   recovery mutation. Conforming source remains subject to runtime verification.
   The latest
