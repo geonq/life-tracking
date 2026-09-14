@@ -103,6 +103,43 @@ function unavailableClipper() {
   };
 }
 
+function observedClipper() {
+  const observedAt = new Date(Date.now() - 30_000).toISOString();
+  const provenance = {
+    source: 'clipper-connector-test',
+    observedAt,
+    freshness: 'fresh' as const,
+    quality: 'observed' as const,
+    connectorState: 'healthy' as const,
+  };
+  const metrics = {
+    views: { availability: 'observed' as const, value: 42, provenance },
+    subscribers: { availability: 'observed' as const, value: 7, provenance },
+    revenue: { availability: 'observed' as const, amountCents: 42, currency: 'EUR' as const, provenance },
+  };
+  return {
+    schemaVersion: 1 as const,
+    availability: 'observed' as const,
+    generatedAt: observedAt,
+    currency: 'EUR' as const,
+    metrics,
+    accounts: [],
+    trends: [{ at: observedAt, metrics }],
+    breakdowns: [],
+    provenance,
+  };
+}
+
+function expectObservedClipper(host: HTMLDivElement) {
+  expect(host.querySelectorAll('.source-summary')).toHaveLength(1);
+  const values = Array.from(host.querySelectorAll('.metric-cell > strong'))
+    .map(element => element.textContent ?? '');
+  expect(values).toHaveLength(3);
+  expect(values[0]).toContain('42');
+  expect(values[1]).toContain('7');
+  expect(values[2]).toMatch(/0[,.]42/);
+}
+
 function navigationButton(host: HTMLDivElement, label: string): HTMLButtonElement {
   const button = Array.from(host.querySelectorAll<HTMLButtonElement>('.nav-button'))
     .find(candidate => candidate.textContent?.includes(label));
@@ -197,6 +234,37 @@ describe('dashboard live source states', () => {
     expect(host.textContent).toContain('42%');
     expect(host.textContent).toContain('Clipper');
     expect(host.textContent).not.toMatch(removedProductPattern);
+  });
+
+  it('keeps the Clipper source summary singular across a stable route change', async () => {
+    const fetchMock = vi.fn((input: string) => {
+      if (input === '/api/usage') return Promise.resolve(response(testUsage()));
+      if (input === '/api/codex/live') return Promise.resolve(response(testCodex()));
+      if (input === '/api/finance/summary') return Promise.resolve(response(unavailableFinance()));
+      return Promise.resolve(response(observedClipper()));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    host = document.createElement('div');
+    document.body.append(host);
+
+    await act(async () => {
+      root = createRoot(host);
+      root.render(<App />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => { navigationButton(host, 'Clipper').click(); });
+    expect(host.querySelector<HTMLButtonElement>('[aria-current="page"]')?.textContent).toContain('Clipper');
+    expectObservedClipper(host);
+
+    await act(async () => { navigationButton(host, 'Overview').click(); });
+    expect(host.querySelector<HTMLButtonElement>('[aria-current="page"]')?.textContent).toContain('Overview');
+
+    await act(async () => { navigationButton(host, 'Clipper').click(); });
+    expect(host.querySelector<HTMLButtonElement>('[aria-current="page"]')?.textContent).toContain('Clipper');
+    expectObservedClipper(host);
   });
 
   it('rejects malformed live data without blanking valid usage', async () => {

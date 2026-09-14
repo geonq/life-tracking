@@ -1,10 +1,11 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-14; inspected source **e8bbefa**, now merged into mainline **c09c3b7**. Approved planning artifact; documentation only. Windows service facts below are the last recorded read-only observation. Release remains NO-GO.
+Planning baseline: 2026-09-14; current pushed main checkpoint is **ca196f1** and the latest reviewed source checkpoint is **5b90539**. Approved planning artifact; documentation only. Windows service facts below are the last recorded read-only observation. Release remains NO-GO.
 
 ## 1. Current truth and explicit gates
-- **NO-GO.** The source checkpoint is `e8bbefa`; it is merged into mainline at
-  `c09c3b7`. GitHub CLI reports PR #1 MERGED into `main`; no source acceptance
-  or release readiness is implied. A serialized Mac Usage build succeeded; the
+- **NO-GO.** The current main checkpoint is `ca196f1`, including the reviewed
+  visual foundation at `5b90539` and the clean production dependency audit.
+  GitHub CLI reports PR #1 MERGED into `main` and no open PR; no source
+  acceptance or release readiness is implied. A serialized Mac Usage build succeeded; the
   focused XCTest command compiled but the sandbox blocked `testmanagerd` before
   assertions.
   A serialized Mac shell build passed; iOS lanes stop at asset
@@ -18,10 +19,12 @@ Planning baseline: 2026-09-14; inspected source **e8bbefa**, now merged into mai
 - Rejected recovery optimization and Mac shell candidate remain excluded. Two security workers closed without reports. Calendar unavailable-symbol fix has local tests, but its blocked targeted Astra re-review remains open. Live banking, physical signing/widgets, whole-app visuals/runtime, Zepp fidelity, Canvas and final operational security remain unverified.
 - Review inputs: Coordination/HANDOFF.md, Coordination/DECISIONS.md, Coordination/PHASE_STATUS.md, tasks/ACTIVE.md, this file, tasks/design.md, docs/LIFEOS_ACCEPTANCE_REGISTRY.md and relevant referenced source filenames only. Issue#2 architecture below is inherited from these inputs; its current remote body/status was not fetched.
 - Current user instructions/DECISIONS govern authority/security; compatible tasks/design.md governs visuals. Both current documents already specify Calendar40/64/120. Keep SF Pro, green estimates, orange calories and native Home NavigationStack.
-- Shared visual foundation `628d4b3` is Astra Medium GREEN after an exact
-  serialized Mac build and opened Home/Calendar captures. It establishes the
-  current compact token/card baseline; route-by-route visual and interaction
-  evidence remains required.
+- Shared visual foundation `5b90539` is Astra Medium GREEN after an exact
+  serialized Mac build. It establishes the compact token/card baseline,
+  composed secondary-control contrast checks, and settled chart/ring geometry;
+  route-by-route visual and interaction evidence remains required. The iOS
+  lane is currently blocked at asset compilation by the missing simulator
+  runtime.
 - Shell refinement `39f2c21` is Astra Medium GREEN after an exact serialized
   Mac build and opened Home/Usage/Calendar captures. It is a bounded shell
   checkpoint; collapsed/compact reversal, iPhone tab rendering, and the full
@@ -135,7 +138,12 @@ Planning baseline: 2026-09-14; inspected source **e8bbefa**, now merged into mai
 - Final future operator verifies local branch/index/base, origin, PR#1 head/base/diff/CI/comments and exact candidate/signed/deployed provenance. Documentation-only commits may follow code only with recorded source-tree equality. Draft/open/mergeable status remains historical until rechecked; no Windows/GitHub access here.
 - Release requires operational recovery/restart/backup/restore, live bank/import/health proof, permitted physical Mac+iPhone/widgets, every matrix, final security review, registry and geonq product acceptance. geonq has authorized merging this personal checkpoint; merge is an integration action and does not close G6 or convert NO-GO into release acceptance. Resolve review comments before merge when present, then retain NO-GO/blocked-external leaves until the release gates pass.
 
-**Immediate next dispatch:** T0 baseline/contracts/bounded security reconciliation, then T10a capability feasibility and T1 measured recovery preparation. Remaining blockers: canonical active recovery, consent/source samples, Personal Team capability/signing/devices, Zepp fidelity, vault/writer/plugin decisions, runtime/visual/security/registry and branch/PR evidence. This review marks no item complete.
+**Immediate next dispatch:** bounded T11b shell/Usage/Clipper surface work after the
+  reviewed T11a foundation. T10a remains a source-gap receipt, and the T1 owner
+  repair for A1 RED findings must precede canonical recovery mutation. Remaining
+  blockers are live provider data, Personal Team capability/signing/devices,
+  Zepp fidelity, vault/writer/plugin decisions, runtime/visual/security/registry
+  and final operator evidence. This review marks no item complete.
 
 ## 10. Dispatch contract replacing broad one-worker tranches
 - Sections 3 paths are exclusive OWNER inventories, not permission to dispatch an entire row. Every invocation gets one packet below, exact expanded paths, current symbol/line anchors from `rg -n`, its own focused tests, and at most one behavior change. NEW paths are proposals; verify absence before creating. No line numbers are invented here.

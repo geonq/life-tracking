@@ -84,8 +84,9 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   The causal replacement is the reviewed and pushed `39f2c21` shell refinement.
 - Claude's supplied security findings are reconciled in
   `artifacts/final/T0/security-findings.md`. The parent-led matrix records
-  source-fixed, partial, open, and unverified states; it does not authorize
-  canonical Windows mutation or claim a final penetration test. Do not start
+  source-fixed, partial, open, and unverified states; the production
+  dependency audit is clean, while dev/hosted proof is separate. It does not
+  authorize canonical Windows mutation or claim a final penetration test. Do not start
   another broad audit; source fixes must use a completed, bounded owner packet.
 - T0 requirements mapping is generated from the validated frozen registry.
   T10a capability preflight completed as **SOURCE GAP** and is retained at

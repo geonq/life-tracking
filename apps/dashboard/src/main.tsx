@@ -115,15 +115,13 @@ const iconPaths: Record<IconName, ReactNode> = {
   ),
   clipper: (
     <>
-      <path d="M3 17.5 8.2 12l3.6 3.1L21 6" />
-      <path d="M16.5 6H21v4.5" />
-      <path d="M3 20.5h18" />
+      <rect x="4" y="4.5" width="12.5" height="12.5" rx="2" />
+      <path d="M7.5 7.5H20v12H7.5" />
     </>
   ),
   health: (
     <>
-      <path d="M20.8 8.7c0 5.2-8.8 11-8.8 11s-8.8-5.8-8.8-11A4.7 4.7 0 0 1 12 6.2a4.7 4.7 0 0 1 8.8 2.5Z" />
-      <path d="M8.2 12h2l1.2-2.3 1.5 4.6 1.2-2.3h2" />
+      <path d="M2.5 12h4l2.1-5.1 3.2 10.2 2.1-5.1h7.6" />
     </>
   ),
   finance: (
@@ -348,7 +346,6 @@ function App() {
           <span className="brand-mark"><Icon name="overview" size={16} /></span>
           <span className="brand-name">LifeOS</span>
         </div>
-        <p className="brand-caption">Private workspace</p>
         <nav className="primary-nav" aria-label="Primary navigation">
           {NAV_ITEMS.map(item => (
             <button
@@ -800,7 +797,6 @@ function ClipperMetric({
     <div className="metric-cell">
       <span>{label}</span>
       <strong>{value}</strong>
-      <small>Observed</small>
     </div>
   );
 }

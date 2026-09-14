@@ -11,13 +11,12 @@ evidence is still incomplete.
 
 ## Current source checkpoint
 
-- Application source checkpoint: `e07a0a4 Harden calendar remote merge boundary`
-  layered over `e8bbefa Refine compact usage presentation and chart contract`;
-  Windows recovery-instrumentation checkpoint: `0a8d5b6`;
-  historical deployable code candidate: `6baa1f3`. Mainline contains
-  implementation merge `c09c3b7` plus subsequent documentation syncs; later
-  documentation-only commits may advance main without changing the application
-  source. GitHub CLI reports PR #1 merged into `main` at `c09c3b7`.
+- Application source checkpoint: `5b90539 Refine shared visual foundation and
+  settle chart geometry`; status/handoff checkpoint: `ca196f1`; both are
+  pushed to `origin/main`. The reviewed source includes the earlier calendar,
+  usage, finance, backend-security, and installer slices; PR #1 is merged.
+  Windows recovery-instrumentation checkpoint remains `0a8d5b6`, and the
+  historical deployable candidate remains `6baa1f3`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
@@ -155,8 +154,8 @@ evidence is still incomplete.
   finding-by-finding in `artifacts/final/T0/security-findings.md`. Most API,
   parsing, atomic-write, and secret-comparison findings are fixed at source
   level; peer transport identity, tax/deployment proof, regex fuzzing,
-  cross-process history locking, dependency audit, and deployed evidence
-  remain open or partial. No broad worker report was received, so this matrix
+  cross-process history locking, and deployed evidence remain open or partial.
+  The production dependency audit is clean; dev/hosted proof is separate. No broad worker report was received, so this matrix
   is parent-led source evidence rather than an Astra release sign-off.
 - Two T12 Calendar Luna Max attempts (`01a09cc4-6798-7423-a649-222b9d65af3e`
   and `01a09cd9-123b-70f0-9da0-872586cfaaf1`) were stopped without a verified
@@ -169,9 +168,11 @@ Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
 `070b7db`. The bounded T0 CalendarStore security reconciliation is pushed at
-`e07a0a4`; current next step is the T1 owner repair for the A1 RED findings,
-  followed by a separately bounded disposable recovery measurement;
-conforming T11 source remains subject to runtime verification. The latest
+`e07a0a4`; current source is `ca196f1` with the T11a visual foundation
+  integrated. The next source step is a bounded T11b web/native surface pass;
+  the T1 owner repair for the A1 RED findings remains required before canonical
+  recovery mutation. Conforming source remains subject to runtime verification.
+  The latest
 committed Usage tranche is `e8bbefa`. Calendar gesture work is not accepted and
 must use the smaller T12 packets in `tasks/final-execution-plan.md`. The two
 broad security workers returned no report, so any further reconciliation must
