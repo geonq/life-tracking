@@ -7,7 +7,9 @@ import SwiftUI
 /// `View.lifeOSTypography(_:)`, whose modifier owns the `@ScaledMetric`
 /// property and applies the role's system font in the view's environment.
 public enum LifeOSTypography {
-    /// A semantic role with a custom base size and a Dynamic Type anchor.
+    /// A semantic role with an authored base size and a Dynamic Type anchor.
+    /// Rendering is always the native Apple system font; this facade has no
+    /// custom-family or rounded-design path.
     ///
     /// Base sizes are the Large/default content-size values from `design.md`.
     /// The anchors are deliberately the closest Apple text styles so the
@@ -79,10 +81,8 @@ public enum LifeOSTypography {
         public var tracking: CGFloat {
             switch self {
             case .pageTitle: -0.3
-            case .sectionTitle: -0.2
-            case .metric: -0.4
-            case .metricCompact: -0.3
-            case .cardTitle, .body, .label, .metadata, .inlineMonitoringValue, .button: 0
+            case .sectionTitle, .metric, .metricCompact,
+                 .cardTitle, .body, .label, .metadata, .inlineMonitoringValue, .button: 0
             }
         }
 

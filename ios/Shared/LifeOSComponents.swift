@@ -190,8 +190,8 @@ public struct LifeOSIconButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .symbolRenderingMode(.monochrome)
-                .font(.system(size: LifeOSTokens.Icon.glyph, weight: .medium, design: .default))
-                .frame(width: LifeOSTokens.Icon.box, height: LifeOSTokens.Icon.box)
+                .font(.system(size: LifeOSIconContext.toolbar.glyph, weight: .medium, design: .default))
+                .frame(width: LifeOSIconContext.toolbar.box, height: LifeOSIconContext.toolbar.box)
         }
         .buttonStyle(
             LifeOSIconButtonStyle(
@@ -792,9 +792,8 @@ public enum LifeOSStatusTone: String, CaseIterable, Sendable {
         }
     }
 
-    fileprivate var background: Color {
-        indicatorForeground.opacity(self == .neutral ? 0.08 : 0.14)
-    }
+    // Status is intentionally a dot plus text. Keep the old tone enum for
+    // caller compatibility, but do not expose a tinted resting pill fill.
 }
 
 public struct LifeOSStatusPill: View {
@@ -825,9 +824,7 @@ public struct LifeOSStatusPill: View {
                     .foregroundStyle(tone.indicatorForeground)
             }
             Text(label)
-                .lifeOSTypography(.label)
-                .tracking(0.8)
-                .textCase(.uppercase)
+                .lifeOSTypography(.metadata)
         }
         .foregroundStyle(tone.foreground)
         .accessibilityElement(children: .combine)
@@ -1079,7 +1076,7 @@ public struct LifeOSStatusRow: View {
         } else {
             Image(systemName: state.iconName)
                 .symbolRenderingMode(.monochrome)
-                .font(.system(size: 15, weight: .medium, design: .default))
+                .font(.system(size: 14, weight: .medium, design: .default))
                 .foregroundStyle(state.tone.indicatorForeground)
                 .frame(width: 20, height: 20)
         }

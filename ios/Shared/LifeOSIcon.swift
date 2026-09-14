@@ -58,12 +58,11 @@ public enum LifeOSIconName: Sendable {
     /// centralized prevents route-specific weight and glyph drift.
     public var systemImageName: String {
         switch self {
-        // `overview` is the compact product mark used by the primary shell.
-        // Keep the legacy `.home` case below for older widget/deep-link callers.
-        case .overview: "square.grid.2x2"
-        case .home: "house"
-        case .usage: "chart.bar.xaxis"
-        case .clipper: "chart.xyaxis.line"
+        // Home and its older `.overview` name share the same restrained grid
+        // symbol so navigation never changes meaning by caller.
+        case .overview, .home: "square.grid.2x2"
+        case .usage: "chart.xyaxis.line"
+        case .clipper: "rectangle.stack"
         case .health: "waveform.path.ecg"
         case .finance: "creditcard"
         case .bankConnections: "link"
@@ -210,14 +209,15 @@ public enum LifeOSIconContext: Sendable {
 #if os(macOS)
         switch self {
         case .standard: LifeOSTokens.Icon.glyph
-        case .navigation, .card, .toolbar: 16
+        case .navigation: 15
+        case .card, .toolbar: 14
         case .disclosure: 12
         }
 #else
         switch self {
         case .standard: LifeOSTokens.Icon.glyph
-        case .navigation, .toolbar: 20
-        case .card: 18
+        case .navigation: 18
+        case .card, .toolbar: 17
         case .disclosure: 14
         }
 #endif
