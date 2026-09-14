@@ -1,9 +1,10 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-14; current pushed main checkpoint is **ca196f1** and the latest reviewed source checkpoint is **5b90539**. Approved planning artifact; documentation only. Windows service facts below are the last recorded read-only observation. Release remains NO-GO.
+Planning baseline: 2026-09-14; current pushed main checkpoint is **80d4f5d** and the latest reviewed source checkpoint is **80d4f5d**. Approved planning artifact; documentation only. Windows service facts below are the last recorded read-only observation. Release remains NO-GO.
 
 ## 1. Current truth and explicit gates
-- **NO-GO.** The current main checkpoint is `ca196f1`, including the reviewed
-  visual foundation at `5b90539` and the clean production dependency audit.
+- **NO-GO.** The current main checkpoint is `80d4f5d`, including the reviewed
+  dashboard refinement at `0d094ee`, calendar zoom safety, visual foundation at
+  `5b90539`, and the clean production dependency audit.
   GitHub CLI reports PR #1 MERGED into `main` and no open PR; no source
   acceptance or release readiness is implied. A serialized Mac Usage build succeeded; the
   focused XCTest command compiled but the sandbox blocked `testmanagerd` before
@@ -33,9 +34,14 @@ Planning baseline: 2026-09-14; current pushed main checkpoint is **ca196f1** and
   focused review/fix cycles, a serialized Mac build, and exact artifact
   inspection. It preserves empty-history range selection and connector
   recovery states, and implements the measured 224/256pt chart contract.
-- Two T12 Calendar Luna Max attempts were stopped without a verified build or
-  handoff; their incomplete patches were discarded. Calendar gesture work is
-  still open and must be dispatched again with a smaller exact write set.
+- Dashboard refinement `0d094ee` is Astra Medium GREEN: compact system
+  typography, semantic icons, neutral navigation selection, opacity-only route
+  motion, 5/5 tests, and a production build. Browser runtime capture remains
+  unavailable.
+- T12a calendar zoom normalization `80d4f5d` is Astra Medium GREEN: density,
+  baseline offset/focal inputs, and extreme finite viewport math are bounded;
+  Mac build and iOS build-for-testing pass. Simulator execution and T12b–T12d
+  UI/gesture/runtime evidence remain open.
 - T0 must reconcile registry RM-01 hero morph, RM-02 ring reveal/halo, RM-03 chart draw, related atomic/non-overlap metadata and BF coaching language with current design. Preserve original hash, reviewed replacement contracts, rationale, amendment/refreeze history and unrelated thresholds; never silently accept obsolete behavior, prune scope or implement generic AI.
 - All ACTIVE phases1–9 and registry leaves remain scope: Finance/ledger, Tax/Documents, Business, Investments, Reminders Tasks/Grocery/Shopping, shell/settings/reports, bounded full Fitness and hardware; issue#2 Canvas adds explicit completion scope. Honest unavailable states do not erase unfinished functionality.
 - Gates: G0 reconciled contracts/evidence; G1 successful canonical Windows recovery/protected gateway; G2 live bank/import/health provenance; G3 permitted signed Mac+iPhone/widgets/App Groups; G4 full visual/runtime/performance matrix; G5 Canvas decisions/round trip; G6 final security, registry, branch/PR parity and geonq acceptance. All remain open here.
@@ -138,9 +144,9 @@ Planning baseline: 2026-09-14; current pushed main checkpoint is **ca196f1** and
 - Final future operator verifies local branch/index/base, origin, PR#1 head/base/diff/CI/comments and exact candidate/signed/deployed provenance. Documentation-only commits may follow code only with recorded source-tree equality. Draft/open/mergeable status remains historical until rechecked; no Windows/GitHub access here.
 - Release requires operational recovery/restart/backup/restore, live bank/import/health proof, permitted physical Mac+iPhone/widgets, every matrix, final security review, registry and geonq product acceptance. geonq has authorized merging this personal checkpoint; merge is an integration action and does not close G6 or convert NO-GO into release acceptance. Resolve review comments before merge when present, then retain NO-GO/blocked-external leaves until the release gates pass.
 
-**Immediate next dispatch:** bounded T11b shell/Usage/Clipper surface work after the
-  reviewed T11a foundation. T10a remains a source-gap receipt, and the T1 owner
-  repair for A1 RED findings must precede canonical recovery mutation. Remaining
+**Immediate next dispatch:** bounded T12b `CalendarViews.swift` scroll-endpoint and
+  today-marker pass after the reviewed T12a geometry. T10a remains a source-gap
+  receipt, and the T1 owner repair for A1 RED findings must precede canonical recovery mutation. Remaining
   blockers are live provider data, Personal Team capability/signing/devices,
   Zepp fidelity, vault/writer/plugin decisions, runtime/visual/security/registry
   and final operator evidence. This review marks no item complete.

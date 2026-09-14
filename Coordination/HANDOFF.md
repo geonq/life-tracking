@@ -11,10 +11,10 @@ evidence is still incomplete.
 
 ## Current source checkpoint
 
-- Application source checkpoint: `5b90539 Refine shared visual foundation and
-  settle chart geometry`; status/handoff checkpoint: `ca196f1`; both are
-  pushed to `origin/main`. The reviewed source includes the earlier calendar,
-  usage, finance, backend-security, and installer slices; PR #1 is merged.
+- Application source checkpoint: `80d4f5d Harden calendar zoom baseline bounds`;
+  it is pushed to `origin/main`, with PR #1 merged and no open PRs. The
+  reviewed source includes the dashboard, calendar, usage, finance,
+  backend-security, and installer slices.
   Windows recovery-instrumentation checkpoint remains `0a8d5b6`, and the
   historical deployable candidate remains `6baa1f3`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
@@ -103,6 +103,11 @@ evidence is still incomplete.
   serialized `LifeOSMac` build succeeded; Astra Medium reviewed the corrected
   diff **GREEN**. This is foundation evidence only; route-by-route visual,
   gesture, widget, phone, simulator, and physical acceptance remain open.
+- Dashboard presentation refinement is committed at `0d094ee`: compact system
+  typography, quieter semantic SVG icons, neutral navigation selection,
+  opacity-only route transition, and a Clipper round-trip regression. Astra
+  Medium reviewed it **GREEN**; dashboard typecheck, 5/5 tests, and production
+  build pass. Browser runtime capture was unavailable in this environment.
 - Mac shell refinement is committed at `39f2c21`: sidebar defaults/clamps,
   collapsed rail, toolbar/search geometry, selected navigation treatment, and
   iOS route animation ownership were reviewed by Astra Medium **GREEN**. The
@@ -157,10 +162,11 @@ evidence is still incomplete.
   cross-process history locking, and deployed evidence remain open or partial.
   The production dependency audit is clean; dev/hosted proof is separate. No broad worker report was received, so this matrix
   is parent-led source evidence rather than an Astra release sign-off.
-- Two T12 Calendar Luna Max attempts (`01a09cc4-6798-7423-a649-222b9d65af3e`
-  and `01a09cd9-123b-70f0-9da0-872586cfaaf1`) were stopped without a verified
-  build or runtime handoff. Their incomplete patch was archived locally and
-  discarded; no Calendar change from those attempts is in the branch.
+- T12a calendar zoom normalization is committed at `80d4f5d`: captured density,
+  offset, focal inputs, and extreme finite viewport math are bounded while
+  valid iPhone endpoint positions remain restorable. Astra Medium reviewed it
+  **GREEN**; serialized Mac build and iOS build-for-testing pass. Simulator
+  execution and T12b–T12d UI/gesture/runtime evidence remain open.
 
 ## Boundaries and next action
 
@@ -168,8 +174,9 @@ Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
 `070b7db`. The bounded T0 CalendarStore security reconciliation is pushed at
-`e07a0a4`; current source is `ca196f1` with the T11a visual foundation
-  integrated. The next source step is a bounded T11b web/native surface pass;
+`e07a0a4`; current source is `80d4f5d` with the dashboard refinement, T11a
+  visual foundation, and T12a zoom safety integrated. The next source step is
+  the bounded T12b CalendarViews scroll/marker pass;
   the T1 owner repair for the A1 RED findings remains required before canonical
   recovery mutation. Conforming source remains subject to runtime verification.
   The latest
