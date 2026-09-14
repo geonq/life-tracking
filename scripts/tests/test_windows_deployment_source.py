@@ -2008,7 +2008,7 @@ def test_completed_recovery_journal_uses_strict_progress_validation() -> None:
 
     assert (
         "Read-RecoveryProgress -Manifest $Manifest -Journal $journal -JournalUnits $journalUnits "
-        "-Strict:($Strict -or [string]$journal.phase -eq 'completed')"
+        "-Strict:($Strict -or [string]$journal.phase -eq 'completed') -ProgressLeaseHolder $ProgressLeaseHolder"
     ) in reader
     assert "journal.phase -notin @('artifacts', 'artifacts-complete', 'completed')" in reader
 
@@ -2016,6 +2016,334 @@ def test_completed_recovery_journal_uses_strict_progress_validation() -> None:
     stage_end = common.index('function Restore-LifeOSServiceSnapshots', stage_start)
     stage = common[stage_start:stage_end]
     assert "if ($journal.phase -ne 'artifacts-complete')" in stage
+
+
+def test_recovery_progress_uses_one_native_handle_lease_for_the_whole_operation() -> None:
+    common = read('Deployment.Common.ps1')
+    native = common.split('function Initialize-LifeOSRecoveryProgressNative', 1)[1].split(
+        'function New-RecoveryProgressLeaseHolder', 1
+    )[0]
+    reader = common.split('function Read-RecoveryProgress', 1)[1].split(
+        'function Append-RecoveryProgress', 1
+    )[0]
+    append = common.split('function Append-RecoveryProgress', 1)[1].split(
+        'function Assert-RecoveryProgressCapacity', 1
+    )[0]
+    restore = common.split('function Restore-ManifestArtifacts', 1)[1].split(
+        'function Copy-FileVerifiedAtomic', 1
+    )[0]
+    for token in ('NtCreateFile', 'RootDirectory', 'FileOpenReparsePoint', 'FileShareRead',
+                  'GetFileInformationByHandle', 'GetSecurityInfo', 'FileCreate', 'NumberOfLinks != 1'):
+        assert token in native
+    assert 'Get-RecoveryProgressLease -Manifest $Manifest -Journal $Journal -Holder $ProgressLeaseHolder' in reader
+    assert '[IO.File]::Open' not in reader
+    assert '[IO.File]::Open' not in append
+    assert 'Get-Acl' not in reader
+    assert 'Test-Path' not in reader
+    assert 'ProgressLeaseHolder $progressLeaseHolder' in restore
+    assert 'Close-RecoveryProgressLeaseHolder $progressLeaseHolder' in restore
+    assert 'Poison-RecoveryProgressLease' in append
+
+
+def test_recovery_progress_acl_bitmasks_use_integral_operands_for_windows_powershell_5_1() -> None:
+    common = read('Deployment.Common.ps1')
+    security = common.split('function Assert-RecoveryProgressLeaseSecurity', 1)[1].split(
+        'function New-RecoveryProgressLease', 1
+    )[0]
+    assert '([int]$descriptor.ControlFlags) -band [int]([Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)' in security
+    assert '([int]$ace.AceFlags) -band [int]([Security.AccessControl.AceFlags]::InheritOnly)' in security
+    assert security.count('$descriptor.ControlFlags -band [Security.AccessControl') == 0
+    assert security.count('$ace.AceFlags -band [Security.AccessControl') == 0
+
+
+def test_embedded_progress_csharp_compiles_in_fresh_windows_powershell_5_1() -> None:
+    executable = _find_windows_powershell_5_1()
+    if executable is None:
+        raise SkipTest("Windows PowerShell 5.1 is unavailable on this host")
+    common_path = str(DEPLOY / "Deployment.Common.ps1").replace("'", "''")
+    result = subprocess.run(
+        [
+            executable,
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            (
+                "$ErrorActionPreference = 'Stop'; "
+                f". '{common_path}'; Initialize-LifeOSRecoveryProgressNative; "
+                "if ($null -eq ('LifeOSRecoveryProgressNative' -as [type])) { throw 'native type missing' }"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, f"Embedded progress C# compilation failed:\n{result.stdout}\n{result.stderr}"
+
+
+def test_native_progress_suite_covers_handle_races_acl_and_tail_semantics() -> None:
+    native = read('tests/Deployment.Progress.Native.Tests.ps1')
+    for case in ('same-length replacement', 'ancestor replacement', 'reparse ancestor',
+                 'leaf reparse', 'hard-link leaf', 'unrestricted DACL in strict mode',
+                 'unrestricted DACL is outside the repair boundary',
+                 'management-only deficient ACL repair', 'first-frame recovery',
+                 'cached strict ACL revalidation', 'strict torn-tail read',
+                 'checkpoint shortfall before tail truncation', 'arbitrary corrupt tail',
+                 'non-strict torn-tail read', 'transaction binding mismatch',
+                 'mismatched journal collection before rebinding',
+                 'mismatched journal before creation', 'cached restoring-to-complete',
+                 'sequence beyond retained progress', 'retained length mismatch',
+                 'independently reopened', 'exact-limit same-phase resume',
+                 'exact-limit new record', 'missing-parent race',
+                 'generated quarantine', 'unusable quarantine stream cleanup',
+                 'ERROR_SHARING_VIOLATION', 'competing destination no-replace publication',
+                 'foreign artifact parent', 'generated quarantine CreateNew collision',
+                 'replaced destination leaf identity', 'regular-file substitution',
+                 'wrong destination bytes', 'wrong staged bytes', 'mutated expected state',
+                 'mutated expected post-state', 'mutated destination path', 'mutated unit index',
+                 'pending phase rejection', 'forged in-memory phase', 'complete phase rejection',
+                 'unknown phase rejection', 'malformed expected state', 'exact-bound',
+                 'one-byte-over-bound', 'absent destination source rejection',
+                 'absent staged source rejection'):
+        assert case in native
+    for token in ('New-Item -ItemType Junction', 'Get-Acl -LiteralPath', 'Set-Acl -LiteralPath',
+                  'FileMode]::Append', 'CreateNewOnly', 'Close-RecoveryProgressLeaseHolder'):
+        assert token in native
+
+
+def test_artifact_mutation_phase_one_is_typed_handle_bound_and_unwired() -> None:
+    common = read('Deployment.Common.ps1')
+    native_start = common.index('    private static void AssertLeaf')
+    native_end = common.index('function New-RecoveryProgressLeaseHolder', native_start)
+    native = common[native_start:native_end]
+    wrapper_start = common.index('function Test-RecoveryArtifactPathUnderRoot')
+    wrapper_end = common.index('function Assert-RecoveryProgressCapacity', wrapper_start)
+    wrappers = common[wrapper_start:wrapper_end]
+    restore_start = common.index('function Restore-ManifestArtifacts')
+    restore_end = common.index('function Copy-FileVerifiedAtomic', restore_start)
+    restore = common[restore_start:restore_end]
+
+    for token in (
+        'ArtifactDirectoryLease', 'ArtifactFileLease', 'ArtifactQuarantineLease',
+        'ArtifactCopyReceipt', 'ArtifactMutationContext', 'OpenArtifactRelative',
+        'FileCreate', 'FileOpenReparsePoint', 'FileShareRead', 'DeleteAccess',
+        'FileStreamInformation', 'MaxStreamInformationBytes', 'ArtifactCopyBufferBytes',
+        'Flush(true)', 'TransformBlock', 'NumberOfLinks', 'SetFileInformationByHandle',
+        'NtSetInformationFile', 'FileDispositionInformationEx', 'FileDispositionDelete',
+        'FileRenameInformation', 'ReplaceIfExists = 0', 'AssertArtifactNameBinding',
+        'AssertDefaultDataStreamOnly', 'ValidateExpectedState', 'AssertExpectedFileState',
+        'ExpectedPreState', 'ExpectedPostState', 'ProgressLease', 'ProgressLeafHandle',
+        'ProgressPath', 'ProgressLeafIdentity',
+    ):
+        assert token in native
+
+    wrapper_names = (
+        'Get-RecoveryArtifactMutationBinding', 'Assert-RecoveryArtifactMutationBinding',
+        'Assert-RecoveryArtifactCapability', 'New-RecoveryArtifactMutationContext',
+        'Close-RecoveryArtifactMutationContext', 'New-RecoveryArtifactQuarantineSibling',
+        'Open-RecoveryArtifactDestination', 'Open-RecoveryArtifactStaged',
+        'Copy-RecoveryArtifactToQuarantine', 'Remove-RecoveryArtifactDestination',
+        'Publish-RecoveryArtifactStaged',
+    )
+    for function_name in wrapper_names:
+        assert f'function {function_name}' in wrappers
+
+    for function_name in wrapper_names:
+        start = wrappers.index(f'function {function_name}')
+        next_function = wrappers.find('\nfunction ', start + 1)
+        body = wrappers[start:] if next_function < 0 else wrappers[start:next_function]
+        if function_name != 'Close-RecoveryArtifactMutationContext':
+            assert '[Parameter(Mandatory)][psobject]$Manifest' in body
+            assert '[Parameter(Mandatory)][psobject]$Journal' in body
+            assert '[Parameter(Mandatory)][int]$UnitIndex' in body
+        if function_name not in ('Get-RecoveryArtifactMutationBinding',
+                                 'New-RecoveryArtifactMutationContext',
+                                 'Close-RecoveryArtifactMutationContext'):
+            assert '[Parameter(Mandatory)][psobject]$Context' in body
+        if function_name in ('Assert-RecoveryArtifactMutationBinding',
+                             'Assert-RecoveryArtifactCapability',
+                             'New-RecoveryArtifactQuarantineSibling',
+                             'Open-RecoveryArtifactDestination',
+                             'Open-RecoveryArtifactStaged',
+                             'Copy-RecoveryArtifactToQuarantine',
+                             'Remove-RecoveryArtifactDestination',
+                             'Publish-RecoveryArtifactStaged'):
+            assert 'Assert-RecoveryArtifact' in body
+
+    for parameter in (
+        '[Parameter(Mandatory)][psobject]$Context',
+        '[Parameter(Mandatory)][psobject]$Manifest',
+        '[Parameter(Mandatory)][psobject]$Journal',
+        '[Parameter(Mandatory)][int]$UnitIndex',
+    ):
+        assert parameter in wrappers
+    assert '[Parameter(Mandatory)][psobject]$Unit' in wrappers
+    assert '[Parameter(Mandatory)][psobject]$ProgressLeaseHolder' in wrappers
+    assert 'CreateGeneratedQuarantineSibling($QuarantineNonce' in wrappers
+    assert 'Recovery artifact mutation requires parsed recovery progress.' in wrappers
+    assert "requires a journal-bound restoring unit" in wrappers
+    assert 'Assert-RecoveryArtifactStateGrammar' in wrappers
+    assert '\\z' in common
+    assert 'ValidatedUnitPhases[$UnitIndex] = $Phase' in common
+
+    for forbidden in ('Copy-Item', 'Remove-Item', 'Move-Item', '[IO.File]::',
+                      '[System.IO.File]::', 'QuarantinePath'):
+        assert forbidden not in wrappers
+
+    for phase_one_wrapper in (
+        'New-RecoveryArtifactMutationContext', 'New-RecoveryArtifactQuarantineSibling',
+        'Copy-RecoveryArtifactToQuarantine', 'Remove-RecoveryArtifactDestination',
+        'Publish-RecoveryArtifactStaged',
+    ):
+        assert phase_one_wrapper not in restore
+    assert 'Restore-Artifact $restore' in restore
+
+
+def test_recovery_phase_authority_is_immutable_and_artifact_validation_is_indexed() -> None:
+    common = read('Deployment.Common.ps1')
+    native_start = common.index('    private static void AssertLeaf')
+    native_end = common.index('function New-RecoveryProgressLeaseHolder', native_start)
+    native = common[native_start:native_end]
+    authority_start = native.index('public sealed class RecoveryPhaseAuthority')
+    authority_end = native.index('public sealed class ArtifactMutationContext', authority_start)
+    authority = native[authority_start:authority_end]
+
+    for token in (
+        'public sealed class RecoveryPhaseAuthority',
+        'private readonly RecoveryPhaseToken[] tokens;',
+        'private RecoveryPhaseAuthority(string[] committedPhases)',
+        'internal static RecoveryPhaseAuthority Create(string[] committedPhases)',
+        'tokens = new RecoveryPhaseToken[committedPhases.Length];',
+        'public long UpdateCount { get { return updateCount; } }',
+        'public RecoveryPhaseToken GetToken(int unitIndex)',
+        'internal RecoveryPhaseToken Advance(int unitIndex, string nextPhase)',
+        'tokens[unitIndex] = replacement;',
+        'public string GetPhase(int unitIndex)',
+        'public bool Matches(int unitIndex, string expectedPhase)',
+    ):
+        assert token in authority
+    assert 'public sealed class RecoveryPhaseToken' in native
+    assert 'public RecoveryPhaseAuthority(' not in authority
+    assert 'return RecoveryPhaseAuthority.Create(committedPhases);' in native
+    assert 'CommitRecoveryProgressFrame' in native
+    assert 'public static RecoveryPhaseToken AdvanceRecoveryPhaseAuthority' not in native
+    assert 'authority.Advance(unitIndex, nextPhase);' in native
+    assert 'progressLease.Stream.Flush(true);' in native
+    for parser_contract in (
+        'public sealed class RecoveryProgressRecord',
+        'private sealed class RecoveryProgressPayloadParser',
+        'new UTF8Encoding(false, true)',
+        'int fieldMask = 0',
+        'ParseRecoveryProgressRecord(payload',
+        'authority.ExpectedTransactionId',
+    ):
+        assert parser_contract in native
+    assert 'payloadText.IndexOf' not in native
+    assert 'sequenceNeedle' not in native
+    assert 'unitNeedle' not in native
+    assert 'phaseNeedle' not in native
+
+    holder_start = common.index('function Assert-RecoveryProgressLeaseHolderContext')
+    holder_end = common.index('function Get-RecoveryJournalUnits', holder_start)
+    holder = common[holder_start:holder_end]
+    binding_start = common.index('function Get-RecoveryArtifactMutationBinding')
+    binding_end = common.index('function Assert-RecoveryArtifactMutationBinding', binding_start)
+    binding = common[binding_start:binding_end]
+
+    for token in (
+        'if ($UnitIndex -ge 0)',
+        '$Holder.IndexedUnitValidationCount = [long]$Holder.IndexedUnitValidationCount + 1',
+        '$unit = Get-RecoveryProgressUnit -Units $ownedUnits -UnitIndex $UnitIndex',
+        '$authorityPhase = [string]$Holder.PhaseAuthority.GetPhase($UnitIndex)',
+        '-not [object]::ReferenceEquals($Holder.UnitReferences[$UnitIndex], $unit)',
+    ):
+        assert token in holder
+    assert '$Holder.FullUnitValidationCount = [long]$Holder.FullUnitValidationCount + 1' in holder
+    assert 'Assert-RecoveryProgressLeaseHolderContext -Holder $ProgressLeaseHolder -Journal $Journal -JournalUnits $units -UnitCount $unitCount -UnitIndex $UnitIndex' in binding
+    assert '-ValidateAllUnits' not in binding
+    assert 'private readonly RecoveryPhaseAuthority phaseAuthority;' in native
+    assert 'private readonly RecoveryPhaseToken phaseToken;' in native
+    assert 'phaseAuthority.IsCurrent(UnitIndex, phaseToken)' in native
+    assert '!retainedPhaseAuthority.Matches(unitIndex, "restoring")' in native
+    assert 'PhaseToken = $phaseToken' in binding
+    assert '$ProgressLeaseHolder.UnitCount' in binding
+    assert 'Get-RecoveryProgressUnitCount -Journal $Journal -JournalUnits $units -ProgressLeaseHolder $ProgressLeaseHolder' not in binding
+    append = common[common.index('function Append-RecoveryProgress'):common.index('# Phase one binds retained handles', common.index('function Append-RecoveryProgress'))]
+    assert 'CommitRecoveryProgressFrame' in append
+    assert '$nextPhases' not in append
+
+    wrappers = common[common.index('function Assert-RecoveryArtifactMutationBinding'):common.index('function Assert-RecoveryProgressCapacity')]
+    assert '-not [object]::ReferenceEquals($Context.PhaseAuthority, $binding.PhaseAuthority)' in wrappers
+    assert '-not [object]::ReferenceEquals($Context.PhaseToken, $binding.PhaseToken)' in wrappers
+    assert '-not [object]::ReferenceEquals($Context.Native.PhaseAuthority, $Context.PhaseAuthority)' in wrappers
+    assert '-not [object]::ReferenceEquals($Context.Native.PhaseToken, $Context.PhaseToken)' in wrappers
+
+
+def test_artifact_open_contracts_and_quarantine_finalization_match_native_signatures() -> None:
+    common = read('Deployment.Common.ps1')
+    native = common.split('function Initialize-LifeOSRecoveryProgressNative', 1)[1].split(
+        'function New-RecoveryProgressLeaseHolder', 1
+    )[0]
+    compact = re.sub(r'\s+', ' ', native)
+
+    assert 'private enum ArtifactOpenContract' in native
+    assert ('private static SafeFileHandle OpenArtifactRelative(SafeFileHandle parent, string name, '
+            'bool writable, ArtifactOpenContract contract, uint disposition, byte[] securityDescriptor, '
+            'out uint status)') in compact
+    assert ('private static ArtifactFileLease OpenArtifactFile(string path, bool writable, '
+            'ArtifactOpenContract contract, long maxBytes)') in compact
+    assert ('destination = OpenArtifactFile(destinationPath, false, ArtifactOpenContract.RetainedLease, maxBytes);' in compact)
+    assert ('staged = OpenArtifactFile(stagedPath, false, ArtifactOpenContract.RetainedLease, maxBytes);' in compact)
+    assert ('false, ArtifactOpenContract.ReadOnlyIdentityProbe, FileOpen, null, out status' in compact)
+
+    # A retained leaf requests DELETE while sharing READ only. A read-only
+    # probe shares DELETE so it can coexist with that retained handle, while
+    # its desired access contains no write or delete request.
+    assert ('if (contract == ArtifactOpenContract.RetainedLease) { desiredAccess |= DeleteAccess; }' in compact)
+    assert ('uint shareAccess = contract == ArtifactOpenContract.ReadOnlyIdentityProbe '
+            '? FileShareRead | FileShareDelete : FileShareRead;') in compact
+    assert 'FileShareWrite' not in compact
+    assert 'ReadOnlyIdentityProbe && writable' in compact
+
+    assert ('ArtifactCopyReceipt(this, destinationLease, quarantineLease, destinationLease.Length, digest, metadata)'
+            not in compact)
+    assert ('ArtifactCopyReceipt(this, destinationLease, quarantineLease, sourceLength, digest, metadata)'
+            in compact)
+    assert 'quarantineLease.RefreshMetadata();' in compact
+    assert 'quarantineLease.Length != copied' in compact
+    assert 'AssertBasicMetadata(metadata, actualMetadata, "Artifact quarantine")' in compact
+    assert 'quarantineLease.SetVerified();' in compact
+    assert 'receipt.SetVerified();' in compact
+    assert 'FileAttributeEncrypted' in compact
+    assert 'Encrypted/EFS artifacts are not supported' in compact
+
+    # FILE_STREAM_INFORMATION is parsed only within the byte count returned
+    # by NtQueryInformationFile, keeping the bounded parser away from the
+    # uninitialized tail of its fixed-size allocation.
+    assert 'long informationBytesValue = ioStatus.Information.ToInt64();' in compact
+    assert 'int informationBytes = (int)informationBytesValue;' in compact
+    assert 'nameLength > informationBytes - offset - 24' in compact
+    assert 'nextOffset > informationBytes - offset' in compact
+
+
+def test_native_artifact_suite_proves_bounded_failure_cleanup_and_no_orphans() -> None:
+    native = read('tests/Deployment.Progress.Native.Tests.ps1')
+    for token in (
+        'New-NativeArtifactFixture', 'New-NativeArtifactLease',
+        'progress parent/leaf lease is retained', 'generated quarantine',
+        'unusable quarantine stream cleanup',
+        'Flush($true)', 'Get-NativeBytesSha256',
+        'Copy-RecoveryArtifactToQuarantine', 'Remove-RecoveryArtifactDestination',
+        'Publish-RecoveryArtifactStaged', 'reparse ancestor', 'leaf reparse',
+        'hard-link leaf', 'foreign artifact parent',
+        'generated quarantine CreateNew collision', 'replaced destination leaf identity',
+        'regular-file substitution', 'wrong destination bytes', 'wrong staged bytes',
+        'mutated expected state', 'pending phase rejection', 'complete phase rejection',
+        'malformed expected state', 'exact-bound', 'one-byte-over-bound',
+        'Assert-NativeProgressCanReopen', 'Close-RecoveryArtifactMutationContext',
+    ):
+        assert token in native
+    assert 'Start-Process' not in native
 
 
 def test_fresh_marker_and_generation_reference_contracts_are_exercised() -> None:
@@ -2247,7 +2575,7 @@ def test_recovery_progress_is_append_only_and_bounded_per_unit() -> None:
     assert 'SetLength($committedOffset)' in progress
     assert 'Recovery progress committed record digest is invalid' in progress
     assert '$sequence -ge $script:LifeOSRecoveryProgressMaxRecords' in progress
-    assert '$item.Length + $frame.TotalBytes -gt $script:LifeOSRecoveryProgressMaxBytes' in progress
+    assert '$progressLease.Length + $frame.TotalBytes -gt $script:LifeOSRecoveryProgressMaxBytes' in progress
     assert '@($Journal.units)' not in progress
     assert 'unitCount' in progress
     assert 'currentPhase -is [string] -and [string]$currentPhase -ceq $Phase' in progress
@@ -2271,6 +2599,83 @@ def test_recovery_progress_is_append_only_and_bounded_per_unit() -> None:
     assert 'foreach ($partialLength in 1..8)' in read('tests/Deployment.Behavior.Tests.ps1')
 
 
+def test_recovery_progress_repairs_checkpoint_order_and_holder_binding() -> None:
+    common = read('Deployment.Common.ps1')
+    native = common.split('function Initialize-LifeOSRecoveryProgressNative', 1)[1].split(
+        'function New-RecoveryProgressLeaseHolder', 1
+    )[0]
+    reader = common.split('function Read-RecoveryProgress', 1)[1].split(
+        'function Append-RecoveryProgress', 1
+    )[0]
+    capacity = common.split('function Assert-RecoveryProgressCapacity', 1)[1].split(
+        'function Assert-RecoveryJournalCheckpointCapacity', 1
+    )[0]
+    append = common.split('function Append-RecoveryProgress', 1)[1].split(
+        'function Assert-RecoveryProgressCapacity', 1
+    )[0]
+    restore = common.split('function Restore-ManifestArtifacts', 1)[1].split(
+        'function Copy-FileVerifiedAtomic', 1
+    )[0]
+    holder_context = common.split('function Get-RecoveryProgressLeaseHolderContext', 1)[1].split(
+        'function Get-RecoveryJournalUnits', 1
+    )[0]
+    holder_assert = common.split('function Assert-RecoveryProgressLeaseHolderContext', 1)[1].split(
+        'function Get-RecoveryJournalUnits', 1
+    )[0]
+    security = common.split('function Assert-RecoveryProgressLeaseSecurity', 1)[1].split(
+        'function New-RecoveryProgressLease', 1
+    )[0]
+    assert 'private const uint FileOpenReparsePoint' in native
+    assert 'FileFlagOpenReparsePoint' not in native
+    assert 'OpenExistingOrRetainedParent' in native
+    assert 'public void CreateLeaf' in native
+    assert 'retainAncestorsOnMissing' in native
+    assert reader.index('if ($sequence -lt $checkpoint)') < reader.index('if ($incompleteTail)')
+    assert capacity.index('Get-RecoveryProgressLease') < capacity.index("Get-JournalProperty $Journal 'progressSequence'")
+    assert 'JournalReference' in common and 'UnitCollectionReference' in common
+    assert 'Assert-RecoveryProgressLeaseHolderContext' in reader
+    assert 'if ($Strict -and [bool]$Holder.Lease.Native.HasLeaf)' in common
+    assert append.index("if ($currentPhase -is [string] -and [string]$currentPhase -ceq $Phase)") < append.index(
+        'if ($sequence -ge $script:LifeOSRecoveryProgressMaxRecords)'
+    )
+    assert 'ValidatedUnitPhases' in holder_context
+    assert 'Get-RecoveryProgressLeaseHolderContext -Journal' not in holder_assert
+    assert 'Get-RecoveryProgressUnitContent $unit' in holder_assert
+    assert 'Get-RecoveryProgressUnitCount -Journal $Journal -JournalUnits $unitsValue -ProgressLeaseHolder $ProgressLeaseHolder' in append
+    assert 'CreateIfMissing' in append
+    assert 'CreateNewOnly' not in append
+    boundary = security.index("throw 'Recovery progress ACL contains an ACE outside the management boundary.'")
+    repair = security.index('if ($needsRepair)')
+    assert boundary < repair
+    assert 'Set-RecoveryProgressLeaseHolderContext' in common
+    assert 'ValidatedUnitPhases[$UnitIndex] = $Phase' in append
+
+    new_journal_start = restore.index('    if ($null -eq $journal) {')
+    new_journal_end = restore.index('    if (-not $journalCreated) {', new_journal_start)
+    new_journal = restore[new_journal_start:new_journal_end]
+    capacity_check = new_journal.index('$progressCapacity = Assert-RecoveryProgressCapacity')
+    checkpoint_check = new_journal.index('[void](Assert-RecoveryJournalCheckpointCapacity')
+    lease_release = new_journal.index('Close-RecoveryProgressLeaseHolder $progressLeaseHolder')
+    initial_publish = new_journal.index('Write-JsonAtomic $journalPath $journal')
+    first_append = restore.index('[void](Append-RecoveryProgress')
+    assert capacity_check < checkpoint_check < lease_release < initial_publish < first_append
+    assert 'first append reacquires a fresh validated lease' in new_journal
+
+
+def test_recovery_fixtures_seed_valid_progress_before_completed_service_restore() -> None:
+    behavior = read('tests/Deployment.Behavior.Tests.ps1')
+    assert 'Seed the completed unit through the real progress writer' in behavior
+    assert "Append-RecoveryProgress -Manifest $recoveryManifest -Journal $recoveryJournal -UnitIndex 0 -Phase 'complete'" in behavior
+    assert "Set-JournalProperty $recoveryJournal 'phase' 'artifacts-complete'" in behavior
+
+
+def test_recovery_progress_scaling_regression_uses_shared_holder_operation_counter() -> None:
+    behavior = read('tests/Deployment.Behavior.Tests.ps1')
+    assert 'progressUnitAccessorCalls' in behavior
+    assert 'ProgressLeaseHolder $holder' in behavior
+    assert 'cached progress holder append work remains linear in the inventory size.' in behavior
+
+
 def test_recovery_progress_statuses_are_suppressed_and_behavior_capture_guards_the_real_loop() -> None:
     common = read('Deployment.Common.ps1')
     restore = common.split('function Restore-ManifestArtifacts', 1)[1].split(
@@ -2279,7 +2684,7 @@ def test_recovery_progress_statuses_are_suppressed_and_behavior_capture_guards_t
     for phase in ("'restoring'", "'complete'"):
         assert re.search(
             rf'(?m)^\s*\[void\]\(Append-RecoveryProgress -Manifest \$Manifest -Journal \$journal '
-            rf'-UnitIndex \$unitIndex -Phase {re.escape(phase)}\)',
+            rf'-UnitIndex \$unitIndex -Phase {re.escape(phase)}(?: -ProgressLeaseHolder \$progressLeaseHolder)?\)',
             restore,
         )
     assert restore.count('[void](Assert-RecoveryJournalCheckpointCapacity -Manifest $Manifest -Journal $journal') == 2

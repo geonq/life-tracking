@@ -659,6 +659,15 @@ Assert-Text 'function Append-RecoveryProgress' 'Recovery records per-unit progre
 Assert-Text 'function Write-RecoveryProgressFramePart' 'Recovery progress records have explicit framed write boundaries.'
 Assert-Text 'SetLength\(\$committedOffset\)' 'Recovery truncates only an uncommitted progress tail.'
 Assert-Text 'Recovery progress committed record digest is invalid' 'Committed progress-record corruption is rejected.'
+Assert-Text 'function Initialize-LifeOSRecoveryProgressNative' 'Progress I/O has a Windows native handle implementation.'
+Assert-Text 'NtCreateFile' 'Progress ancestors and the leaf are opened through native relative handles.'
+Assert-Text 'FileOpenReparsePoint' 'Progress opens inspect reparse points without traversing them.'
+Assert-Text 'FileShareRead' 'Progress handles deny write and delete sharing.'
+Assert-Text 'FileCreate' 'Fresh progress leaves use create-new semantics.'
+Assert-Text 'GetSecurityInfo' 'Progress ACL validation reads security from the retained leaf handle.'
+Assert-Text 'NumberOfLinks != 1' 'Progress leaves reject multiple hard links.'
+Assert-Text 'Poison-RecoveryProgressLease' 'Progress mutation failures poison the retained lease.'
+Assert-Text 'Close-RecoveryProgressLeaseHolder' 'Progress handles have an explicit deterministic disposal path.'
 Assert-Text 'function Get-LifeOSScheduledTaskExact' 'Scheduled-task absence is distinguished from provider failure.'
 Assert-Text 'FullyQualifiedErrorId' 'Scheduled-task absence classification authenticates the provider error.'
 Assert-Text '\[switch\]\$DeferStart' 'Service configuration restoration can defer starting services.'
@@ -683,6 +692,17 @@ Write-Host 'PASS: transaction-owned recovery static assertions'
 
 # Scope these assertions to production bodies; test fixtures must not satisfy them.
 $commonText = Get-Content -LiteralPath (Join-Path $root 'Deployment.Common.ps1') -Raw
+$nativeSource = ($commonText -split 'function Initialize-LifeOSRecoveryProgressNative', 2)[1] -split 'function New-RecoveryProgressLeaseHolder', 2
+if ($nativeSource[0] -match 'FileFlagOpenReparsePoint' -or
+    $nativeSource[0] -notmatch 'private const uint FileOpenReparsePoint' -or
+    $nativeSource[0] -notmatch 'OpenExistingOrRetainedParent' -or
+    $nativeSource[0] -notmatch 'CreateLeaf') {
+    throw 'FAIL: Recovery progress native source has an inconsistent reparse constant or retained-parent create path.'
+}
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    . (Join-Path $root 'Deployment.Common.ps1')
+    Initialize-LifeOSRecoveryProgressNative
+}
 $recoveryReaderBody = ($commonText -split 'function Read-RecoveryJournal', 2)[1] -split 'function Save-CollectorReceipt', 2
 if (-not $recoveryReaderBody[0].Contains('Get-LifeOSBoundedTreeItem -Root $root') -or
     -not $recoveryReaderBody[0].Contains('Get-LifeOSFileDigest -Path $filePath') -or
@@ -721,9 +741,36 @@ if ($jsonAtomicBody[0].IndexOf('Write-LifeOSDurableBytes', [StringComparison]::O
 Assert-Text 'Write-JsonAtomic \$Path \$Manifest -OperatorSid \$Manifest\.operatorSid' 'Install manifests retain the operator-bound ACL on every checkpoint.'
 Assert-Text 'Write-JsonAtomic \$path \$journal -OperatorSid \$Manifest\.operatorSid' 'Recovery journals retain the operator-bound ACL on every checkpoint.'
 Assert-Text 'Write-LifeOSDurableBytes \$snapshotPath' 'Leaf ACL snapshots are durably written after their restricted ACL is applied.'
-$phaseAwareProgressRead = 'Read-RecoveryProgress -Manifest $Manifest -Journal $journal -JournalUnits $journalUnits -Strict:($Strict -or [string]$journal.phase -eq ''completed'')'
+$phaseAwareProgressRead = 'Read-RecoveryProgress -Manifest $Manifest -Journal $journal -JournalUnits $journalUnits -Strict:($Strict -or [string]$journal.phase -eq ''completed'') -ProgressLeaseHolder $ProgressLeaseHolder'
 if (-not $recoveryReaderBody[0].Contains($phaseAwareProgressRead)) {
     throw 'FAIL: Completed recovery journals must select strict progress validation while nonterminal reads retain caller strictness.'
+}
+$progressReaderBody = ($commonText -split 'function Read-RecoveryProgress', 2)[1] -split 'function Test-RecoveryAuthorityPath', 2
+if ($progressReaderBody[0].Contains('[IO.File]::Open') -or
+    $progressReaderBody[0].Contains('Get-Acl') -or
+    $progressReaderBody[0].Contains('Test-Path')) {
+    throw 'FAIL: progress replay and append must not reopen or revalidate the pathname after lease acquisition.'
+}
+$progressSecurityBody = ($commonText -split 'function Assert-RecoveryProgressLeaseSecurity', 2)[1] -split 'function New-RecoveryProgressLease', 2
+$progressSecurityBoundary = $progressSecurityBody[0].IndexOf("throw 'Recovery progress ACL contains an ACE outside the management boundary.'", [StringComparison]::Ordinal)
+$progressSecurityRepair = $progressSecurityBody[0].IndexOf('if ($needsRepair)', [StringComparison]::Ordinal)
+if ($progressSecurityBoundary -lt 0 -or $progressSecurityRepair -lt 0 -or $progressSecurityBoundary -ge $progressSecurityRepair) {
+    throw 'FAIL: Progress ACLs must reject out-of-boundary owners/ACEs before any repair path.'
+}
+$holderContextBody = ($commonText -split 'function Assert-RecoveryProgressLeaseHolderContext', 2)[1] -split 'function Get-RecoveryJournalUnits', 2
+if ($holderContextBody[0].Contains('Get-RecoveryProgressLeaseHolderContext -Journal') -or
+    -not $holderContextBody[0].Contains('ValidatedUnitPhases') -or
+    -not $holderContextBody[0].Contains('Get-RecoveryProgressUnitContent $unit')) {
+    throw 'FAIL: Cached progress holder validation must use the captured context and validated phases without rebuilding the inventory.'
+}
+$progressAppendBody = ($commonText -split 'function Append-RecoveryProgress', 2)[1] -split 'function Assert-RecoveryProgressCapacity', 2
+if (-not $progressAppendBody[0].Contains('Get-RecoveryProgressUnitCount -Journal $Journal -JournalUnits $unitsValue -ProgressLeaseHolder $ProgressLeaseHolder') -or
+    -not $progressAppendBody[0].Contains('-CreateIfMissing') -or
+    $progressAppendBody[0].Contains('-CreateNewOnly')) {
+    throw 'FAIL: Progress append must use the holder count fast path and create only after a missing leaf is established.'
+}
+if (-not $progressAppendBody[0].Contains('ValidatedUnitPhases[$UnitIndex] = $Phase')) {
+    throw 'FAIL: Progress phase cache must advance only after the durable frame commit.'
 }
 $boundedTreeBody = ($commonText -split 'function Get-LifeOSBoundedTreeItem', 2)[1] -split 'function Get-TreeManifestIndex', 2
 if ($boundedTreeBody[0] -match '\$unsafeTarget|\$target\s*=') {
@@ -858,6 +905,179 @@ if ($installText -match '(?m)^\s*Set-RestrictedAcl \$supplementCatalog \$operato
     ($catalogVerifyLine -and $catalogVerifyLine -notmatch '-AllowedOwnerSids')) {
     throw 'FAIL: Supplement catalog must not use an unscoped service-owner relaxation.'
 }
+
+# Phase 1 exposes a handle-bound artifact capability beside the retained
+# progress lease. Keep the source contract narrow until the artifact loop is
+# deliberately wired in a later phase.
+$nativeStart = $commonText.IndexOf('    private static void AssertLeaf', [StringComparison]::Ordinal)
+$nativeEnd = $commonText.IndexOf('function New-RecoveryProgressLeaseHolder', $nativeStart, [StringComparison]::Ordinal)
+$artifactNativeText = if ($nativeStart -ge 0 -and $nativeEnd -gt $nativeStart) {
+    $commonText.Substring($nativeStart, $nativeEnd - $nativeStart)
+} else { '' }
+$wrapperStart = $commonText.IndexOf('function Test-RecoveryArtifactPathUnderRoot', [StringComparison]::Ordinal)
+$wrapperEnd = $commonText.IndexOf('function Assert-RecoveryProgressCapacity', $wrapperStart, [StringComparison]::Ordinal)
+$artifactWrapperText = if ($wrapperStart -ge 0 -and $wrapperEnd -gt $wrapperStart) {
+    $commonText.Substring($wrapperStart, $wrapperEnd - $wrapperStart)
+} else { '' }
+$restoreStart = $commonText.IndexOf('function Restore-ManifestArtifacts', [StringComparison]::Ordinal)
+$restoreEnd = $commonText.IndexOf('function Copy-FileVerifiedAtomic', $restoreStart, [StringComparison]::Ordinal)
+$restoreText = if ($restoreStart -ge 0 -and $restoreEnd -gt $restoreStart) {
+    $commonText.Substring($restoreStart, $restoreEnd - $restoreStart)
+} else { '' }
+if ([string]::IsNullOrEmpty($artifactNativeText) -or [string]::IsNullOrEmpty($artifactWrapperText) -or
+    [string]::IsNullOrEmpty($restoreText)) {
+    throw 'FAIL: phase 1 artifact source boundaries are missing.'
+}
+$appendStart = $commonText.IndexOf('function Append-RecoveryProgress', [StringComparison]::Ordinal)
+$appendEnd = $commonText.IndexOf('# Phase one binds retained handles', $appendStart, [StringComparison]::Ordinal)
+$appendText = if ($appendStart -ge 0 -and $appendEnd -gt $appendStart) {
+    $commonText.Substring($appendStart, $appendEnd - $appendStart)
+} else { '' }
+if (-not $artifactNativeText.Contains('CommitRecoveryProgressFrame') -or
+    -not $appendText.Contains('CommitRecoveryProgressFrame') -or
+    $appendText.Contains('$nextPhases')) {
+    throw 'FAIL: recovery progress phase updates must replace one native token after flush without copying the full inventory.'
+}
+if ($artifactNativeText.Contains('public static RecoveryPhaseToken AdvanceRecoveryPhaseAuthority') -or
+    -not $artifactNativeText.Contains('authority.Advance(unitIndex, nextPhase);') -or
+    -not $artifactNativeText.Contains('progressLease.Stream.Flush(true);')) {
+    throw 'FAIL: phase authority advancement must stay inside the retained-stream frame commit.'
+}
+foreach ($parserContract in @(
+    'public sealed class RecoveryProgressRecord',
+    'private sealed class RecoveryProgressPayloadParser',
+    'new UTF8Encoding(false, true)',
+    'int fieldMask = 0',
+    'ParseRecoveryProgressRecord(payload',
+    'authority.ExpectedTransactionId')) {
+    if (-not $artifactNativeText.Contains($parserContract)) {
+        throw "FAIL: strict recovery-progress payload parser contract is missing: $parserContract"
+    }
+}
+if ($artifactNativeText.Contains('payloadText.IndexOf') -or
+    $artifactNativeText.Contains('sequenceNeedle') -or
+    $artifactNativeText.Contains('unitNeedle') -or
+    $artifactNativeText.Contains('phaseNeedle')) {
+    throw 'FAIL: recovery-progress payload authentication must not use substring needles.'
+}
+foreach ($nativeContract in @(
+    'ArtifactDirectoryLease', 'ArtifactFileLease', 'ArtifactQuarantineLease',
+    'ArtifactCopyReceipt', 'ArtifactMutationContext', 'OpenArtifactRelative',
+    'FileCreate', 'FileOpenReparsePoint', 'FileShareRead', 'DeleteAccess',
+    'FileStreamInformation', 'MaxStreamInformationBytes', 'ArtifactCopyBufferBytes',
+    'Flush(true)', 'TransformBlock', 'NumberOfLinks', 'SetFileInformationByHandle',
+    'NtSetInformationFile', 'FileDispositionInformationEx', 'FileDispositionDelete',
+    'FileRenameInformation', 'ReplaceIfExists = 0', 'AssertArtifactNameBinding',
+    'AssertDefaultDataStreamOnly')) {
+    if (-not $artifactNativeText.Contains($nativeContract)) {
+        throw "FAIL: phase 1 native artifact contract is missing: $nativeContract"
+    }
+}
+$phaseAuthorityStart = $artifactNativeText.IndexOf('public sealed class RecoveryPhaseAuthority', [StringComparison]::Ordinal)
+$phaseAuthorityEnd = $artifactNativeText.IndexOf('public sealed class ArtifactMutationContext', $phaseAuthorityStart, [StringComparison]::Ordinal)
+$phaseAuthorityText = if ($phaseAuthorityStart -ge 0 -and $phaseAuthorityEnd -gt $phaseAuthorityStart) {
+    $artifactNativeText.Substring($phaseAuthorityStart, $phaseAuthorityEnd - $phaseAuthorityStart)
+} else { '' }
+foreach ($authorityContract in @(
+    'public sealed class RecoveryPhaseAuthority',
+    'private readonly RecoveryPhaseToken[] tokens;',
+    'private RecoveryPhaseAuthority(string[] committedPhases)',
+    'internal static RecoveryPhaseAuthority Create(string[] committedPhases)',
+    'tokens = new RecoveryPhaseToken[committedPhases.Length];',
+    'public long UpdateCount { get { return updateCount; } }',
+    'public RecoveryPhaseToken GetToken(int unitIndex)',
+    'internal RecoveryPhaseToken Advance(int unitIndex, string nextPhase)',
+    'tokens[unitIndex] = replacement;',
+    'public string GetPhase(int unitIndex)',
+    'public bool Matches(int unitIndex, string expectedPhase)')) {
+    if (-not $phaseAuthorityText.Contains($authorityContract)) {
+        throw "FAIL: immutable recovery phase authority contract is missing: $authorityContract"
+    }
+}
+if (-not $artifactNativeText.Contains('public sealed class RecoveryPhaseToken')) {
+    throw 'FAIL: immutable per-unit recovery phase tokens are missing.'
+}
+if ($phaseAuthorityText.Contains('public RecoveryPhaseAuthority(') -or
+    -not $artifactNativeText.Contains('return RecoveryPhaseAuthority.Create(committedPhases);')) {
+    throw 'FAIL: PowerShell must not receive a public phase-authority constructor; the native facade must use the validated factory.'
+}
+$holderContextStart = $commonText.IndexOf('function Assert-RecoveryProgressLeaseHolderContext', [StringComparison]::Ordinal)
+$holderContextEnd = $commonText.IndexOf('function Get-RecoveryJournalUnits', $holderContextStart, [StringComparison]::Ordinal)
+$holderContextText = if ($holderContextStart -ge 0 -and $holderContextEnd -gt $holderContextStart) {
+    $commonText.Substring($holderContextStart, $holderContextEnd - $holderContextStart)
+} else { '' }
+$artifactBindingStart = $commonText.IndexOf('function Get-RecoveryArtifactMutationBinding', [StringComparison]::Ordinal)
+$artifactBindingEnd = $commonText.IndexOf('function Assert-RecoveryArtifactMutationBinding', $artifactBindingStart, [StringComparison]::Ordinal)
+$artifactBindingContract = if ($artifactBindingStart -ge 0 -and $artifactBindingEnd -gt $artifactBindingStart) {
+    $commonText.Substring($artifactBindingStart, $artifactBindingEnd - $artifactBindingStart)
+} else { '' }
+foreach ($indexedContract in @(
+    'if ($UnitIndex -ge 0)',
+    '$Holder.IndexedUnitValidationCount = [long]$Holder.IndexedUnitValidationCount + 1',
+    '$unit = Get-RecoveryProgressUnit -Units $ownedUnits -UnitIndex $UnitIndex',
+    '$authorityPhase = [string]$Holder.PhaseAuthority.GetPhase($UnitIndex)',
+    '-not [object]::ReferenceEquals($Holder.UnitReferences[$UnitIndex], $unit)',
+    'function Get-RecoveryArtifactMutationBinding',
+    'Assert-RecoveryProgressLeaseHolderContext -Holder $ProgressLeaseHolder -Journal $Journal -JournalUnits $units -UnitCount $unitCount -UnitIndex $UnitIndex')) {
+    $haystack = if ($indexedContract.StartsWith('function Get-RecoveryArtifactMutationBinding')) { $artifactBindingContract } else { $holderContextText + $artifactBindingContract }
+    if (-not $haystack.Contains($indexedContract)) {
+        throw "FAIL: indexed recovery artifact validation contract is missing: $indexedContract"
+    }
+}
+if ($artifactBindingContract.Contains('-ValidateAllUnits') -or
+    -not $holderContextText.Contains('$Holder.FullUnitValidationCount = [long]$Holder.FullUnitValidationCount + 1') -or
+    -not $holderContextText.Contains('return')) {
+    throw 'FAIL: artifact validation must use the indexed holder path and reserve full inventory validation for setup/rebinding.'
+}
+if (-not $artifactNativeText.Contains('private readonly RecoveryPhaseAuthority phaseAuthority;') -or
+    -not $artifactNativeText.Contains('private readonly RecoveryPhaseToken phaseToken;') -or
+    -not $artifactNativeText.Contains('phaseAuthority.IsCurrent(UnitIndex, phaseToken)') -or
+    -not $artifactNativeText.Contains('!retainedPhaseAuthority.Matches(unitIndex, "restoring")') -or
+    -not $artifactWrapperText.Contains('-not [object]::ReferenceEquals($Context.PhaseAuthority, $binding.PhaseAuthority)') -or
+    -not $artifactWrapperText.Contains('-not [object]::ReferenceEquals($Context.PhaseToken, $binding.PhaseToken)') -or
+    -not $artifactWrapperText.Contains('-not [object]::ReferenceEquals($Context.Native.PhaseAuthority, $Context.PhaseAuthority)') -or
+    -not $artifactWrapperText.Contains('-not [object]::ReferenceEquals($Context.Native.PhaseToken, $Context.PhaseToken)')) {
+    throw 'FAIL: artifact mutation contexts must remain bound to the immutable phase authority reference.'
+}
+foreach ($wrapperName in @(
+    'Get-RecoveryArtifactMutationBinding', 'Assert-RecoveryArtifactMutationBinding',
+    'Assert-RecoveryArtifactCapability', 'New-RecoveryArtifactMutationContext',
+    'Close-RecoveryArtifactMutationContext', 'New-RecoveryArtifactQuarantineSibling',
+    'Open-RecoveryArtifactDestination', 'Open-RecoveryArtifactStaged',
+    'Copy-RecoveryArtifactToQuarantine', 'Remove-RecoveryArtifactDestination',
+    'Publish-RecoveryArtifactStaged')) {
+    if (-not $artifactWrapperText.Contains("function $wrapperName")) {
+        throw "FAIL: typed phase 1 artifact wrapper is missing: $wrapperName"
+    }
+}
+foreach ($requiredParameter in @(
+    '[Parameter(Mandatory)][psobject]$Context',
+    '[Parameter(Mandatory)][psobject]$Manifest',
+    '[Parameter(Mandatory)][psobject]$Journal',
+    '[Parameter(Mandatory)][int]$UnitIndex')) {
+    if (-not $artifactWrapperText.Contains($requiredParameter)) {
+        throw "FAIL: artifact wrappers must expose the explicit binding parameter: $requiredParameter"
+    }
+}
+if (-not $artifactWrapperText.Contains('[Parameter(Mandatory)][psobject]$Unit') -or
+    -not $artifactWrapperText.Contains('[Parameter(Mandatory)][psobject]$ProgressLeaseHolder') -or
+    -not $artifactWrapperText.Contains('CreateGeneratedQuarantineSibling($QuarantineNonce')) {
+    throw 'FAIL: artifact context construction must bind the journal unit and retained holder and generate its quarantine name natively.'
+}
+foreach ($forbiddenFallback in @('Copy-Item', 'Remove-Item', 'Move-Item', '[IO.File]::', '[System.IO.File]::', 'QuarantinePath')) {
+    if ($artifactWrapperText.Contains($forbiddenFallback)) {
+        throw "FAIL: phase 1 artifact wrappers contain a forbidden pathname fallback: $forbiddenFallback"
+    }
+}
+if ($restoreText.Contains('New-RecoveryArtifactMutationContext') -or
+    $restoreText.Contains('New-RecoveryArtifactQuarantineSibling') -or
+    $restoreText.Contains('Copy-RecoveryArtifactToQuarantine') -or
+    $restoreText.Contains('Remove-RecoveryArtifactDestination') -or
+    $restoreText.Contains('Publish-RecoveryArtifactStaged') -or
+    -not $restoreText.Contains('Restore-Artifact $restore')) {
+    throw 'FAIL: phase 1 artifact capability must remain unwired from Restore-ManifestArtifacts.'
+}
+Write-Host 'PASS: phase 1 native artifact capability is typed, handle-bound, and unwired'
 Write-Host 'PASS: remaining Windows deployment/recovery static assertions'
 
 # Recovery diagnostics are an opt-in observation path. Keep the entry-point

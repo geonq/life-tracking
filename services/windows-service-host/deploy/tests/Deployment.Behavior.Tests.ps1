@@ -36,6 +36,8 @@ function Assert-BehaviorThrowsSafe {
     if ($caught -like "*$ForbiddenText*") { throw "FAIL: token value was not displayed: rejection diagnostic exposed token material: $Message" }
 }
 
+$behaviorOperatorSid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+
 & {
     # Checkpoint-capacity validation temporarily changes every unit phase while
     # measuring serialized sizes. Exercise singleton and multi-unit journals,
@@ -668,22 +670,29 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     }
     try {
         $recoveryManifest = [pscustomobject]@{
-            transactionId = 'service-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = (Join-Path $backup 'manifest.json'); backups = @()
+            transactionId = 'service-fixture'; generation = 'generation'; operatorSid = $behaviorOperatorSid; manifestPath = (Join-Path $backup 'manifest.json'); backups = @()
             paths = [pscustomobject]@{ backupDirectory = $backup; gatewayData = $data; usageHistory = (Join-Path $temp 'usage.jsonl') }
         }
         $stableState = Get-RecoveryArtifactState $destination
         $recoveryJournal = [pscustomobject]@{
             schemaVersion = 1; transactionId = $recoveryManifest.transactionId; generation = $recoveryManifest.generation; operatorSid = $recoveryManifest.operatorSid; manifestPath = $recoveryManifest.manifestPath
-            units = @([pscustomobject]@{ destination = $destination; backup = ''; pre = $stableState; post = $stableState; phase = 'complete'; stagingPath = (Join-Path $data '.rollback-restore-service-fixture-0') }); unitCount = 1; treeRoots = @($data); phase = 'artifacts-complete'; progressPath = (Get-RecoveryProgressPath $recoveryManifest)
+            units = @([pscustomobject]@{ destination = $destination; backup = ''; pre = $stableState; post = $stableState; phase = 'pending'; stagingPath = (Join-Path $data '.rollback-restore-service-fixture-0') }); unitCount = 1; treeRoots = @($data); phase = 'artifacts'; progressPath = (Get-RecoveryProgressPath $recoveryManifest); progressSequence = 0
         }
         function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
         $realJsonWriter = ${function:Write-JsonAtomic}
         function Write-JsonAtomic {
             param([string]$Path, [object]$Value, [string]$OperatorSid, [long]$MaxBytes = 0)
-            # This fixture uses a non-SID operator label. Preserve the real
-            # durable journal bytes while its ACL adapter remains mocked.
+            # Keep the fixture bound to the current management SID while its
+            # service registry adapter remains mocked.
             & $realJsonWriter -Path $Path -Value $Value -MaxBytes $MaxBytes
         }
+        # Seed the completed unit through the real progress writer. A
+        # completed recovery journal without its committed progress frame is
+        # intentionally rejected by the production reader before service
+        # restoration.
+        Write-JsonAtomic (Get-RecoveryJournalPath $recoveryManifest) $recoveryJournal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+        [void](Append-RecoveryProgress -Manifest $recoveryManifest -Journal $recoveryJournal -UnitIndex 0 -Phase 'complete')
+        Set-JournalProperty $recoveryJournal 'phase' 'artifacts-complete'
         Write-JsonAtomic (Get-RecoveryJournalPath $recoveryManifest) $recoveryJournal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
         Assert-BehaviorThrows { Invoke-InstallerFailureThenRollback } 'actual installer failure after temporary registration enters rollback orchestration.'
         Assert-Behavior (-not (@($script:orchestrationServiceEvents | Where-Object { $_ -like 'start:*' }).Count)) 'recovery restores service configuration without starting either service.'
@@ -1000,15 +1009,18 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     }
     try {
         $manifest = [pscustomobject]@{
-            transactionId = 'service-state-retry'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = (Join-Path $backup 'manifest.json')
+            transactionId = 'service-state-retry'; generation = 'generation'; operatorSid = $behaviorOperatorSid; manifestPath = (Join-Path $backup 'manifest.json')
             paths = [pscustomobject]@{ backupDirectory = $backup; gatewayData = $data; usageHistory = (Join-Path $temp 'usage.jsonl') }; backups = @()
         }
         $stableState = Get-RecoveryArtifactState $destination
         $journal = [pscustomobject]@{
             schemaVersion = 1; transactionId = $manifest.transactionId; generation = $manifest.generation; operatorSid = $manifest.operatorSid; manifestPath = $manifest.manifestPath
-            units = @([pscustomobject]@{ destination = $destination; backup = ''; pre = $stableState; post = $stableState; phase = 'complete'; stagingPath = (Join-Path $data '.rollback-restore-service-state-retry-0') }); unitCount = 1
-            treeRoots = @($data); phase = 'artifacts-complete'; progressPath = (Get-RecoveryProgressPath $manifest); stages = [pscustomobject]@{ 'service-state-reconcile' = 'restoring' }
+            units = @([pscustomobject]@{ destination = $destination; backup = ''; pre = $stableState; post = $stableState; phase = 'pending'; stagingPath = (Join-Path $data '.rollback-restore-service-state-retry-0') }); unitCount = 1
+            treeRoots = @($data); phase = 'artifacts'; progressPath = (Get-RecoveryProgressPath $manifest); progressSequence = 0; stages = [pscustomobject]@{ 'service-state-reconcile' = 'restoring' }
         }
+        Write-JsonAtomic (Get-RecoveryJournalPath $manifest) $journal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+        [void](Append-RecoveryProgress -Manifest $manifest -Journal $journal -UnitIndex 0 -Phase 'complete')
+        Set-JournalProperty $journal 'phase' 'artifacts-complete'
         Write-JsonAtomic (Get-RecoveryJournalPath $manifest) $journal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
         Assert-BehaviorThrows { Invoke-RecoveryStage $manifest 'service-state-reconcile' { Reconcile-LifeOSServiceSnapshotState -Snapshots $retrySnapshotMap -VerifyHealth -BeforeGatewayStart { $script:serviceTransitionEvents += 'before-gateway' } } -Postcondition { } } 'service state transition failure remains retryable'
         $afterTransitionFailure = Read-RecoveryJournal $manifest
@@ -1085,7 +1097,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     function Restore-Artifact { param($Artifact, $BackupDirectory) $script:progressCapacityMutationCalled = $true }
     try {
         $manifest = [pscustomobject]@{
-            transactionId = 'progress-capacity-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = (Join-Path $backup 'manifest.json'); collectorTransition = $null
+            transactionId = 'progress-capacity-fixture'; generation = 'generation'; operatorSid = $behaviorOperatorSid; manifestPath = (Join-Path $backup 'manifest.json'); collectorTransition = $null
             paths = [pscustomobject]@{ backupDirectory = $backup; gatewayData = $data; usageHistory = (Join-Path $temp 'usage.jsonl') }
             backups = @([pscustomobject]@{ destination = $destination; backup = $source; changed = $true; priorExists = $true; phase = 'complete' })
         }
@@ -1168,20 +1180,125 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     function Measure-RecoveryProgressOutput {
         param([string]$Root, [int]$Count)
         $manifestPath = Join-Path $Root 'manifest.json'
-        $manifest = [pscustomobject]@{ transactionId='linear-fixture'; generation='generation'; operatorSid='fixture'; manifestPath=$manifestPath; paths=[pscustomobject]@{ backupDirectory=$Root } }
+        $manifest = [pscustomobject]@{ transactionId='linear-fixture'; generation='generation'; operatorSid=$behaviorOperatorSid; manifestPath=$manifestPath; paths=[pscustomobject]@{ backupDirectory=$Root } }
         $units = New-Object object[] $Count
         for ($index = 0; $index -lt $Count; $index++) { $units[$index] = [pscustomobject]@{ phase='pending' } }
-        $journal = [pscustomobject]@{ transactionId='linear-fixture'; generation='generation'; operatorSid='fixture'; manifestPath=$manifestPath; units=@($units); unitCount=$Count; progressPath=(Get-RecoveryProgressPath $manifest); progressSequence=0 }
-        for ($index = 0; $index -lt $Count; $index++) {
-            [void](Append-RecoveryProgress -Manifest $manifest -Journal $journal -UnitIndex $index -Phase 'complete')
+        $journal = [pscustomobject]@{ transactionId='linear-fixture'; generation='generation'; operatorSid=$behaviorOperatorSid; manifestPath=$manifestPath; units=@($units); unitCount=$Count; progressPath=(Get-RecoveryProgressPath $manifest); progressSequence=0 }
+        $holder = New-RecoveryProgressLeaseHolder
+        try {
+            for ($index = 0; $index -lt $Count; $index++) {
+                [void](Append-RecoveryProgress -Manifest $manifest -Journal $journal -UnitIndex $index -Phase 'complete' -ProgressLeaseHolder $holder)
+            }
+            return [long](Get-Item -LiteralPath (Get-RecoveryProgressPath $manifest) -Force).Length
+        } finally {
+            Close-RecoveryProgressLeaseHolder $holder
         }
-        return [long](Get-Item -LiteralPath (Get-RecoveryProgressPath $manifest) -Force).Length
     }
     try {
         $smallBytes = Measure-RecoveryProgressOutput $firstRoot 512
         $largeBytes = Measure-RecoveryProgressOutput $secondRoot 1024
         Assert-Behavior ($smallBytes -gt 0 -and $largeBytes -gt $smallBytes -and $largeBytes -lt ($smallBytes * 2.5)) 'linear recovery progress serialization stays proportional as inventory grows.'
     } finally { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+& {
+    # A retained empty leaf is the result of an interrupted first frame. The
+    # next recovery must append to that validated leaf instead of trying a
+    # second pathname create-new operation.
+    function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
+    function Set-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$File, [switch]$SkipSnapshot, [string[]]$AllowedOwnerSids, [switch]$InheritableSystemFullControl, [int]$MaxAttempts = 5, [int]$RetryDelayMilliseconds = 500) }
+    $temp = Join-Path ([IO.Path]::GetTempPath()) ('lifeos-progress-holder-' + [Guid]::NewGuid().ToString('N'))
+    Ensure-Directory $temp
+    try {
+        $script:interruptedProgressBoundary = 'header'
+        try {
+            # Reuse the real framed fixture constructor from the surrounding
+            # progress test scope by defining the minimal equivalent here.
+            $data = Join-Path $temp 'data'; $backup = Join-Path $temp 'backup'
+            Ensure-Directory $data; Ensure-Directory $backup
+            $manifest = [pscustomobject]@{
+                transactionId = 'first-frame-fixture'; generation = 'generation'; operatorSid = $behaviorOperatorSid; manifestPath = (Join-Path $backup 'manifest.json')
+                paths = [pscustomobject]@{ backupDirectory = $backup; gatewayData = $data; usageHistory = (Join-Path $temp 'usage.jsonl') }; backups = @()
+            }
+            $destination = Join-Path $data 'stable.json'; [IO.File]::WriteAllText($destination, 'stable')
+            $state = Get-RecoveryArtifactState $destination
+            $unit = [pscustomobject]@{
+                destination = $destination; backup = ''; pre = $state; post = $state; phase = 'pending'
+                stagingPath = (Join-Path $data '.rollback-restore-first-frame-fixture-0')
+            }
+            $journal = [pscustomobject]@{
+                schemaVersion = 1; transactionId = $manifest.transactionId; generation = $manifest.generation; operatorSid = $manifest.operatorSid; manifestPath = $manifest.manifestPath
+                units = @($unit); unitCount = 1; treeRoots = @($data); phase = 'artifacts'; progressPath = (Get-RecoveryProgressPath $manifest); progressSequence = 0
+            }
+            Write-JsonAtomic (Get-RecoveryJournalPath $manifest) $journal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+            $script:interruptedProgressBoundary = 'header'
+            $realFramePart = ${function:Write-RecoveryProgressFramePart}
+            function Write-RecoveryProgressFramePart {
+                param($Stream, $Bytes, $Boundary)
+                & $realFramePart -Stream $Stream -Bytes $Bytes -Boundary $Boundary
+                if ($script:interruptedProgressBoundary -eq $Boundary) { throw 'fixture first-frame interruption' }
+            }
+            Assert-BehaviorThrows { Append-RecoveryProgress -Manifest $manifest -Journal $journal -UnitIndex 0 -Phase 'complete' } 'first-frame interruption leaves a resumable progress leaf'
+            $script:interruptedProgressBoundary = ''
+            $afterInterruption = Read-RecoveryJournal $manifest
+            Assert-Behavior ($afterInterruption.progressSequence -eq 0 -and $afterInterruption.units[0].phase -ceq 'pending' -and
+                [long](Get-Item -LiteralPath (Get-RecoveryProgressPath $manifest) -Force).Length -eq 0) 'first-frame recovery truncates only the interrupted prefix and retains the lease target.'
+            Append-RecoveryProgress -Manifest $manifest -Journal $afterInterruption -UnitIndex 0 -Phase 'complete'
+            Assert-Behavior ($afterInterruption.progressSequence -eq 1 -and $afterInterruption.units[0].phase -ceq 'complete') 'first-frame recovery appends successfully to the retained empty leaf.'
+        } finally {
+            Remove-Item Function:\Write-RecoveryProgressFramePart -ErrorAction SilentlyContinue
+        }
+    } finally {
+        Remove-Variable -Name interruptedProgressBoundary -Scope Script -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+& {
+    # Once a holder has captured the inventory, each append should touch only
+    # the addressed unit. Count unit accessor operations to guard the linear
+    # total recovery path against a future per-append inventory traversal.
+    $realUnitAccessor = ${function:Get-RecoveryProgressUnit}
+    $script:progressUnitAccessorCalls = 0
+    function Get-RecoveryProgressUnit {
+        param($Units, [int]$UnitIndex)
+        $script:progressUnitAccessorCalls++
+        & $realUnitAccessor -Units $Units -UnitIndex $UnitIndex
+    }
+    $temp = Join-Path ([IO.Path]::GetTempPath()) ('lifeos-progress-scaling-' + [Guid]::NewGuid().ToString('N'))
+    Ensure-Directory $temp
+    function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
+    function Set-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$File, [switch]$SkipSnapshot, [string[]]$AllowedOwnerSids, [switch]$InheritableSystemFullControl, [int]$MaxAttempts = 5, [int]$RetryDelayMilliseconds = 500) }
+    $holder = $null
+    try {
+        $count = 256
+        $manifestPath = Join-Path $temp 'manifest.json'
+        $manifest = [pscustomobject]@{
+            transactionId = 'progress-scaling-fixture'; generation = 'generation'; operatorSid = $behaviorOperatorSid; manifestPath = $manifestPath
+            paths = [pscustomobject]@{ backupDirectory = $temp }
+        }
+        $units = New-Object object[] $count
+        for ($index = 0; $index -lt $count; $index++) {
+            $units[$index] = [pscustomobject]@{
+                destination = (Join-Path $temp ('unit-' + $index + '.json')); backup = ''; pre = 'absent'; post = 'absent'; phase = 'pending'
+                stagingPath = (Join-Path $temp ('.stage-' + $index))
+            }
+        }
+        $journal = [pscustomobject]@{
+            transactionId = $manifest.transactionId; generation = $manifest.generation; operatorSid = $manifest.operatorSid; manifestPath = $manifest.manifestPath
+            units = @($units); unitCount = $count; progressPath = (Get-RecoveryProgressPath $manifest); progressSequence = 0
+        }
+        $holder = New-RecoveryProgressLeaseHolder
+        for ($index = 0; $index -lt $count; $index++) {
+            [void](Append-RecoveryProgress -Manifest $manifest -Journal $journal -UnitIndex $index -Phase 'complete' -ProgressLeaseHolder $holder)
+        }
+        Assert-Behavior ($script:progressUnitAccessorCalls -le ($count * 12)) 'cached progress holder append work remains linear in the inventory size.'
+    } finally {
+        if ($null -ne $holder) { Close-RecoveryProgressLeaseHolder $holder }
+        Set-Item Function:\Get-RecoveryProgressUnit -Value $realUnitAccessor
+        Remove-Variable -Name progressUnitAccessorCalls -Scope Script -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 & {
@@ -1201,7 +1318,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         $data = Join-Path $root 'data'; $backup = Join-Path $root 'backup'
         Ensure-Directory $data; Ensure-Directory $backup
         $manifest = [pscustomobject]@{
-            transactionId = 'framed-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = (Join-Path $backup 'manifest.json'); collectorTransition = $null
+            transactionId = 'framed-fixture'; generation = 'generation'; operatorSid = $behaviorOperatorSid; manifestPath = (Join-Path $backup 'manifest.json'); collectorTransition = $null
             paths = [pscustomobject]@{ backupDirectory = $backup; gatewayData = $data; usageHistory = (Join-Path $root 'usage.jsonl') }; backups = @()
         }
         $units = New-Object object[] $UnitCount
@@ -1234,7 +1351,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
             $destination = Join-Path $data 'writer.json'; $source = Join-Path $backup 'writer.json'
             [IO.File]::WriteAllText($destination, 'temporary'); [IO.File]::WriteAllText($source, 'prior')
             $manifest = [pscustomobject]@{
-                transactionId = 'framed-tail-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = (Join-Path $backup 'manifest.json'); collectorTransition = $null
+                transactionId = 'framed-tail-fixture'; generation = 'generation'; operatorSid = $behaviorOperatorSid; manifestPath = (Join-Path $backup 'manifest.json'); collectorTransition = $null
                 paths = [pscustomobject]@{ backupDirectory = $backup; gatewayData = $data; usageHistory = (Join-Path $temp 'usage.jsonl') }
                 backups = @([pscustomobject]@{ destination = $destination; backup = $source; changed = $true; priorExists = $true; phase = 'complete' })
             }
@@ -1248,6 +1365,43 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
                 Assert-Behavior ((Get-Content -LiteralPath $destination -Raw) -eq 'prior') "restore resumes after a torn $boundary progress tail"
                 Assert-Behavior ($null -ne (Read-RecoveryJournal $manifest)) "the restored journal remains readable after a torn $boundary progress tail"
             } finally { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+
+        # The cached holder keeps the last validated phase independently from
+        # the mutable journal object. A restoring-to-complete mutation must
+        # not turn the next append into a false idempotent return.
+        $cachedPhaseFixture = New-ProgressFixture -UnitCount 1
+        $cachedPhaseHolder = New-RecoveryProgressLeaseHolder
+        try {
+            Append-RecoveryProgress -Manifest $cachedPhaseFixture.Manifest -Journal $cachedPhaseFixture.Journal -UnitIndex 0 -Phase 'restoring' -ProgressLeaseHolder $cachedPhaseHolder
+            $readCachedPhaseBytes = {
+                $stream = if ($null -ne $cachedPhaseHolder.Lease) { $cachedPhaseHolder.Lease.Stream } else { $null }
+                if ($null -eq $stream) { return ,([IO.File]::ReadAllBytes((Get-RecoveryProgressPath $cachedPhaseFixture.Manifest))) }
+                $position = $stream.Position
+                try {
+                    $stream.Position = 0
+                    $bytes = New-Object byte[] ([int]$stream.Length)
+                    $offset = 0
+                    while ($offset -lt $bytes.Length) {
+                        $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+                        if ($read -le 0) { throw 'cached progress fixture stream ended before its bound.' }
+                        $offset += $read
+                    }
+                    return ,$bytes
+                } finally { $stream.Position = $position }
+            }
+            $cachedPhaseBytes = & $readCachedPhaseBytes
+            $cachedPhaseFixture.Journal.units[0].phase = 'complete'
+            Assert-BehaviorThrows { Read-RecoveryProgress -Manifest $cachedPhaseFixture.Manifest -Journal $cachedPhaseFixture.Journal -JournalUnits $cachedPhaseFixture.Journal.units -ProgressLeaseHolder $cachedPhaseHolder } 'cached phase transition is rejected before a read is accepted'
+            Assert-BehaviorThrows { Append-RecoveryProgress -Manifest $cachedPhaseFixture.Manifest -Journal $cachedPhaseFixture.Journal -UnitIndex 0 -Phase 'complete' -ProgressLeaseHolder $cachedPhaseHolder } 'cached restoring-to-complete transition cannot return idempotent false'
+            $cachedPhaseAfterBytes = & $readCachedPhaseBytes
+            Assert-Behavior ([Convert]::ToBase64String($cachedPhaseAfterBytes) -ceq [Convert]::ToBase64String($cachedPhaseBytes) -and
+                $cachedPhaseFixture.Journal.progressSequence -eq 1) 'cached phase rejection preserves progress bytes and sequence.'
+            $cachedPhaseFixture.Journal.units[0].phase = 'restoring'
+            Assert-Behavior (Append-RecoveryProgress -Manifest $cachedPhaseFixture.Manifest -Journal $cachedPhaseFixture.Journal -UnitIndex 0 -Phase 'complete' -ProgressLeaseHolder $cachedPhaseHolder) 'validated cached phase can be completed after the journal is restored.'
+        } finally {
+            Close-RecoveryProgressLeaseHolder $cachedPhaseHolder
+            Remove-Item -LiteralPath $cachedPhaseFixture.Root -Recurse -Force -ErrorAction SilentlyContinue
         }
 
         $roundTrip = New-ProgressFixture -UnitCount 2
@@ -1394,6 +1548,13 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
             $aclFixture = New-ProgressFixture -UnitCount 1
             Append-RecoveryProgress -Manifest $aclFixture.Manifest -Journal $aclFixture.Journal -UnitIndex 0 -Phase 'complete'
             $script:strictAclJournalPath = Get-FullPath (Get-RecoveryJournalPath $aclFixture.Manifest)
+            $progressAcl = Get-Acl -LiteralPath (Get-RecoveryProgressPath $aclFixture.Manifest)
+            $progressAcl.SetAccessRuleProtection($false, $true)
+            $progressAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                ([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')),
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                [Security.AccessControl.AccessControlType]::Allow))
+            Set-Acl -LiteralPath (Get-RecoveryProgressPath $aclFixture.Manifest) -AclObject $progressAcl
             $script:strictProgressSetAclCalls = 0
             $script:strictProgressGetAclCalls = 0
             function Assert-RestrictedAcl {
@@ -1407,7 +1568,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
             try {
                 Read-RecoveryJournal $aclFixture.Manifest -Strict
             } catch { $strictAclError = [string]$_.Exception.Message }
-            Assert-Behavior ($strictAclError -ceq 'fixture strict ACL rejection') 'strict journal verification preserves the progress-log ACL rejection error.'
+            Assert-Behavior ($strictAclError -ceq 'Recovery progress ACL contains an ACE outside the management boundary.') 'strict journal verification preserves the native progress ACL rejection error.'
             Assert-Behavior ($script:strictProgressSetAclCalls -eq 0 -and $script:strictProgressGetAclCalls -eq 0) 'strict journal ACL rejection calls no ACL repair or inspection adapter.'
         } finally {
             if ($null -ne $aclFixture) { Remove-Item -LiteralPath $aclFixture.Root -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1496,7 +1657,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         $manifest = [pscustomobject]@{
             transactionId = 'terminal-reader-fixture'
             generation = 'generation'
-            operatorSid = 'fixture'
+            operatorSid = $behaviorOperatorSid
             manifestPath = (Join-Path $backup 'manifest.json')
             collectorTransition = $null
             paths = [pscustomobject]@{
@@ -1619,7 +1780,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     $destination = Join-Path $data 'writer.json'; $source = Join-Path $backup 'writer.json'
     [IO.File]::WriteAllText($destination, 'temporary'); [IO.File]::WriteAllText($source, 'prior')
     $manifest = [pscustomobject]@{
-        transactionId = 'retry-budget-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = (Join-Path $backup 'manifest.json'); collectorTransition = $null
+        transactionId = 'retry-budget-fixture'; generation = 'generation'; operatorSid = $behaviorOperatorSid; manifestPath = (Join-Path $backup 'manifest.json'); collectorTransition = $null
         paths = [pscustomobject]@{ backupDirectory = $backup; gatewayData = $data; usageHistory = (Join-Path $temp 'usage.jsonl') }
         backups = @([pscustomobject]@{ destination = $destination; backup = $source; changed = $true; priorExists = $true; phase = 'complete' })
     }
