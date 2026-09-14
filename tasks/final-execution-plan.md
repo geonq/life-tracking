@@ -1,8 +1,9 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-14; local `main` is **f0d59a5**, pushed remote is
-**16e0855** pending approval, and D2a/D2b is Astra Medium **MERGE**. Approved
-documentation-only plan; Windows facts are read-only. Release remains NO-GO.
-
+Planning baseline: 2026-09-14; local source `f0d59a5` plus coordination
+checkpoint `5d28735`; `origin/main` is **16e0855**, five commits behind.
+D2a/D2b is Astra Medium **MERGE**. Approved documentation-only plan; Windows
+facts are read-only; release is NO-GO. Progress is **70–75% implemented** /
+**35–45% release-ready**, kept separate.
 ## 1. Current truth and explicit gates
 - **NO-GO.** The current local checkpoint is `f0d59a5`, including the reviewed
   dashboard refinement at `0d094ee`, calendar zoom safety, the T12b calendar
@@ -85,8 +86,7 @@ documentation-only plan; Windows facts are read-only. Release remains NO-GO.
 | T14 | NEW: ios/Planning/{PlanningVaultBinding,PlanningDomain,PlanningCanvasCodec,PlanningMarkdownCodec,PlanningVaultStore,PlanningMutationJournal,PlanningConflictResolver,PlanningGraphProjection,PlanningSpatialIndex}.swift; ios/LifeOS/Modules/Planning/{PlanningCanvasView,PlanningNodeInspector}.swift; ios/LifeOSTests/{PlanningCanvasCodec,PlanningMarkdownCodec,PlanningMutationJournal,PlanningConflictResolver,PlanningSpatialIndex}Tests.swift; services/gateway/{planning,test_planning}.py; packages/contracts/src/planning.ts | After T10a feasibility: §7 access→lossless codec→proposals/conflicts→Mac→phone→Windows mirror. Operator choices gate publication. Preserve originals/conflicts. T3c/T10c/T11b/T12b wire after isolated review, then real round trip. |
 | T15 | services/api/src/{server,local-auth,ingest-secret,claude-ingest,codex-adapter,atomic-file,history,json-boundary}.ts; apps/dashboard/src/{main.tsx,styles.css} and apps/dashboard/index.html only if release-served; NEW: services/api/src/final-boundary.test.ts | After integrated T2–T14: final security and live Usage/Clipper freshness/idempotency/truth, no prompt/file-content collection. Collector/contract/dependency/CI edits need exact amendments; gateway/native fixes return to owners. Served web gets CSP/truth checks, never substitutes for native evidence. |
 | T16 | NEW: artifacts/final/T16/release-evidence.md only | All gates/follow-ups: final matrix, leaf/ACTIVE/Canvas/user completeness and candidate/signed/deployed/branch/PR audit. Acceptance/status edits return to T0, fixes to owners. Retain previous candidate/restore receipts; merge needs gates AND explicit operator authorization. |
-
-## 4. Windows recovery precedes live Enable Banking
+## 4. Windows recovery precedes current Enable Banking re-certification
 1. Future operator starts read-only: PID/command/start-time ownership, SCM, strict marker/journal/progress identity/phase/sequence, disk/memory and healthy C:/D: protection. Active marker≠running process. No duplicate recovery, unknown-process termination, BitLocker disable/re-encryption or key disclosure.
 2. Preserve the verified canonical manifest, recovery marker, journal, progress, backups and authority files. Never edit/delete the marker to unlock install, fabricate recovered state or reset the legacy checkout.
 3. Disposable PS5.1 corpus exercises production readers: changed/replaced/truncated journal/progress, same-length hash mismatch, interrupted tails, forged context, ACL/reparse/ancestor replacement, absent-service/SCM drift, writer barrier and crash/retry every stage. Mock OS boundaries only; record full-size scans/time/RSS.
@@ -94,7 +94,7 @@ documentation-only plan; Windows facts are read-only. Release remains NO-GO.
 5. Only Astra A1 plus fresh operator/admin identity and transaction mutex permits verified deploy/rollback.ps1 -ManifestPath <canonical manifest>. Observe the same owned PID/CPU/stage; time alone is not failure. Safe owned-process stop under resource danger preserves recovery-required state; observation cannot become recovery success.
 6. Successful recovery/postconditions precede install. Build via scripts/build_windows_release.sh using verified Node/pinned wheelhouse; bind SOURCE_SHA/archive digest/manifest through transfer. Verify-candidate→non-mutating preflight→install on identical protected inputs; retain backups/legacy fallback until verified cutover.
 7. Prove API auto/gateway delayed-auto, virtual identities, absolute binaries, loopback-only127.0.0.1:8787/8421 and approved Tailscale HTTPS host/8420. Verify SYSTEM identity snapshot access, service-SID ACLs/reparse refusal/DPAPI/unauthorized effective access/health/restart/reboot/encrypted restore. No secrets in arguments/logs/evidence.
-8. After A2 inspect existing Enable Banking sessions before reconsent. Operator supplies protected key/cert/app-ID paths, exact callback/ASPSP mapping and consent if necessary. Reconcile real account counts/balances/transactions/currency/observedAt gateway→Mac→iPhone against source; partial/stale remains distinct. Controlled replay/invalid-state/expiry/revoke uses disposable consent; no unattended live revocation.
+8. After A2 inspect existing Enable Banking sessions before reconsent. The provider path is historically live-proven; re-certify current deployment/native readback rather than rebuilding the adapter. Operator supplies protected key/cert/app-ID paths, exact callback/ASPSP mapping and consent if necessary. Reconcile real account counts/balances/transactions/currency/observedAt gateway→Mac→iPhone; partial/stale remains distinct. Controlled replay/invalid-state/expiry/revoke uses disposable consent; no unattended live revocation.
 9. Sparkasse is live regulated banking; Revolut Personal/Business support and eligibility must be proven or unavailable. Trade Republic remains supported manual CSV/PDF import with operator samples, original hash/batch/provenance/preview/confirm/correction/reimport receipts, never “live sync.” No production pytr, PayPal fallback or fabricated balances.
 
 ## 5. Secure Mac+iPhone signing, App Groups and Shortcuts

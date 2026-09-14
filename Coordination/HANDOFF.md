@@ -7,18 +7,17 @@ Updated 2026-09-14 Europe/Berlin.
 **NO-GO.** The Usage visual/source, calendar security, macOS route, and
 personal installer security slices have passing source evidence. Runtime, live
 provider, whole-app visual, physical device, and end-to-end deployment
-evidence is still incomplete.
+evidence is still incomplete. Track **~70–75% implemented** and **~35–45%
+release-ready** separately; estimates, not acceptance counts—never collapse them.
 
 ## Current source checkpoint
 
 - Application source checkpoint: `f0d59a5 Make calendar undo a synced
-  compensating mutation`; local `main` is ahead of `origin/main` by the
-  reviewed D2a/D2b source commits plus this checkpoint. `16e0855` remains the
-  pushed remote checkpoint; PR #1 is merged and no open PRs are recorded.
-  The reviewed source includes the dashboard, calendar, usage, finance,
-  backend-security, and installer slices.
-  Windows recovery-instrumentation checkpoint remains `0a8d5b6`, and the
-  historical deployable candidate remains `6baa1f3`.
+  compensating mutation`; coordination checkpoint `5d28735` is also on local
+  `main`, which is five commits ahead of `origin/main` (`16e0855`). PR #1 is
+  merged and no open PRs are recorded. Reviewed source includes dashboard,
+  calendar, usage, finance, backend-security, and installer; Windows recovery-
+  instrumentation checkpoint is `0a8d5b6`, historical candidate `6baa1f3`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
@@ -135,8 +134,9 @@ evidence is still incomplete.
   A fresh read-only probe found the durable deployment marker `active` with a
   manifest, but no stage, `recovery.json`, or `recovery.progress.jsonl` at the
   default backup root; the older 31,401-unit journal receipt is therefore not
-  treated as current. Install and live Enable Banking readback remain
-  uncertified; diagnostics and phase telemetry were tested only in a
+  treated as current. Install remains uncertified. Enable Banking is
+  historically live-proven; current deployment and native readback still need
+  re-certification. Diagnostics and phase telemetry were tested only in a
   disposable copy, and the canonical transaction was not resumed or installed.
 - Three bounded T1a/T1b Luna Max recovery-preparation attempts were stopped
   after producing no usable report. They made no source or Windows mutation.
@@ -194,5 +194,7 @@ committed Usage tranche is `e8bbefa`. Calendar gesture work is not accepted and
 must use the smaller T12 packets in `tasks/final-execution-plan.md`. The two
 broad security workers returned no report, so any further reconciliation must
 use a completed bounded execution method before code changes. Keep the Windows
-marker untouched until fresh strict recovery observation, identity/ACL checks,
-and reviewed performance authorize mutation. Live bank readback, physical signing/widgets, whole-app visual/runtime, Zepp, Obsidian, and final release evidence remain open.
+  marker untouched until fresh strict recovery observation, identity/ACL checks,
+  and reviewed performance authorize mutation. Current banking work is
+  deployment/native readback re-certification. Physical signing/widgets,
+  whole-app visual/runtime, Zepp, Obsidian, and final release evidence remain open.

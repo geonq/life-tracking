@@ -4,10 +4,10 @@ Updated 2026-09-14 Europe/Berlin.
 
 - Release: **NO-GO**.
 - Main source checkpoint: `f0d59a5` (`Make calendar undo a synced
-  compensating mutation`) on local `main`; `origin/main` remains at the pushed
-  D1 checkpoint `16e0855` until the approved remote push. D2a/D2b are Astra
-  Medium source-reviewed **MERGE**. The deployable Windows candidate remains
-  `6baa1f3`; PR #1 is already merged.
+  compensating mutation`) plus coordination checkpoint `5d28735` on local
+  `main`; `origin/main` remains at `16e0855`, five commits behind. D2a/D2b
+  are Astra Medium source-reviewed **MERGE**. The deployable Windows
+  candidate remains `6baa1f3`; PR #1 is already merged.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -89,9 +89,10 @@ Updated 2026-09-14 Europe/Berlin.
   worker-facing design contract on 2026-09-14. The parent reconciled their
   branch, PR, and runtime wording; they are planning specifications, not
   source, device, live-data, security, or release acceptance.
-- The frozen acceptance registry validates with 258 scored leaves and 7
-  aliases, but records 0 accepted leaves; its `--score` gate fails as designed.
-  Tranche GREEN reviews therefore do not represent a completion percentage.
+- Track progress separately: approximately **70–75% implemented** and
+  **35–45% release-ready**. The frozen acceptance registry validates with 258
+  scored leaves and 7 aliases, but records 0 accepted leaves; its `--score`
+  gate is release evidence, not an implementation percentage.
 - T0 requirements mapping is generated at
   `artifacts/final/T0/requirements-map.md`. T10a capability preflight is
   **SOURCE GAP**: checked-in capabilities exist, but Team ID, physical
@@ -134,7 +135,8 @@ Updated 2026-09-14 Europe/Berlin.
   active with a manifest but no stage, `recovery.json`, or
   `recovery.progress.jsonl` at the default backup root. The older 31,401-unit
   journal receipt is not treated as current. Reinstall, listener/health,
-  Tailscale Serve, and live banking remain open; disposable
+  Tailscale Serve, and current native Enable Banking readback remain open. The
+  provider path is historically live-proven; disposable
   diagnostics/strict-reader/phase-telemetry validation passed.
 - Three T1a/T1b Luna Max recovery-preparation workers were stopped without
   usable reports and without source or Windows mutation. A1 is RED; the T1

@@ -4,6 +4,17 @@ Status: IN PROGRESS
 Updated: 2026-09-14
 Mode: prospective implementation of the complete LifeOS design plan; one verified, publishable tranche at a time.
 
+## Goal and measurement
+
+Ship the complete personal LifeOS product for daily use on this Mac and
+iPhone, with the Windows host providing private backend and storage.
+Measure two tracks independently: **~70–75% implementation** and
+**~35–45% release readiness**. The frozen registry, tranche reviews, and test
+counts are evidence inputs, never a substitute for either estimate. Existing
+capabilities such as Enable Banking are not reopened as new features: verify
+current deployment and native readback, then close the gate. Every update must
+name the concrete gate moved, the evidence produced, and the next dependency.
+
 ## Authority order
 1. Current user instructions and corrections.
 2. User-supplied `Instructions.md` and authenticated Figma file `14OEzVG2UEO2J3Dnd717ig` (`MacHomeDesignByMe` and named reference frames).
@@ -25,8 +36,8 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
 - Current application source checkpoint: `f0d59a5` (synced compensating
-  calendar undo), on local `main`; `origin/main` remains at the pushed D1
-  checkpoint `16e0855` until the approved remote push. It includes the
+  calendar undo), plus coordination checkpoint `5d28735` on local `main`;
+  `origin/main` remains at `16e0855`, five commits behind. It includes the
   security reconciliation and production dependency audit updates. The
   feature branch push and merge succeeded; GitHub CLI reports PR #1 merged
   into `main`. The deployable Windows candidate is the verified `6baa1f3`

@@ -1,8 +1,10 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-14 Europe/Berlin. Release: **NO-GO**. Local `main` is at
-`f0d59a5`; `origin/main` remains at pushed `16e0855` pending the approved
-remote push. T12c and D1/D2 have Astra Medium source **MERGE** reviews.
+Updated 2026-09-14 Europe/Berlin. Release: **NO-GO**. Local `main` contains
+source checkpoint `f0d59a5` plus coordination checkpoint `5d28735`; it is five
+commits ahead of `origin/main` at `16e0855`. Track completion separately as
+approximately **70–75% implemented** and **35–45% release-ready**. T12c and
+D1/D2 have Astra Medium source **MERGE** reviews.
 
 ## Ordered work
 
@@ -20,8 +22,9 @@ remote push. T12c and D1/D2 have Astra Medium source **MERGE** reviews.
 3. Use the bounded recovery diagnostics and strict journal observation in a
   disposable validation, finish the
    Windows recovery, install the verified `6baa1f3` candidate, and
-   verify service listeners, health, ACLs, Tailscale Serve, and live Enable
-   Banking reads on the reachable PC. The first real resume reached journal
+   verify service listeners, health, ACLs, Tailscale Serve, and current native
+   Enable Banking reads on the reachable PC. Enable Banking is historically
+   live-proven; this is deployment/readback re-certification. The first real resume reached journal
    unit 31,400 but stopped after 45 minutes without a stage checkpoint; design
    and review non-mutating validation before retrying. Diagnostics at `14a3b7f`
    and phase telemetry at `0a8d5b6` passed native Windows PowerShell 5.1
