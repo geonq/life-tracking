@@ -234,6 +234,29 @@ public final class CalendarCoordinator: ObservableObject {
     private typealias CalendarRemoteFetch = @Sendable () async throws -> CalendarRemoteResource
     private typealias CalendarRemotePush = @Sendable (Data, String, String) async throws -> CalendarRemoteResource
     private static let maximumRemoteMutationAttempts = 3
+    // Revision zero is the valid pre-first-commit state used by a fresh
+    // coordinator. The inclusive peer maximum is retained as an exhausted
+    // persisted state; local operations refuse to advance beyond it.
+    private static let maximumStoredRevision = CalendarPeerSyncEnvelope.maximumRevision
+    private static let revisionKey = "LifeOS.Calendar.revision"
+
+    private static func normalizedStoredRevision(_ value: Int) -> Int {
+        min(max(value, 0), maximumStoredRevision)
+    }
+
+    private static func normalizedRemoteRevision(_ value: Int?) -> Int? {
+        guard let value, (0..<CalendarPeerSyncEnvelope.maximumRevision).contains(value) else {
+            return nil
+        }
+        return value
+    }
+
+    private func nextRevisionCandidate() -> Int? {
+        guard revision >= 0, revision < CalendarPeerSyncEnvelope.maximumRevision else {
+            return nil
+        }
+        return revision + 1
+    }
 
     /// Returns a fresh metadata store for a visual-fixture coordinator. The
     /// instance has no persistent or standard-defaults domain.
@@ -382,7 +405,11 @@ public final class CalendarCoordinator: ObservableObject {
         let key = "LifeOS.Calendar.senderID"
         if let existing = resolvedDefaults.string(forKey: key), !existing.isEmpty { senderID = existing }
         else { let value = UUID().uuidString; resolvedDefaults.set(value, forKey: key); senderID = value }
-        revision = resolvedDefaults.integer(forKey: "LifeOS.Calendar.revision")
+        let storedRevision = resolvedDefaults.integer(forKey: Self.revisionKey)
+        revision = Self.normalizedStoredRevision(storedRevision)
+        if revision != storedRevision {
+            resolvedDefaults.set(revision, forKey: Self.revisionKey)
+        }
         if usesVisualFixtures {
             peerSync = FixtureCalendarPeerTransport()
             livePeerSync = nil
@@ -735,6 +762,11 @@ public final class CalendarCoordinator: ObservableObject {
     }
 
     private func performPersist(_ mutation: CalendarMutation, clearingFailureID: UUID?) async -> CalendarLocalSaveResult {
+        guard let committedRevision = nextRevisionCandidate() else {
+            let message = "Unable to save calendar: the local revision limit has been reached."
+            errorMessage = message
+            return .failure(message)
+        }
         let publishedBefore = snapshot
         let loadedBeforeMutation = isLoaded
         let isFixtureMode = usesVisualFixtures
@@ -765,8 +797,8 @@ public final class CalendarCoordinator: ObservableObject {
                 pendingFailedMutation = nil
             }
             pendingFailedUndo = false
-            revision += 1
-            defaults.set(revision, forKey: "LifeOS.Calendar.revision")
+            revision = committedRevision
+            defaults.set(revision, forKey: Self.revisionKey)
             if pendingFailedMutation == nil { errorMessage = nil }
 
             // Every successful local mutation supersedes the previous one-shot
@@ -793,6 +825,12 @@ public final class CalendarCoordinator: ObservableObject {
         guard let token = undoToken else {
             return .failure("There is no calendar mutation to undo.")
         }
+        guard let committedRevision = nextRevisionCandidate() else {
+            let message = "Unable to undo calendar mutation: the local revision limit has been reached."
+            errorMessage = message
+            pendingFailedUndo = true
+            return .failure(message)
+        }
 
         do {
             // CalendarStore.save uses the same temporary-file + replace
@@ -808,8 +846,8 @@ public final class CalendarCoordinator: ObservableObject {
             isLoaded = true
             setUndoToken(nil)
             pendingFailedUndo = false
-            revision += 1
-            defaults.set(revision, forKey: "LifeOS.Calendar.revision")
+            revision = committedRevision
+            defaults.set(revision, forKey: Self.revisionKey)
             if pendingFailedMutation == nil { errorMessage = nil }
             requestWidgetTimelineReloadIfNeeded()
             return .success
@@ -1080,15 +1118,34 @@ public final class CalendarCoordinator: ObservableObject {
                 if let warning = report.warning {
                     self.markRemoteMutationWarning(warning)
                 }
+                let candidate = durable.merged(with: report.snapshot)
+                guard candidate != durable else {
+                    if !self.isLoaded || self.snapshot != durable {
+                        self.snapshot = durable
+                        self.isLoaded = true
+                        self.requestWidgetTimelineReloadIfNeeded()
+                    }
+                    return .success
+                }
+                guard let nextRevision = self.nextRevisionCandidate() else {
+                    return .failure("Unable to adopt authoritative calendar state: the local revision limit has been reached.")
+                }
                 let persisted = try await self.store.merge(report.snapshot)
-                guard !self.isLoaded || persisted != self.snapshot else { return .success }
+                guard persisted != durable else {
+                    if !self.isLoaded || self.snapshot != durable {
+                        self.snapshot = durable
+                        self.isLoaded = true
+                        self.requestWidgetTimelineReloadIfNeeded()
+                    }
+                    return .success
+                }
                 self.durableGeneration &+= 1
                 self.snapshot = persisted
                 self.isLoaded = true
                 self.setUndoToken(nil)
                 self.pendingFailedUndo = false
-                self.revision += 1
-                self.defaults.set(self.revision, forKey: "LifeOS.Calendar.revision")
+                self.revision = nextRevision
+                self.defaults.set(self.revision, forKey: Self.revisionKey)
                 if self.pendingFailedMutation == nil { self.errorMessage = nil }
                 self.requestWidgetTimelineReloadIfNeeded()
                 capture.value = persisted
@@ -1149,9 +1206,9 @@ public final class CalendarCoordinator: ObservableObject {
             }
             return
         }
-        if let remoteRevision {
+        if let remoteRevision = Self.normalizedRemoteRevision(remoteRevision) {
             revision = max(revision, remoteRevision)
-            defaults.set(revision, forKey: "LifeOS.Calendar.revision")
+            defaults.set(revision, forKey: Self.revisionKey)
         }
 
         guard generation == durableGeneration else {
@@ -1170,7 +1227,7 @@ public final class CalendarCoordinator: ObservableObject {
             return
         }
 
-        guard !isLoaded || merged != snapshot else {
+        guard merged != snapshot else {
             isLoaded = true
             return
         }
@@ -1188,9 +1245,9 @@ public final class CalendarCoordinator: ObservableObject {
         isLoaded = true
         setUndoToken(nil)
         pendingFailedUndo = false
-        if let remoteRevision {
+        if let remoteRevision = Self.normalizedRemoteRevision(remoteRevision) {
             revision = max(revision, remoteRevision)
-            defaults.set(revision, forKey: "LifeOS.Calendar.revision")
+            defaults.set(revision, forKey: Self.revisionKey)
         }
         defaults.set(Date.now.timeIntervalSince1970, forKey: "LifeOS.Sync.LastSuccess")
         if pendingFailedMutation == nil { errorMessage = nil }

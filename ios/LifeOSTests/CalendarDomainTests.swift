@@ -2108,6 +2108,92 @@ final class CalendarDomainTests: XCTestCase {
     }
 
     @MainActor
+    func testCoordinatorRejectsHostileRemoteRevisionBeforeNextPeerSend() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sentRevisions = CalendarRevisionRecorder()
+        let remote = try CalendarItem(
+            title: "remote",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+        let local = try CalendarItem(
+            title: "local",
+            start: base.addingTimeInterval(120),
+            end: base.addingTimeInterval(180),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(1)
+        )
+        let defaults = CalendarCoordinator.makeVisualFixtureDefaults()
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarSnapshot(),
+            usesVisualFixtures: true,
+            storeURL: directory.appendingPathComponent("calendar.json"),
+            peerSend: { _, _, revision in sentRevisions.append(revision) },
+            defaults: defaults
+        )
+
+        let mergeResult = await coordinator.merge(
+            CalendarSnapshot(items: [remote]),
+            remoteRevision: CalendarPeerSyncEnvelope.maximumRevision,
+            now: base
+        )
+        let saveResult = await coordinator.save(local)
+        XCTAssertEqual(mergeResult, .success)
+        XCTAssertEqual(saveResult, .success)
+
+        XCTAssertEqual(sentRevisions.values, [1])
+        XCTAssertTrue(sentRevisions.values.allSatisfy { (1...CalendarPeerSyncEnvelope.maximumRevision).contains($0) })
+        XCTAssertEqual(defaults.integer(forKey: "LifeOS.Calendar.revision"), 1)
+    }
+
+    @MainActor
+    func testCoordinatorIgnoresNegativeRemoteRevisionAndNormalizesStoredMaximum() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sentRevisions = CalendarRevisionRecorder()
+        let defaults = CalendarCoordinator.makeVisualFixtureDefaults()
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarSnapshot(),
+            usesVisualFixtures: true,
+            storeURL: directory.appendingPathComponent("calendar.json"),
+            peerSend: { _, _, revision in sentRevisions.append(revision) },
+            defaults: defaults
+        )
+        let local = try CalendarItem(
+            title: "local",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+
+        let mergeResult = await coordinator.merge(CalendarSnapshot(), remoteRevision: -1, now: base)
+        let saveResult = await coordinator.save(local)
+        XCTAssertEqual(mergeResult, .success)
+        XCTAssertEqual(saveResult, .success)
+
+        XCTAssertEqual(sentRevisions.values, [1])
+        XCTAssertEqual(defaults.integer(forKey: "LifeOS.Calendar.revision"), 1)
+
+        let poisonedDefaults = CalendarCoordinator.makeVisualFixtureDefaults()
+        poisonedDefaults.set(CalendarPeerSyncEnvelope.maximumRevision, forKey: "LifeOS.Calendar.revision")
+        let poisonedCoordinator = CalendarCoordinator(
+            usesVisualFixtures: true,
+            storeURL: directory.appendingPathComponent("poisoned-calendar.json"),
+            defaults: poisonedDefaults
+        )
+        XCTAssertEqual(poisonedDefaults.integer(forKey: "LifeOS.Calendar.revision"), CalendarPeerSyncEnvelope.maximumRevision)
+        let exhaustedSave = await poisonedCoordinator.save(local)
+        if case .success = exhaustedSave {
+            XCTFail("A coordinator reopened at the protocol maximum must not reuse a revision")
+        }
+        XCTAssertEqual(poisonedDefaults.integer(forKey: "LifeOS.Calendar.revision"), CalendarPeerSyncEnvelope.maximumRevision)
+    }
+
+    @MainActor
     func testCoordinatorRemoteMergeInvalidatesUndoToken() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let url = directory.appendingPathComponent("calendar.json")
