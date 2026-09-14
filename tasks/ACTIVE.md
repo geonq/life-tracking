@@ -81,12 +81,11 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   Astra Medium for missing actual shell evidence and collapsed-header geometry
   risk; its patch is preserved in `/private/tmp/lifeos-mac-shell-candidate-red.patch`.
   The causal replacement is the reviewed and pushed `39f2c21` shell refinement.
-- Pauli the 4th (Luna Max, worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`) and
-  Fermat the 4th (worker `01a09bc6-739d-7cb2-b632-cb52466d5b11`) were
-  dispatched for read-only audits of the Claude security findings and both were
-  closed after returning no report. No security patch is authorized until a
-  completed audit identifies concrete OPEN/PARTIAL findings; do not dispatch a
-  third broad audit without changing the execution method.
+- Claude's supplied security findings are reconciled in
+  `artifacts/final/T0/security-findings.md`. The parent-led matrix records
+  source-fixed, partial, open, and unverified states; it does not authorize
+  canonical Windows mutation or claim a final penetration test. Do not start
+  another broad audit; source fixes must use a completed, bounded owner packet.
 - T0 requirements mapping is generated from the validated frozen registry.
   T10a capability preflight completed as **SOURCE GAP** and is retained at
   `artifacts/final/T0/t10a-capability-preflight.md`; three T1a recovery review

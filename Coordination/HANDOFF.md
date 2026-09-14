@@ -150,11 +150,13 @@ evidence is still incomplete.
   calendar gestures, widgets, physical iPhone, signing, and Shortcuts.
 - Zepp workout fidelity/sync and the Obsidian Canvas mind map; see issue #2.
 - Final operational security, transport, and release acceptance checks.
-- Pauli the 4th (Luna Max worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`) and
-  Fermat the 4th (worker `01a09bc6-739d-7cb2-b632-cb52466d5b11`) were dispatched
-  to reconcile the supplied Claude security findings read-only against current
-  source, but both were closed without a report. Several reported items may be
-  fixed; any next audit needs a different execution method before code changes.
+- Claude's supplied High/Medium/Low security findings are reconciled
+  finding-by-finding in `artifacts/final/T0/security-findings.md`. Most API,
+  parsing, atomic-write, and secret-comparison findings are fixed at source
+  level; peer transport identity, tax/deployment proof, regex fuzzing,
+  cross-process history locking, dependency audit, and deployed evidence
+  remain open or partial. No broad worker report was received, so this matrix
+  is parent-led source evidence rather than an Astra release sign-off.
 - Two T12 Calendar Luna Max attempts (`01a09cc4-6798-7423-a649-222b9d65af3e`
   and `01a09cd9-123b-70f0-9da0-872586cfaaf1`) were stopped without a verified
   build or runtime handoff. Their incomplete patch was archived locally and
