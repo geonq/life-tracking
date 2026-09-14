@@ -1,6 +1,7 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
+Updated 2026-09-14 Europe/Berlin. Release: **NO-GO**. Main is pushed at
+`5b90539`; the latest shared visual foundation review is Astra **GREEN**.
 
 ## Ordered work
 

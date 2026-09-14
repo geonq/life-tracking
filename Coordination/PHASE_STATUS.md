@@ -3,11 +3,10 @@
 Updated 2026-09-14 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Deployable source checkpoint: `6baa1f3`; current application source checkpoint
-  is `e07a0a4` (calendar merge hardening layered over `e8bbefa`), merged into
-  mainline at `c09c3b7`; mainline also contains subsequent documentation syncs.
-  Later documentation-only commits may advance main HEAD without changing the
-  application source.
+- Main source checkpoint: `5b90539` (`Refine shared visual foundation and
+  settle chart geometry`), pushed to `origin/main`. It includes the reviewed
+  visual foundation and the clean production dependency audit. The deployable
+  Windows candidate remains `6baa1f3`; PR #1 is already merged.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -53,11 +52,12 @@ Updated 2026-09-14 Europe/Berlin.
   `LifeOSMac` production build and direct AX proof for the `import-tax-pdf`
   button; the full Mac UI suite remains unverified because of XCTest
   automation initialization failures.
-- Shared visual foundation at `628d4b3` has an exact serialized `LifeOSMac`
-  build with **BUILD SUCCEEDED**, inspected Home/Calendar captures, and an
-  Astra Medium **GREEN** review. It applies the current SF Pro/compact token
-  contract and flat card treatment; it does not pass whole-app visual or
-  interaction gates.
+- Shared visual foundation at `5b90539` has an exact serialized `LifeOSMac`
+  build with **BUILD SUCCEEDED** and an Astra Medium **GREEN** review. It
+  applies the current SF Pro/compact token contract, flat card treatment,
+  composed secondary-control contrast checks, and settled chart/ring geometry;
+  it does not pass whole-app visual or interaction gates. iOS execution remains
+  blocked by the unavailable CoreSimulator runtime on this Mac.
 - Shell refinement at `39f2c21` has an exact serialized macOS build with
   **BUILD SUCCEEDED**, inspected Home/Usage/Calendar captures, and Astra Medium
   **GREEN** review. The iOS simulator/generic lanes stop at asset compilation
@@ -99,7 +99,7 @@ Updated 2026-09-14 Europe/Berlin.
   reverted and quarantined before the reviewed `39f2c21` replacement.
   Claude's supplied security findings are reconciled in
   `artifacts/final/T0/security-findings.md`; this is parent-led source
-  evidence and not a release sign-off. H1, M6, L1, L3, L6, and deployed
+  evidence and not a release sign-off. H1, M6, L1, L3, and deployed
   Windows/physical proof remain open or partial.
 - The calendar review found no P0/P1. Its P2 unavailable-symbol finding is
   fixed and locally tested; the targeted Astra re-review was blocked by worker

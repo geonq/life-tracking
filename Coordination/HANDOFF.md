@@ -96,13 +96,14 @@ evidence is still incomplete.
   compile, and the exact artifact passed direct AX inspection and native picker
   interaction. The complete Mac UI suite remains unverified because XCTest
   automation initialization is still unreliable in this environment.
-- Shared visual foundation is committed at `628d4b3`: the current `tasks/design.md`
+- Shared visual foundation is committed at `5b90539`: the current `tasks/design.md`
   palette is applied, the system/SF Pro typography facade remains compact, and
   `LifeOSCard` uses one hairline border, flat structural fills, and the bounded
-  floating shadow. The exact serialized `LifeOSMac` build succeeded; Home and
-  Calendar were opened from that binary. Astra Medium reviewed the corrected
+  floating shadow. Secondary-control composited contrast now passes the >=3:1
+  contract, and ordinary chart/ring entry settles at final geometry. The exact
+  serialized `LifeOSMac` build succeeded; Astra Medium reviewed the corrected
   diff **GREEN**. This is foundation evidence only; route-by-route visual,
-  gesture, widget, phone, and physical acceptance remain open.
+  gesture, widget, phone, simulator, and physical acceptance remain open.
 - Mac shell refinement is committed at `39f2c21`: sidebar defaults/clamps,
   collapsed rail, toolbar/search geometry, selected navigation treatment, and
   iOS route animation ownership were reviewed by Astra Medium **GREEN**. The

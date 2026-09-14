@@ -24,12 +24,12 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint: `e07a0a4` (calendar merge hardening
-  layered over `e8bbefa`); mainline contains implementation merge `c09c3b7`
-  plus subsequent documentation syncs, with
-  implementation merge `c09c3b7`. The feature branch push and merge succeeded;
-  GitHub CLI reports PR #1 merged into `main`. The
-  deployable Windows candidate is the verified `6baa1f3` source checkpoint;
+- Current application source checkpoint: `5b90539` (shared visual foundation
+  and settled chart geometry), pushed to `origin/main`; it includes the
+  security reconciliation and production dependency audit updates. The
+  feature branch push and merge succeeded; GitHub CLI reports PR #1 merged
+  into `main`. The deployable Windows candidate is the verified `6baa1f3`
+  source checkpoint;
   recovery reached journal unit 31,400 and was stopped before its final stage.
   The marker remains active and `LifeOSAPI` remains stopped before install.
   Backend boundary security is Astra scoped GREEN at `87e7db6`. Calendar
@@ -41,10 +41,11 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   Finance responsive hierarchy is committed at `fd8ccfb`, with 16/16 scoped
   Mac snapshots, responsive captures at 900/1200/1512/1800, focused iPhone 17
   contracts, and an Astra Medium GREEN review.
-  Shared visual foundation is committed at `628d4b3`, with the current
-  compact SF Pro/neutral token contract, flat card treatment, a successful
-  serialized Mac build, inspected Home/Calendar captures, and an Astra Medium
-  GREEN review. This does not certify whole-app visual or device acceptance.
+  Shared visual foundation is committed at `5b90539`, with the current compact
+  SF Pro/neutral token contract, flat card treatment, composed secondary-control
+  contrast checks, settled chart/ring geometry, a successful serialized Mac
+  build, and an Astra Medium GREEN review. This does not certify whole-app
+  visual or device acceptance.
   Shell refinement is committed at `39f2c21`, with an exact serialized Mac
   build, opened Home/Usage/Calendar captures, and an Astra Medium GREEN review.
   iOS simulator/generic lanes are blocked at asset compilation by the missing
