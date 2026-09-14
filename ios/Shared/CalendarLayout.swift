@@ -1449,7 +1449,54 @@ public enum CalendarInteractionLayout {
         days: [Date],
         calendar: Calendar
     ) -> Int? {
-        days.firstIndex(where: { calendar.isDateInToday($0) })
+        nowIndicatorColumnIndex(days: days, at: .now, calendar: calendar)
+    }
+
+    /// Returns the sole candidate column for a supplied clock instant. The
+    /// reference date keeps TimelineView refreshes and pure layout tests on
+    /// the same day-selection rule without coupling either to wall-clock state.
+    public static func nowIndicatorColumnIndex(
+        days: [Date],
+        at referenceDate: Date,
+        calendar: Calendar
+    ) -> Int? {
+        guard referenceDate.timeIntervalSince1970.isFinite else { return nil }
+        return days.firstIndex(where: { calendar.isDate($0, inSameDayAs: referenceDate) })
+    }
+
+    /// Resolves the one now-indicator candidate and its current horizontal
+    /// visibility from one clock instant. TimelineView consumers use this
+    /// shared result so the marker and pinned hour labels cannot disagree at
+    /// a minute or midnight boundary.
+    public static func nowIndicatorState(
+        days: [Date],
+        at referenceDate: Date,
+        calendar: Calendar,
+        columnWidth: Double,
+        columnOriginX: Double,
+        timeGutter: Double,
+        contentWidth: Double,
+        viewportWidth: Double,
+        horizontalContentOffset: Double = 0
+    ) -> (dayIndex: Int, isVisible: Bool)? {
+        guard let dayIndex = nowIndicatorColumnIndex(
+            days: days,
+            at: referenceDate,
+            calendar: calendar
+        ) else { return nil }
+        return (
+            dayIndex: dayIndex,
+            isVisible: isTimelineDayColumnVisible(
+                dayIndex: dayIndex,
+                dayCount: days.count,
+                columnWidth: columnWidth,
+                columnOriginX: columnOriginX,
+                timeGutter: timeGutter,
+                contentWidth: contentWidth,
+                viewportWidth: viewportWidth,
+                horizontalContentOffset: horizontalContentOffset
+            )
+        )
     }
 
     /// Returns whether a day column intersects the currently visible day

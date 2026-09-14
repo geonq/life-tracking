@@ -515,6 +515,101 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
         XCTAssertEqual(readBack?.finance.spendCents, 9_900)
     }
 
+    private func paddedWidgetSnapshotData(to byteCount: Int) throws -> Data {
+        let encoded = try FutureWidgetSnapshotStore.encode(.unavailable(at: now))
+        XCTAssertLessThan(encoded.count, byteCount)
+        var padded = encoded
+        padded.append(Data(repeating: 0x20, count: byteCount - encoded.count))
+        return padded
+    }
+
+    func testFutureWidgetStoreAcceptsExactBoundAndRejectsOversizedDataBeforeDecode() throws {
+        let exact = try paddedWidgetSnapshotData(to: FutureWidgetSnapshotStore.maximumEncodedBytes)
+        XCTAssertNotNil(FutureWidgetSnapshotStore.decode(exact, now: now, policy: .visualFixture))
+
+        var oversized = exact
+        oversized.append(0x20)
+        XCTAssertNil(FutureWidgetSnapshotStore.decode(oversized, now: now, policy: .visualFixture))
+    }
+
+    func testFutureWidgetStoreAcceptsExactBoundAndRejectsOversizedFileRead() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lifeos-future-widget-oversized-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let target = directory.appendingPathComponent(FutureWidgetSnapshotStore.snapshotFilename)
+        let exact = try paddedWidgetSnapshotData(to: FutureWidgetSnapshotStore.maximumEncodedBytes)
+        try exact.write(to: target)
+        XCTAssertNotNil(FutureWidgetSnapshotStore.read(from: target, now: now, policy: .visualFixture))
+
+        var oversized = exact
+        oversized.append(0x20)
+        try oversized.write(to: target)
+        XCTAssertNil(FutureWidgetSnapshotStore.read(from: target, now: now, policy: .visualFixture))
+    }
+
+    private func oversizedValidWidgetSnapshot() -> FutureWidgetSnapshot {
+        // Each repeated combining-mark sequence is one grapheme cluster, so
+        // this remains within the model's 100-character source-label bound
+        // while exercising the encoder's actual UTF-8 byte size.
+        let cluster = "e" + String(repeating: "\u{0301}", count: 400)
+        let boundedCharacterCountLabel = String(repeating: cluster, count: 100)
+        func metric(_ value: Double, unit: WidgetFitnessMetricUnit) -> WidgetFitnessMetric {
+            WidgetFitnessMetric(
+                value: value,
+                unit: unit,
+                state: .fresh,
+                observedAt: now,
+                sourceLabel: boundedCharacterCountLabel
+            )
+        }
+
+        return FutureWidgetSnapshot(
+            generatedAt: now,
+            privacyMode: .summaryAllowed,
+            fitnessWidgets: WidgetSafeFitnessWidgetsSummary(
+                connector: .connected,
+                consent: .granted,
+                strain: metric(1, unit: .score),
+                recovery: metric(2, unit: .score),
+                sleepScore: metric(3, unit: .score),
+                sleepDuration: metric(4, unit: .hours),
+                respiration: metric(5, unit: .breathsPerMinute),
+                heartRate: metric(6, unit: .beatsPerMinute),
+                hrv: metric(7, unit: .milliseconds),
+                spo2: metric(8, unit: .oxygenPercent),
+                temperature: metric(35, unit: .celsius),
+                stressScore: metric(9, unit: .score)
+            )
+        )
+    }
+
+    func testFutureWidgetStoreRejectsOversizedValidSnapshotAndPreservesExistingFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lifeos-future-widget-encode-limit-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let target = directory.appendingPathComponent(FutureWidgetSnapshotStore.snapshotFilename)
+        let existing = FutureWidgetSnapshot.unavailable(at: now)
+        try FutureWidgetSnapshotStore.write(existing, to: target)
+        let existingData = try Data(contentsOf: target)
+
+        let oversized = oversizedValidWidgetSnapshot()
+        let rawEncoded = try JSONEncoder.lifeOS.encode(oversized)
+        XCTAssertGreaterThan(rawEncoded.count, FutureWidgetSnapshotStore.maximumEncodedBytes)
+
+        XCTAssertThrowsError(try FutureWidgetSnapshotStore.encode(oversized)) { error in
+            XCTAssertEqual(error as? FutureWidgetSnapshotStore.StoreError, .invalidSnapshot)
+        }
+        XCTAssertThrowsError(try FutureWidgetSnapshotStore.write(oversized, to: target)) { error in
+            XCTAssertEqual(error as? FutureWidgetSnapshotStore.StoreError, .invalidSnapshot)
+        }
+        XCTAssertEqual(try Data(contentsOf: target), existingData)
+        XCTAssertEqual(FutureWidgetSnapshotStore.read(from: target, now: now), existing)
+    }
+
     func testFutureWidgetStoreLivePolicyReadsObservedStaleAndUnavailableSnapshots() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("lifeos-future-widget-policy-\(UUID().uuidString)", isDirectory: true)

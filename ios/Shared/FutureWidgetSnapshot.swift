@@ -1546,6 +1546,9 @@ public struct FutureWidgetSnapshot: Codable, Equatable, Sendable {
 /// widget cannot accidentally decode the broader Usage/Finance payload.
 public enum FutureWidgetSnapshotStore {
     public static let snapshotFilename = "future-widget-snapshot.v1.json"
+    /// Maximum JSON payload accepted from or written to the shared snapshot
+    /// file. The bound is checked before decoding and before a file is loaded.
+    public static let maximumEncodedBytes = 64 * 1_024
 
     public enum ReadPolicy: Equatable, Sendable {
         case live
@@ -1593,7 +1596,9 @@ public enum FutureWidgetSnapshotStore {
               snapshot.nutrition.latestObservedAt.map({ $0.timeIntervalSince1970.isFinite && $0 <= snapshot.generatedAt }) ?? true else {
             throw StoreError.invalidSnapshot
         }
-        return try JSONEncoder.lifeOS.encode(snapshot)
+        let data = try JSONEncoder.lifeOS.encode(snapshot)
+        guard data.count <= maximumEncodedBytes else { throw StoreError.invalidSnapshot }
+        return data
     }
 
     public static func decode(
@@ -1601,6 +1606,7 @@ public enum FutureWidgetSnapshotStore {
         now: Date = .now,
         policy: ReadPolicy = .live
     ) -> FutureWidgetSnapshot? {
+        guard data.count <= maximumEncodedBytes else { return nil }
         let decoder = JSONDecoder.lifeOS
         decoder.userInfo[.lifeOSNow] = now
         guard let snapshot = try? decoder.decode(FutureWidgetSnapshot.self, from: data),
@@ -1630,7 +1636,13 @@ public enum FutureWidgetSnapshotStore {
         now: Date = .now,
         policy: ReadPolicy = .live
     ) -> FutureWidgetSnapshot? {
-        guard let data = try? Data(contentsOf: target) else { return nil }
+        // Read only one bound-plus-one chunk from one descriptor. A metadata
+        // check followed by Data(contentsOf:) has a growth/replacement race
+        // and can still allocate an unbounded file between the two operations.
+        guard let handle = try? FileHandle(forReadingFrom: target) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: maximumEncodedBytes + 1),
+              data.count <= maximumEncodedBytes else { return nil }
         return decode(data, now: now, policy: policy)
     }
 

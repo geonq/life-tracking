@@ -221,10 +221,15 @@ private struct CalendarTimelineHourAnchors: View {
 /// DST gap or fold cannot move a row or render the same hour twice.
 private struct CalendarTimelineHourLabels: View {
     let day: Date
-    let todayColumnVisible: Bool
+    let days: [Date]
     let hourHeight: CGFloat
     let contentHeight: CGFloat
     let width: CGFloat
+    let dayColumnWidth: CGFloat
+    let columnOriginX: CGFloat
+    let contentWidth: CGFloat
+    let viewportWidth: CGFloat
+    let horizontalContentOffset: CGFloat
     let calendar: Calendar
 
     var body: some View {
@@ -242,7 +247,18 @@ private struct CalendarTimelineHourLabels: View {
         ))
 
         TimelineView(.periodic(from: .now, by: 60)) { context in
-            let nowY: CGFloat? = todayColumnVisible
+            let nowLineVisible = CalendarInteractionLayout.nowIndicatorState(
+                days: days,
+                at: context.date,
+                calendar: calendar,
+                columnWidth: Double(dayColumnWidth),
+                columnOriginX: Double(columnOriginX),
+                timeGutter: Double(width),
+                contentWidth: Double(contentWidth),
+                viewportWidth: Double(viewportWidth),
+                horizontalContentOffset: Double(horizontalContentOffset)
+            )?.isVisible ?? false
+            let nowY: CGFloat? = nowLineVisible
                 ? min(
                     max(0, axisHeight - 1),
                     max(
@@ -899,20 +915,6 @@ public struct CalendarTimelineView: View {
             let macColumnWidth = days.isEmpty
                 ? 0
                 : max(0, (contentWidth - timeGutter) / CGFloat(days.count))
-            let todayColumnIndex = CalendarInteractionLayout.nowIndicatorColumnIndex(
-                days: days,
-                calendar: calendar
-            ) ?? -1
-            let todayColumnVisible = CalendarInteractionLayout.isTimelineDayColumnVisible(
-                dayIndex: todayColumnIndex,
-                dayCount: days.count,
-                columnWidth: Double(macColumnWidth),
-                columnOriginX: Double(timeGutter),
-                timeGutter: Double(timeGutter),
-                contentWidth: Double(contentWidth),
-                viewportWidth: Double(viewport.size.width),
-                horizontalContentOffset: Double(max(0, -macScrollOffset))
-            )
             ScrollView(.horizontal) {
                 VStack(spacing: 0) {
                     dayHeader(width: contentWidth)
@@ -929,9 +931,14 @@ public struct CalendarTimelineView: View {
                             ZStack(alignment: .topLeading) {
                                 HStack(alignment: .top, spacing: 0) {
                                     hourLabels(
+                                        days: days,
                                         timelineHeight: timelineHeight,
                                         hourHeight: renderedHourHeight,
-                                        todayColumnVisible: todayColumnVisible
+                                        dayColumnWidth: macColumnWidth,
+                                        columnOriginX: timeGutter,
+                                        contentWidth: contentWidth,
+                                        viewportWidth: viewport.size.width,
+                                        horizontalContentOffset: max(0, -macScrollOffset)
                                     )
                                         .frame(width: timeGutter)
                                     ForEach(days, id: \.self) { day in
@@ -963,12 +970,13 @@ public struct CalendarTimelineView: View {
                                 .overlay {
                                     CalendarNowLine(
                                         days: days,
-                                        todayColumnVisible: todayColumnVisible,
                                         calendar: calendar,
                                         timeGutter: timeGutter,
                                         totalHeight: timelineHeight,
                                         contentWidth: contentWidth,
-                                        columnOriginX: timeGutter
+                                        columnOriginX: timeGutter,
+                                        viewportWidth: viewport.size.width,
+                                        horizontalContentOffset: max(0, -macScrollOffset)
                                     )
                                 }
                                 CalendarTimelineHourAnchors(
@@ -1179,16 +1187,26 @@ public struct CalendarTimelineView: View {
     }
 
     private func hourLabels(
+        days: [Date],
         timelineHeight: CGFloat,
         hourHeight: CGFloat,
-        todayColumnVisible: Bool
+        dayColumnWidth: CGFloat,
+        columnOriginX: CGFloat,
+        contentWidth: CGFloat,
+        viewportWidth: CGFloat,
+        horizontalContentOffset: CGFloat
     ) -> some View {
         CalendarTimelineHourLabels(
             day: days.first ?? .now,
-            todayColumnVisible: todayColumnVisible,
+            days: days,
             hourHeight: hourHeight,
             contentHeight: timelineHeight,
             width: timeGutter,
+            dayColumnWidth: dayColumnWidth,
+            columnOriginX: columnOriginX,
+            contentWidth: contentWidth,
+            viewportWidth: viewportWidth,
+            horizontalContentOffset: horizontalContentOffset,
             calendar: calendar
         )
     }
@@ -1659,35 +1677,22 @@ private struct CalendarPagedTimeline: View {
                 hourHeight: Double(renderedHourHeight),
                 calendar: calendar
             ))
-            let contentHeight = CGFloat(CalendarInteractionLayout.timelineContentHeight(
-                days: days,
-                hourHeight: Double(renderedHourHeight),
-                calendar: calendar,
-                viewportHeight: Double(viewport.size.height)
-            ))
             let allDayHeight = CGFloat(CalendarAllDayLayout.height(
                 items: items,
                 days: visibleWindow,
                 calendar: calendar
             ))
             let visibleDayStarts = Set(visibleWindow.map { calendar.startOfDay(for: $0) })
-            let todayColumnIndex = CalendarInteractionLayout.nowIndicatorColumnIndex(
-                days: stripDays,
-                calendar: calendar
-            ) ?? -1
-            let todayColumnVisible = CalendarInteractionLayout.isTimelineDayColumnVisible(
-                dayIndex: todayColumnIndex,
-                dayCount: stripDays.count,
-                columnWidth: Double(columnWidth),
-                columnOriginX: Double(stripBaseX(columnWidth: columnWidth) + horizontalDragOffset),
-                timeGutter: Double(timeGutter),
-                contentWidth: Double(timelineWidth),
-                viewportWidth: Double(timelineWidth)
-            )
             let timedViewportHeight = CGFloat(CalendarInteractionLayout.timedViewportHeight(
                 containerHeight: Double(viewport.size.height),
                 dayHeaderHeight: Double(dayHeaderHeight),
                 allDayHeight: Double(allDayHeight)
+            ))
+            let contentHeight = CGFloat(CalendarInteractionLayout.timelineContentHeight(
+                days: days,
+                hourHeight: Double(renderedHourHeight),
+                calendar: calendar,
+                viewportHeight: Double(timedViewportHeight)
             ))
             let timelineColumnContext = CalendarTimelineColumnContext(
                 hourHeight: renderedHourHeight,
@@ -1708,19 +1713,25 @@ private struct CalendarPagedTimeline: View {
             ))
             let timelineNowLine = AnyView(CalendarNowLine(
                 days: stripDays,
-                todayColumnVisible: todayColumnVisible,
                 calendar: calendar,
                 timeGutter: timeGutter,
                 totalHeight: timelineAxisHeight,
                 contentWidth: timelineWidth,
                 columnOriginX: stripBaseX(columnWidth: columnWidth) + horizontalDragOffset,
+                viewportWidth: timelineWidth,
+                horizontalContentOffset: 0,
                 columnWidthOverride: columnWidth
             ))
             let timelineLabels = AnyView(
                 hourLabels(
+                    days: stripDays,
                     contentHeight: contentHeight,
                     hourHeight: renderedHourHeight,
-                    todayColumnVisible: todayColumnVisible
+                    dayColumnWidth: columnWidth,
+                    columnOriginX: stripBaseX(columnWidth: columnWidth) + horizontalDragOffset,
+                    contentWidth: timelineWidth,
+                    viewportWidth: timelineWidth,
+                    horizontalContentOffset: 0
                 )
                     .frame(width: timeGutter, height: contentHeight, alignment: .top)
                     .zIndex(1)
@@ -2745,16 +2756,26 @@ private struct CalendarPagedTimeline: View {
     }
 
     private func hourLabels(
+        days: [Date],
         contentHeight: CGFloat,
         hourHeight: CGFloat,
-        todayColumnVisible: Bool
+        dayColumnWidth: CGFloat,
+        columnOriginX: CGFloat,
+        contentWidth: CGFloat,
+        viewportWidth: CGFloat,
+        horizontalContentOffset: CGFloat
     ) -> some View {
         CalendarTimelineHourLabels(
             day: pageAnchor,
-            todayColumnVisible: todayColumnVisible,
+            days: days,
             hourHeight: hourHeight,
             contentHeight: contentHeight,
             width: timeGutter,
+            dayColumnWidth: dayColumnWidth,
+            columnOriginX: columnOriginX,
+            contentWidth: contentWidth,
+            viewportWidth: viewportWidth,
+            horizontalContentOffset: horizontalContentOffset,
             calendar: calendar
         )
     }
@@ -4252,7 +4273,6 @@ private struct CalendarInteractiveTimelineEvent: View {
 
 private struct CalendarNowLine: View {
     let days: [Date]
-    let todayColumnVisible: Bool
     let calendar: Calendar
     let timeGutter: CGFloat
     let totalHeight: CGFloat
@@ -4261,60 +4281,75 @@ private struct CalendarNowLine: View {
     /// timeline. The label remains at x=0 while the marker follows this
     /// column origin during iPhone paging.
     let columnOriginX: CGFloat
+    /// Width of the enclosing visible viewport in the same coordinate system
+    /// as `contentWidth`. The Mac supplies its horizontal document offset;
+    /// iPhone's moving strip folds the drag into `columnOriginX` and uses zero.
+    let viewportWidth: CGFloat
+    let horizontalContentOffset: CGFloat
     /// The iOS day strip passes its virtual column width explicitly because
     /// its layer spans more days than the visible window; the Mac week grid
     /// keeps the derived `(contentWidth - gutter) / days` behavior.
     var columnWidthOverride: CGFloat? = nil
 
     var body: some View {
-        if todayColumnVisible {
-            TimelineView<PeriodicTimelineSchedule, AnyView>(.periodic(from: Date.now, by: 60)) { context in
-                let day = calendar.startOfDay(for: context.date)
-                let scale = CalendarInteractionLayout.timelineScale(
-                    day: day,
-                    hourHeight: Double(totalHeight) / 24,
-                    calendar: calendar
-                )
-                let y = min(totalHeight - 1, max(0, CGFloat(scale?.y(for: context.date, calendar: calendar) ?? 0)))
-                // The rule spans only today's column (Notion parity); the
-                // gutter label remains pinned while the line follows the
-                // current day during horizontal paging.
-                let dayColumnWidth = columnWidthOverride ??
-                    (days.isEmpty ? 0 : max(0, (contentWidth - timeGutter) / CGFloat(days.count)))
-                let todayIndex = CalendarInteractionLayout.nowIndicatorColumnIndex(
-                    days: days,
-                    calendar: calendar
-                ) ?? 0
-                AnyView(ZStack(alignment: .topLeading) {
-                    Text(CalendarTimelineScale.localizedTimeLabel(for: context.date, calendar: calendar))
-                        .lifeOSTypography(.metadata, weight: .semibold).monospacedDigit()
-                        .foregroundStyle(LifeOSTokens.calendarRed)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.72)
-                        .allowsTightening(true)
-                        .frame(width: max(0, timeGutter - 5), alignment: .trailing)
-                        .padding(.trailing, 5)
-                        .offset(y: y - 1)
-
-                    Color.clear
-                        .frame(width: contentWidth, height: totalHeight, alignment: .topLeading)
-                        .overlay(alignment: .topLeading) {
-                            HStack(spacing: 0) {
-                                Circle()
-                                    .fill(LifeOSTokens.calendarRed)
-                                    .frame(width: 5, height: 5)
-                                Rectangle()
-                                    .fill(LifeOSTokens.calendarRed)
-                                    .frame(width: max(0, dayColumnWidth - 5), height: 1)
-                            }
-                            .offset(x: columnOriginX + CGFloat(todayIndex) * dayColumnWidth, y: y - 1)
-                        }
-                        .calendarDayAreaMask(totalWidth: contentWidth, gutter: timeGutter)
-                }
-                .frame(width: contentWidth, height: totalHeight, alignment: .topLeading)
-                .zIndex(4)
-                )
+        TimelineView<PeriodicTimelineSchedule, AnyView>(.periodic(from: Date.now, by: 60)) { context in
+            let dayColumnWidth = columnWidthOverride ??
+                (days.isEmpty ? 0 : max(0, (contentWidth - timeGutter) / CGFloat(days.count)))
+            let indicator = CalendarInteractionLayout.nowIndicatorState(
+                days: days,
+                at: context.date,
+                calendar: calendar,
+                columnWidth: Double(dayColumnWidth),
+                columnOriginX: Double(columnOriginX),
+                timeGutter: Double(timeGutter),
+                contentWidth: Double(contentWidth),
+                viewportWidth: Double(viewportWidth),
+                horizontalContentOffset: Double(horizontalContentOffset)
+            )
+            guard let indicator, indicator.isVisible else {
+                return AnyView(EmptyView())
             }
+            let todayIndex = indicator.dayIndex
+
+            let day = calendar.startOfDay(for: context.date)
+            let scale = CalendarInteractionLayout.timelineScale(
+                day: day,
+                hourHeight: Double(totalHeight) / 24,
+                calendar: calendar
+            )
+            let y = min(totalHeight - 1, max(0, CGFloat(scale?.y(for: context.date, calendar: calendar) ?? 0)))
+            // The rule spans only today's column (Notion parity); the
+            // gutter label remains pinned while the line follows this
+            // column during horizontal paging and Mac scrolling.
+            return AnyView(ZStack(alignment: .topLeading) {
+                Text(CalendarTimelineScale.localizedTimeLabel(for: context.date, calendar: calendar))
+                    .lifeOSTypography(.metadata, weight: .semibold).monospacedDigit()
+                    .foregroundStyle(LifeOSTokens.calendarRed)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                    .allowsTightening(true)
+                    .frame(width: max(0, timeGutter - 5), alignment: .trailing)
+                    .padding(.trailing, 5)
+                    .offset(y: y - 1)
+
+                Color.clear
+                    .frame(width: contentWidth, height: totalHeight, alignment: .topLeading)
+                    .overlay(alignment: .topLeading) {
+                        HStack(spacing: 0) {
+                            Circle()
+                                .fill(LifeOSTokens.calendarRed)
+                                .frame(width: 5, height: 5)
+                            Rectangle()
+                                .fill(LifeOSTokens.calendarRed)
+                                .frame(width: max(0, dayColumnWidth - 5), height: 1)
+                        }
+                        .offset(x: columnOriginX + CGFloat(todayIndex) * dayColumnWidth, y: y - 1)
+                    }
+                    .calendarDayAreaMask(totalWidth: contentWidth, gutter: timeGutter)
+            }
+            .frame(width: contentWidth, height: totalHeight, alignment: .topLeading)
+            .zIndex(4)
+            )
         }
     }
 }

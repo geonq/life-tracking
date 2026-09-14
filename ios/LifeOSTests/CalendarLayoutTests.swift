@@ -371,6 +371,50 @@ final class CalendarLayoutTests: XCTestCase {
         )
     }
 
+    func testNowIndicatorStateReevaluatesDateAndVisibilityAcrossMidnight() throws {
+        let midnight = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026, month: 9, day: 15
+        )))
+        let beforeMidnight = midnight.addingTimeInterval(-60)
+        let afterMidnight = midnight.addingTimeInterval(60)
+        let days = [
+            calendar.startOfDay(for: beforeMidnight),
+            calendar.startOfDay(for: afterMidnight)
+        ]
+        let columnWidth = 100.0
+        let timeGutter = 44.0
+        let contentWidth = timeGutter + columnWidth * Double(days.count)
+
+        func indicatorState(at date: Date, horizontalOffset: Double) -> (dayIndex: Int, isVisible: Bool)? {
+            CalendarInteractionLayout.nowIndicatorState(
+                days: days,
+                at: date,
+                calendar: calendar,
+                columnWidth: columnWidth,
+                columnOriginX: timeGutter,
+                timeGutter: timeGutter,
+                contentWidth: contentWidth,
+                viewportWidth: 100,
+                horizontalContentOffset: horizontalOffset
+            )
+        }
+
+        // The second column is the visible window. At midnight the marker
+        // must appear on its next periodic tick even though the first day was
+        // previously the only candidate and was offscreen.
+        let offscreenBefore = indicatorState(at: beforeMidnight, horizontalOffset: 144)
+        XCTAssertEqual(offscreenBefore?.dayIndex, 0)
+        XCTAssertFalse(offscreenBefore?.isVisible == true)
+        let visibleAfter = indicatorState(at: afterMidnight, horizontalOffset: 144)
+        XCTAssertEqual(visibleAfter?.dayIndex, 1)
+        XCTAssertTrue(visibleAfter?.isVisible == true)
+
+        // In the first-column window the old marker must disappear after the
+        // same rollover; it must never leave a stale line behind.
+        XCTAssertTrue(indicatorState(at: beforeMidnight, horizontalOffset: 0)?.isVisible == true)
+        XCTAssertFalse(indicatorState(at: afterMidnight, horizontalOffset: 0)?.isVisible == true)
+    }
+
     func testTimelineContentHeightKeepsLateDayContentReachableAtEveryDensity() {
         let day = dayStart
         // A mobile timeline reserves enough trailing space for the actual
