@@ -63,7 +63,7 @@ foreach ($serviceName in @('LifeOSGateway', 'LifeOSAPI')) { Stop-LifeOSService $
         if ($item.phase -ne 'complete' -or $null -eq $item.PSObject.Properties['afterTree'] -or
             ((@(Get-TreeManifest $item.destination) | ConvertTo-Json -Depth 8 -Compress) -ne
              (@($item.afterTree) | ConvertTo-Json -Depth 8 -Compress))) {
-            throw 'Authority provenance changed or incomplete; recovery_required. Writers remain stopped.'
+            throw 'Authority provenance changed or incomplete; recovery_required.'
         }
         $usagePath = [string]$manifest.paths.usageHistory
         $usageHash = if (Test-Path -LiteralPath $usagePath -PathType Leaf) { Get-FileSha256 $usagePath } else { '' }

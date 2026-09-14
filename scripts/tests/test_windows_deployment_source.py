@@ -1755,7 +1755,7 @@ def test_recovery_marker_identity_precedes_mutation_and_preflight_has_no_marker(
     assert 'Split-Path -Parent ([string]$marker.manifestPath)' in common
     assert 'Completed recovery archive' in common
     assert '-Completed:($deploymentCompleted -or $deploymentRecoveryCompleted)' in install
-    assert install.index("throw 'Task recovery failed; services remain stopped.'") < install.index('$deploymentRecoveryCompleted = $true')
+    assert install.index("throw 'Task recovery failed; recovery_required.'") < install.index('$deploymentRecoveryCompleted = $true')
 
 
 def test_recovery_has_per_file_journal_and_validated_task_barriers() -> None:
@@ -2067,8 +2067,8 @@ def test_service_recovery_restores_all_configuration_before_dependency_start() -
         assert 'Restore-LifeOSServiceSnapshots -Snapshots $serviceSnapshots -Manifest $manifest -ContinueOnFailure' in source
         assert '-VerifyHealth' in source
     install_recovery = install.split('$deploymentRollbackSucceeded = $true', 1)[1]
-    assert "if (-not $deploymentRollbackSucceeded) { throw 'Service recovery failed; writers remain stopped.' }" in install_recovery
-    assert install_recovery.index('Restore-LifeOSServiceSnapshots -Snapshots $serviceSnapshots') < install_recovery.index("Service recovery failed; writers remain stopped.")
+    assert "if (-not $deploymentRollbackSucceeded) { throw 'Service recovery failed; recovery_required.' }" in install_recovery
+    assert install_recovery.index('Restore-LifeOSServiceSnapshots -Snapshots $serviceSnapshots') < install_recovery.index("Service recovery failed; recovery_required.")
     assert 'function Invoke-InstallerFailureThenRollback' in behavior
     assert 'New-ServiceOrConfigure -Name \'LifeOSAPI\'' in behavior
     assert 'Restore-LifeOSServiceSnapshots -Snapshots $serviceRecoveryMap -Manifest $recoveryManifest -ContinueOnFailure' in behavior
@@ -2674,3 +2674,24 @@ def test_transaction_identity_never_authorizes_unowned_journal_paths() -> None:
                  'matching transaction cannot restore outside manifest roots',
                  'matching transaction cannot read an unrelated backup'):
         assert case in behavior
+
+
+def test_recovery_failure_messages_do_not_claim_unverified_writer_state() -> None:
+    install = read("install.ps1")
+    rollback = read("rollback.ps1")
+    expected = (
+        "Authority provenance changed or incomplete; recovery_required.",
+        "Artifact or ACL recovery failed; recovery_required.",
+        "Recovery incomplete; recovery_required.",
+        "Service recovery failed; recovery_required.",
+        "Service recovery failed after the writer barrier; recovery_required.",
+        "Task recovery failed; recovery_required.",
+        "Task recovery state verification failed; recovery_required.",
+    )
+    for message in expected:
+        assert message in install
+    assert install.count("throw 'Recovery incomplete; recovery_required.'") == 2
+    assert "Authority provenance changed or incomplete; recovery_required." in rollback
+    for source in (install, rollback):
+        assert re.search(r"writers?\s+remain\s+(?:stopped|disabled)", source, re.IGNORECASE) is None
+        assert re.search(r"services?\s+remain\s+stopped", source, re.IGNORECASE) is None

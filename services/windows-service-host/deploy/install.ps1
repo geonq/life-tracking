@@ -2186,7 +2186,7 @@ Save-InstallManifest $manifest $manifestPath
             ((@(Get-TreeManifest $item.destination) | ConvertTo-Json -Depth 8 -Compress) -ne
              (@($item.afterTree) | ConvertTo-Json -Depth 8 -Compress))) {
             $deploymentRollbackSucceeded = $false
-            throw 'Authority provenance changed or incomplete; recovery_required. Writers remain stopped.'
+            throw 'Authority provenance changed or incomplete; recovery_required.'
         }
         $usagePath = [string]$manifest.paths.usageHistory
         $usageHash = if (Test-Path -LiteralPath $usagePath -PathType Leaf) { Get-FileSha256 $usagePath } else { '' }
@@ -2214,7 +2214,7 @@ Save-InstallManifest $manifest $manifestPath
         $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore ACL snapshots: {0}" -f $_.Exception.Message)
     }
-    if (-not $deploymentRollbackSucceeded) { throw 'Artifact or ACL recovery failed; writers remain stopped.' }
+    if (-not $deploymentRollbackSucceeded) { throw 'Artifact or ACL recovery failed; recovery_required.' }
     Enable-RecoveryWriterRestoration $manifest
     $legacyWasMutated = $legacyTaskMutated
     if ($null -ne $manifest.PSObject.Properties['legacyListener']) {
@@ -2240,7 +2240,7 @@ Save-InstallManifest $manifest $manifestPath
         $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore Tailscale Serve state: {0}" -f $_.Exception.Message)
     }
-    if (-not $deploymentRollbackSucceeded) { throw 'Recovery incomplete; scheduled writers remain disabled.' }
+    if (-not $deploymentRollbackSucceeded) { throw 'Recovery incomplete; recovery_required.' }
 
     $gatewayNeedsSnapshot = [string](Get-SnapshotValue $serviceSnapshots['LifeOSGateway'] 'State' '') -ceq 'Running'
     $hasSnapshotContract = $null -ne $manifest.PSObject.Properties['snapshotTask'] -and
@@ -2270,7 +2270,7 @@ Save-InstallManifest $manifest $manifestPath
             Write-Warning ("Could not publish a fresh Tailscale snapshot before gateway recovery: {0}" -f $_.Exception.Message)
         }
     }
-    if (-not $deploymentRollbackSucceeded) { throw 'Recovery incomplete; scheduled writers remain disabled.' }
+    if (-not $deploymentRollbackSucceeded) { throw 'Recovery incomplete; recovery_required.' }
 
     try {
         Restore-LifeOSServiceSnapshots -Snapshots $serviceSnapshots -Manifest $manifest -ContinueOnFailure -VerifyHealth -BeforeGatewayStart {
@@ -2280,7 +2280,7 @@ Save-InstallManifest $manifest $manifestPath
         $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore or reconcile services: {0}" -f $_.Exception.Message)
     }
-    if (-not $deploymentRollbackSucceeded) { throw 'Service recovery failed; writers remain stopped.' }
+    if (-not $deploymentRollbackSucceeded) { throw 'Service recovery failed; recovery_required.' }
 
     Stop-DeploymentTaskBarrier $manifest $manifestPath
     # The barrier can run again after a completed journal stage. Reconcile the
@@ -2294,7 +2294,7 @@ Save-InstallManifest $manifest $manifestPath
         $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not re-reconcile services after the writer barrier: {0}" -f $_.Exception.Message)
     }
-    if (-not $deploymentRollbackSucceeded) { throw 'Service recovery failed after the writer barrier; writers remain stopped.' }
+    if (-not $deploymentRollbackSucceeded) { throw 'Service recovery failed after the writer barrier; recovery_required.' }
 
     try {
         Invoke-RecoveryStage $manifest 'Restore-CodexCollectorTask' { Restore-CodexCollectorTask $codexTask $CodexTaskName } -Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState $codexTask $CodexTaskName }
@@ -2308,7 +2308,7 @@ Save-InstallManifest $manifest $manifestPath
         $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore Tailscale snapshot task: {0}" -f $_.Exception.Message)
     }
-    if (-not $deploymentRollbackSucceeded) { throw 'Task recovery failed; services remain stopped.' }
+    if (-not $deploymentRollbackSucceeded) { throw 'Task recovery failed; recovery_required.' }
     try {
         if ($legacyWasMutated) { Reconcile-LifeOSScheduledTaskSnapshotState $legacy $LegacyTaskName }
         Reconcile-LifeOSScheduledTaskSnapshotState $codexTask $CodexTaskName
@@ -2317,7 +2317,7 @@ Save-InstallManifest $manifest $manifestPath
         $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not reconcile scheduled task state: {0}" -f $_.Exception.Message)
     }
-    if (-not $deploymentRollbackSucceeded) { throw 'Task recovery state verification failed; services remain stopped.' }
+    if (-not $deploymentRollbackSucceeded) { throw 'Task recovery state verification failed; recovery_required.' }
     $recoveryArchivePath = Complete-LifeOSRecoveryState $manifest
     $deploymentRecoveryCompleted = $true
     throw
