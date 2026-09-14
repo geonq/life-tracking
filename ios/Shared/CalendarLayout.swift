@@ -168,9 +168,27 @@ public struct CalendarTimelineZoomSession: Equatable, Sendable {
         scrollOffset: Double,
         focalViewportOffset: Double
     ) {
-        let safeHourHeight = hourHeight.isFinite ? hourHeight : CalendarInteractionLayout.minimumHourHeight
-        let safeScrollOffset = scrollOffset.isFinite ? max(0, scrollOffset) : 0
-        let safeFocalOffset = focalViewportOffset.isFinite ? max(0, focalViewportOffset) : 0
+        let safeHourHeight = hourHeight.isFinite
+            ? min(
+                CalendarInteractionLayout.maximumHourHeight,
+                max(CalendarInteractionLayout.minimumHourHeight, hourHeight)
+            )
+            : CalendarInteractionLayout.minimumHourHeight
+        // The iPhone timeline can reserve 104pt below its 24-hour axis while
+        // the Mac timeline reserves 24pt. Capture the larger existing policy
+        // so a pinch that starts at a valid iPhone endpoint is not rebased
+        // before the viewport-aware zoom calculation runs.
+        let maximumBaselineOffset =
+            24 * safeHourHeight + CalendarInteractionLayout.timelineBottomInset
+        let maximumFocalOffset =
+            24 * CalendarInteractionLayout.maximumHourHeight
+                + CalendarInteractionLayout.timelineBottomInset
+        let safeScrollOffset = scrollOffset.isFinite
+            ? min(maximumBaselineOffset, max(0, scrollOffset))
+            : 0
+        let safeFocalOffset = focalViewportOffset.isFinite
+            ? min(maximumFocalOffset, max(0, focalViewportOffset))
+            : 0
         self.startingHourHeight = safeHourHeight
         self.startingScrollOffset = safeScrollOffset
         self.focalViewportOffset = safeFocalOffset
@@ -1597,8 +1615,9 @@ public enum CalendarInteractionLayout {
             upper: maximumHourHeight,
             fallback: factor >= 1 ? maximumHourHeight : minimumHourHeight
         )
-        let viewport = finiteNonNegative(viewportHeight)
-        let bottomInset = finiteNonNegative(contentBottomInset)
+        let maximumFiniteDimension = 24 * maximumHourHeight + timelineEndpointClearance
+        let viewport = min(maximumFiniteDimension, finiteNonNegative(viewportHeight))
+        let bottomInset = min(maximumFiniteDimension, finiteNonNegative(contentBottomInset))
         let baseContentHeight = timelineHeight(
             days: [],
             hourHeight: baseHourHeight,

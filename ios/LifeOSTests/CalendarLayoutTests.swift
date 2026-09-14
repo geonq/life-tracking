@@ -436,6 +436,39 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertLessThan(CalendarInteractionLayout.defaultHourHeight, CalendarInteractionLayout.maximumHourHeight)
     }
 
+    func testTimelineZoomSessionNormalizesInvalidBaselineBeforeCancellation() {
+        let lower = CalendarTimelineZoomSession(
+            hourHeight: 1,
+            scrollOffset: -500,
+            focalViewportOffset: -20
+        )
+        XCTAssertEqual(lower.startingHourHeight, CalendarInteractionLayout.minimumHourHeight)
+        XCTAssertEqual(lower.startingScrollOffset, 0)
+        XCTAssertEqual(lower.focalViewportOffset, 0)
+
+        var upper = CalendarTimelineZoomSession(
+            hourHeight: Double.greatestFiniteMagnitude,
+            scrollOffset: Double.greatestFiniteMagnitude,
+            focalViewportOffset: Double.greatestFiniteMagnitude
+        )
+        let restored = upper.cancel()
+        XCTAssertEqual(upper.startingHourHeight, CalendarInteractionLayout.maximumHourHeight)
+        XCTAssertTrue(upper.startingScrollOffset.isFinite)
+        XCTAssertTrue(upper.focalViewportOffset.isFinite)
+        XCTAssertEqual(restored?.hourHeight, CalendarInteractionLayout.maximumHourHeight)
+        XCTAssertTrue(restored?.scrollOffset.isFinite == true)
+        XCTAssertTrue(restored?.focalMinute.isFinite == true)
+
+        let nonFinite = CalendarTimelineZoomSession(
+            hourHeight: .infinity,
+            scrollOffset: .infinity,
+            focalViewportOffset: .infinity
+        )
+        XCTAssertEqual(nonFinite.startingHourHeight, CalendarInteractionLayout.minimumHourHeight)
+        XCTAssertEqual(nonFinite.startingScrollOffset, 0)
+        XCTAssertEqual(nonFinite.focalViewportOffset, 0)
+    }
+
     func testTimelineZoomKeepsThePinchFocalMinuteStationary() {
         let result = CalendarInteractionLayout.zoomedTimeline(
             hourHeight: 54,
@@ -489,6 +522,46 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertTrue(minimum.hourHeight.isFinite)
         XCTAssertTrue(minimum.scrollOffset.isFinite)
         XCTAssertGreaterThanOrEqual(minimum.scrollOffset, 0)
+    }
+
+    func testTimelineZoomKeepsExtremeFiniteInputsBounded() {
+        let result = CalendarInteractionLayout.zoomedTimeline(
+            hourHeight: CalendarInteractionLayout.defaultHourHeight,
+            scrollOffset: Double.greatestFiniteMagnitude,
+            focalViewportOffset: Double.greatestFiniteMagnitude,
+            magnification: Double.greatestFiniteMagnitude,
+            viewportHeight: Double.greatestFiniteMagnitude,
+            contentBottomInset: Double.greatestFiniteMagnitude
+        )
+
+        XCTAssertEqual(result.hourHeight, CalendarInteractionLayout.maximumHourHeight)
+        XCTAssertTrue(result.scrollOffset.isFinite)
+        XCTAssertGreaterThanOrEqual(result.scrollOffset, 0)
+        XCTAssertTrue(result.focalMinute.isFinite)
+    }
+
+    func testTimelineZoomSessionPreservesAValidShortViewportEndpoint() {
+        let hourHeight = CalendarInteractionLayout.defaultHourHeight
+        let viewportHeight = 60.0
+        let bottomInset = max(CalendarInteractionLayout.timelineBottomInset, viewportHeight)
+        let axisHeight = 24 * hourHeight
+        let endpointOffset = axisHeight + bottomInset - viewportHeight
+        var session = CalendarTimelineZoomSession(
+            hourHeight: hourHeight,
+            scrollOffset: endpointOffset,
+            focalViewportOffset: viewportHeight / 2
+        )
+
+        XCTAssertEqual(session.startingScrollOffset, endpointOffset, accuracy: 0.0001)
+        let preview = session.update(
+            magnification: 1,
+            viewportHeight: viewportHeight,
+            contentBottomInset: bottomInset
+        )
+        XCTAssertEqual(preview?.scrollOffset ?? -1, endpointOffset, accuracy: 0.0001)
+
+        let restored = session.cancel()
+        XCTAssertEqual(restored?.scrollOffset ?? -1, endpointOffset, accuracy: 0.0001)
     }
 
     func testTimelineZoomSessionRestoresInterruptedPinchAndCommitsOnlyOnEnd() {
