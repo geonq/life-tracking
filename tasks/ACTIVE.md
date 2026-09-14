@@ -24,8 +24,8 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint: `80d4f5d` (calendar zoom baseline
-  bounds), pushed to `origin/main`; it includes the
+- Current application source checkpoint: `b425ca9` (calendar rollover and
+  widget snapshot bounds), pushed to `origin/main`; it includes the
   security reconciliation and production dependency audit updates. The
   feature branch push and merge succeeded; GitHub CLI reports PR #1 merged
   into `main`. The deployable Windows candidate is the verified `6baa1f3`
@@ -60,10 +60,12 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   compact system typography, semantic icons, neutral navigation selection,
   opacity-only route motion, 5/5 dashboard tests, a production build, and an
   Astra Medium GREEN review. Browser runtime capture is unavailable here.
-  T12a calendar zoom normalization is committed at `80d4f5d`, with bounded
-  density/offset/focal math, a short-viewport endpoint regression, a passing
-  serialized Mac build, a passing iOS build-for-testing lane, and an Astra
-  Medium GREEN review. Simulator execution and T12b–T12d remain open.
+  T12a calendar zoom normalization is committed at `80d4f5d`, and `b425ca9`
+  adds the reviewed T12b timeline viewport/midnight pass plus T13a bounded
+  widget snapshot reads/writes and valid oversized-payload regressions. The
+  serialized Mac build-for-testing passed. The iOS lane reaches changed Swift
+  compilation but stops at actool because no iphonesimulator runtime is
+  available. Simulator execution and T12c–T12d remain open.
   Bounded recovery diagnostics are committed at `14a3b7f`; strict progress
   validation is committed at `4e14e38`; strict journal observation is committed
   at `9e43dd7`. Bounded phase telemetry is committed at `0a8d5b6`; the current
