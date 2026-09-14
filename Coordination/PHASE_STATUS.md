@@ -116,9 +116,9 @@ Updated 2026-09-14 Europe/Berlin.
   journal receipt is not treated as current. Reinstall, listener/health,
   Tailscale Serve, and live banking remain open; disposable
   diagnostics/strict-reader/phase-telemetry validation passed.
-- The first T1a Luna Max recovery-preparation worker stalled before a report
-  and was closed without source or Windows mutation. A smaller source-only
-  review is running; measured recovery remains a SOURCE GAP.
+- Three T1a Luna Max recovery-preparation workers were stopped without usable
+  reports and without source or Windows mutation. Measured recovery remains a
+  SOURCE GAP; the current source-owner packet is T1b.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 - T12 Calendar gesture work is not accepted: two Luna Max attempts left

@@ -124,10 +124,10 @@ evidence is still incomplete.
   treated as current. Install and live Enable Banking readback remain
   uncertified; diagnostics and phase telemetry were tested only in a
   disposable copy, and the canonical transaction was not resumed or installed.
-- The first bounded T1a Luna Max recovery-preparation attempt stalled before
-  producing a report and was closed. It made no source or Windows mutation.
-  A smaller source-only T1a review is running; measured recovery remains a
-  SOURCE GAP until a bounded disposable receipt exists.
+- Three bounded T1a Luna Max recovery-preparation attempts were stopped after
+  producing no usable report. They made no source or Windows mutation.
+  Measured recovery remains a SOURCE GAP until a bounded disposable receipt
+  exists; the current source-owner packet is T1b.
 - Astra rejected an uncommitted runtime optimization for a mutating
   reconcile-only path and TOCTOU gap; it is preserved at
   `/private/tmp/lifeos-red-runtime-optimization-20260913.patch` and excluded.
