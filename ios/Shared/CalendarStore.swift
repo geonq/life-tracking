@@ -42,7 +42,9 @@ public actor CalendarStore {
 
     public func load() throws -> CalendarSnapshot {
         guard fileManager.fileExists(atPath: url.path) else { let empty = CalendarSnapshot(); cached = empty; return empty }
-        let data = try Data(contentsOf: url)
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: CalendarSnapshot.maximumEncodedBytes + 1) ?? Data()
         guard data.count <= CalendarSnapshot.maximumEncodedBytes else {
             throw CalendarSnapshotError.payloadTooLarge
         }

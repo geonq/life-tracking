@@ -1732,6 +1732,73 @@ final class CalendarDomainTests: XCTestCase {
                        CalendarSnapshot(items: [right]).merged(with: CalendarSnapshot(items: [left])))
     }
 
+    func testStoreLoadsValidJSONExactlyAtEncodedByteBound() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let url = directory.appendingPathComponent("calendar.json")
+        let item = try CalendarItem(title: "at bound", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        let snapshot = CalendarSnapshot(items: [item])
+        let encoded = try JSONEncoder.calendar.encode(snapshot)
+        XCTAssertLessThan(encoded.count, CalendarSnapshot.maximumEncodedBytes)
+
+        var padded = encoded
+        padded.append(contentsOf: Data(repeating: 0x20, count: CalendarSnapshot.maximumEncodedBytes - encoded.count))
+        XCTAssertEqual(padded.count, CalendarSnapshot.maximumEncodedBytes)
+        try padded.write(to: url, options: .atomic)
+
+        let loaded = try await CalendarStore(url: url).load()
+        XCTAssertEqual(loaded, snapshot)
+    }
+
+    func testStoreRejectsPayloadBeyondEncodedByteBoundBeforeDecode() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let url = directory.appendingPathComponent("calendar.json")
+        let oversized = Data(repeating: 0x20, count: CalendarSnapshot.maximumEncodedBytes + 1)
+        try oversized.write(to: url, options: .atomic)
+
+        do {
+            _ = try await CalendarStore(url: url).load()
+            XCTFail("An oversized calendar payload must be rejected")
+        } catch let error as CalendarSnapshotError {
+            XCTAssertEqual(error, .payloadTooLarge)
+        } catch {
+            XCTFail("Expected payloadTooLarge, got \(error)")
+        }
+    }
+
+    func testStoreDoesNotServeCachedSnapshotAfterOversizedFileReplacement() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let url = directory.appendingPathComponent("calendar.json")
+        let item = try CalendarItem(title: "cached candidate", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        let snapshot = CalendarSnapshot(items: [item])
+        try JSONEncoder.calendar.encode(snapshot).write(to: url, options: .atomic)
+
+        let store = CalendarStore(url: url)
+        let loaded = try await store.load()
+        XCTAssertEqual(loaded, snapshot)
+
+        let oversized = Data(repeating: 0xA5, count: CalendarSnapshot.maximumEncodedBytes + 1)
+        try oversized.write(to: url, options: .atomic)
+
+        do {
+            _ = try await store.load()
+            XCTFail("An oversized replacement must not return the previously loaded snapshot")
+        } catch let error as CalendarSnapshotError {
+            XCTAssertEqual(error, .payloadTooLarge)
+        } catch {
+            XCTFail("Expected payloadTooLarge, got \(error)")
+        }
+        XCTAssertEqual(try Data(contentsOf: url), oversized)
+    }
+
     func testStoreReadsItsISO8601Output() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let url = directory.appendingPathComponent("calendar.json")
