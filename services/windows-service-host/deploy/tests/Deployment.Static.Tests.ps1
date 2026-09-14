@@ -769,7 +769,7 @@ if (-not $progressAppendBody[0].Contains('Get-RecoveryProgressUnitCount -Journal
     $progressAppendBody[0].Contains('-CreateNewOnly')) {
     throw 'FAIL: Progress append must use the holder count fast path and create only after a missing leaf is established.'
 }
-if (-not $progressAppendBody[0].Contains('ValidatedUnitPhases[$UnitIndex] = $Phase')) {
+if (-not $progressAppendBody[0].Contains('ValidatedUnitPhases[$UnitIndex] = [string]$committedRecord.Phase')) {
     throw 'FAIL: Progress phase cache must advance only after the durable frame commit.'
 }
 $boundedTreeBody = ($commonText -split 'function Get-LifeOSBoundedTreeItem', 2)[1] -split 'function Get-TreeManifestIndex', 2
@@ -935,11 +935,15 @@ $appendText = if ($appendStart -ge 0 -and $appendEnd -gt $appendStart) {
 } else { '' }
 if (-not $artifactNativeText.Contains('CommitRecoveryProgressFrame') -or
     -not $appendText.Contains('CommitRecoveryProgressFrame') -or
+    -not $appendText.Contains('$ProgressLeaseHolder.PhaseAuthority, $UnitIndex, $Phase') -or
+    $appendText.Contains('$progressLease.Native,') -or
+    $appendText.Contains('expectedOffset') -or
+    $appendText.Contains('expectedSequence') -or
     $appendText.Contains('$nextPhases')) {
-    throw 'FAIL: recovery progress phase updates must replace one native token after flush without copying the full inventory.'
+    throw 'FAIL: recovery progress phase updates must use the authority-owned cursor and replace one native token after flush.'
 }
 if ($artifactNativeText.Contains('public static RecoveryPhaseToken AdvanceRecoveryPhaseAuthority') -or
-    -not $artifactNativeText.Contains('authority.Advance(unitIndex, nextPhase);') -or
+    -not $artifactNativeText.Contains('AdvanceNoLock(unitIndex, nextPhase);') -or
     -not $artifactNativeText.Contains('progressLease.Stream.Flush(true);')) {
     throw 'FAIL: phase authority advancement must stay inside the retained-stream frame commit.'
 }
@@ -949,7 +953,7 @@ foreach ($parserContract in @(
     'new UTF8Encoding(false, true)',
     'int fieldMask = 0',
     'ParseRecoveryProgressRecord(payload',
-    'authority.ExpectedTransactionId')) {
+    'expectedTransactionId, expectedGeneration')) {
     if (-not $artifactNativeText.Contains($parserContract)) {
         throw "FAIL: strict recovery-progress payload parser contract is missing: $parserContract"
     }
@@ -963,7 +967,7 @@ if ($artifactNativeText.Contains('payloadText.IndexOf') -or
 foreach ($nativeContract in @(
     'ArtifactDirectoryLease', 'ArtifactFileLease', 'ArtifactQuarantineLease',
     'ArtifactCopyReceipt', 'ArtifactMutationContext', 'OpenArtifactRelative',
-    'FileCreate', 'FileOpenReparsePoint', 'FileShareRead', 'DeleteAccess',
+    'FileCreate', 'FileOpenReparsePoint', 'FileShareRead', 'FileShareWrite', 'FileShareDelete', 'DeleteAccess',
     'FileStreamInformation', 'MaxStreamInformationBytes', 'ArtifactCopyBufferBytes',
     'Flush(true)', 'TransformBlock', 'NumberOfLinks', 'SetFileInformationByHandle',
     'NtSetInformationFile', 'FileDispositionInformationEx', 'FileDispositionDelete',
@@ -980,13 +984,27 @@ $phaseAuthorityText = if ($phaseAuthorityStart -ge 0 -and $phaseAuthorityEnd -gt
 } else { '' }
 foreach ($authorityContract in @(
     'public sealed class RecoveryPhaseAuthority',
+    'private enum AuthorityState { Replaying, AwaitingInitialLeaf, Ready, Poisoned, Closed }',
+    'private readonly object sync = new object();',
     'private readonly RecoveryPhaseToken[] tokens;',
-    'private RecoveryPhaseAuthority(string[] committedPhases)',
-    'internal static RecoveryPhaseAuthority Create(string[] committedPhases)',
+    'private readonly HandleLease progressLease;',
+    'private long committedOffset;',
+    'private long nextSequence;',
+    'private RecoveryPhaseAuthority(string[] committedPhases, string transactionId,',
+    'internal static RecoveryPhaseAuthority CreateWithExpectedIdentity(',
+    'HandleLease retainedProgressLease, long replayCheckpoint, long recordLimit)',
     'tokens = new RecoveryPhaseToken[committedPhases.Length];',
     'public long UpdateCount { get { return updateCount; } }',
+    'public bool IsReady { get { lock (sync) { return state == AuthorityState.Ready; } } }',
+    'public bool IsPoisoned { get { lock (sync) { return state == AuthorityState.Poisoned; } } }',
+    'public long CommittedOffset { get { lock (sync) { return committedOffset; } } }',
+    'public long NextSequence { get { lock (sync) { return nextSequence; } } }',
+    'public long Checkpoint { get { return checkpoint; } }',
+    'public bool IsBoundTo(HandleLease candidate)',
     'public RecoveryPhaseToken GetToken(int unitIndex)',
-    'internal RecoveryPhaseToken Advance(int unitIndex, string nextPhase)',
+    'internal void AssertArtifactAccess(HandleLease candidate, int unitIndex, RecoveryPhaseToken token)',
+    'internal RecoveryProgressRecord ReplayFrame(',
+    'internal RecoveryProgressRecord CommitFrame(',
     'tokens[unitIndex] = replacement;',
     'public string GetPhase(int unitIndex)',
     'public bool Matches(int unitIndex, string expectedPhase)')) {
@@ -997,9 +1015,57 @@ foreach ($authorityContract in @(
 if (-not $artifactNativeText.Contains('public sealed class RecoveryPhaseToken')) {
     throw 'FAIL: immutable per-unit recovery phase tokens are missing.'
 }
-if ($phaseAuthorityText.Contains('public RecoveryPhaseAuthority(') -or
-    -not $artifactNativeText.Contains('return RecoveryPhaseAuthority.Create(committedPhases);')) {
-    throw 'FAIL: PowerShell must not receive a public phase-authority constructor; the native facade must use the validated factory.'
+if ($phaseAuthorityText.Contains('private RecoveryPhaseAuthority(string[] committedPhases)') -or
+    $phaseAuthorityText.Contains('internal static RecoveryPhaseAuthority Create(string[] committedPhases)') -or
+    $artifactNativeText.Contains('return RecoveryPhaseAuthority.Create(committedPhases);') -or
+    $phaseAuthorityText.Contains('public RecoveryPhaseAuthority(')) {
+    throw 'FAIL: removed phase-authority constructors or factories must not return to the source contract.'
+}
+foreach ($authorityFacade in @(
+    'public static RecoveryPhaseAuthority NewRecoveryPhaseAuthorityWithExpectedIdentity(',
+    'public static void AttachCreatedRecoveryProgressLeaf(RecoveryPhaseAuthority authority)',
+    'public static void SealRecoveryProgressReplay(RecoveryPhaseAuthority authority)',
+    'public static void SealRecoveryProgressInitialAbsence(RecoveryPhaseAuthority authority)',
+    'public static void PoisonRecoveryPhaseAuthority(RecoveryPhaseAuthority authority)',
+    'public static void CloseRecoveryPhaseAuthority(RecoveryPhaseAuthority authority)',
+    'public static RecoveryProgressRecord ReplayRecoveryProgressFrame(',
+    'public static RecoveryProgressRecord CommitRecoveryProgressFrame(')) {
+    if (-not $artifactNativeText.Contains($authorityFacade)) {
+        throw "FAIL: native recovery authority facade is missing: $authorityFacade"
+    }
+}
+if (-not $commonText.Contains('$ProgressLease.Native, $Checkpoint, [long]$script:LifeOSRecoveryProgressMaxRecords')) {
+    throw 'FAIL: PowerShell must pass the retained native lease, checkpoint, and configured record bound to the authority factory.'
+}
+if (-not $artifactNativeText.Contains('byte[] commit, bool flushBeforeReadback, bool requireExactEnd)') -or
+    -not $artifactNativeText.Contains('commit, false, false);') -or
+    -not $artifactNativeText.Contains('commit, true, true);')) {
+    throw 'FAIL: native progress verification must distinguish replay containment from the exact append boundary.'
+}
+if (-not $commonText.Contains('$ProgressLeaseHolder.ValidatedUnitPhases[$index] =') -or
+    -not $commonText.Contains('[string]$ProgressLeaseHolder.PhaseAuthority.GetPhase($index)')) {
+    throw 'FAIL: replay must synchronize the holder phase mirror from native authority state before sealing.'
+}
+foreach ($authorityStateContract in @(
+    'EnsureStateNoLock(AuthorityState.Ready);',
+    'EnsureLeaseNoLock(true, true);',
+    'VerifyRecoveryProgressFrameAt(progressLease, committedOffset',
+    'ParseRecoveryProgressRecord(payload, nextSequence',
+    'catch { PoisonNoLock(); throw; }')) {
+    if (-not $artifactNativeText.Contains($authorityStateContract)) {
+        throw "FAIL: native authority state contract is missing: $authorityStateContract"
+    }
+}
+$commitFacadeStart = $artifactNativeText.IndexOf('public static RecoveryProgressRecord CommitRecoveryProgressFrame(', [StringComparison]::Ordinal)
+$commitFacadeEnd = $artifactNativeText.IndexOf('public static HandleLease OpenExisting(', $commitFacadeStart, [StringComparison]::Ordinal)
+$commitFacadeText = if ($commitFacadeStart -ge 0 -and $commitFacadeEnd -gt $commitFacadeStart) {
+    $artifactNativeText.Substring($commitFacadeStart, $commitFacadeEnd - $commitFacadeStart)
+} else { '' }
+if (-not $commitFacadeText.Contains('RecoveryPhaseAuthority authority, int unitIndex, string nextPhase,') -or
+    $commitFacadeText.Contains('expectedOffset') -or
+    $commitFacadeText.Contains('expectedSequence') -or
+    $commitFacadeText.Contains('HandleLease progressLease')) {
+    throw 'FAIL: native commit facade must derive lease, offset, and sequence from the authority.'
 }
 $holderContextStart = $commonText.IndexOf('function Assert-RecoveryProgressLeaseHolderContext', [StringComparison]::Ordinal)
 $holderContextEnd = $commonText.IndexOf('function Get-RecoveryJournalUnits', $holderContextStart, [StringComparison]::Ordinal)

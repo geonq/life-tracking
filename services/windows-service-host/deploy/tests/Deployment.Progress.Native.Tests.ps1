@@ -57,6 +57,23 @@ function Get-NativeLeaseBytes {
     } finally { $Lease.Stream.Position = $position }
 }
 
+function Get-NativeHandleLeaseBytes {
+    param([Parameter(Mandatory)]$Lease)
+    if (-not $Lease.HasLeaf -or $null -eq $Lease.Stream) { throw 'FAIL: native handle lease has no readable leaf.' }
+    $position = $Lease.Stream.Position
+    try {
+        $Lease.Stream.Position = 0
+        $bytes = New-Object byte[] ([int]$Lease.Stream.Length)
+        $read = 0
+        while ($read -lt $bytes.Length) {
+            $chunk = $Lease.Stream.Read($bytes, $read, $bytes.Length - $read)
+            if ($chunk -le 0) { throw 'FAIL: native handle lease ended before its advertised length.' }
+            $read += $chunk
+        }
+        return ,$bytes
+    } finally { $Lease.Stream.Position = $position }
+}
+
 $nativeOperatorSid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
 
 function New-NativeProgressFixture {
@@ -146,30 +163,6 @@ function Convert-NativeProgressPayloadText {
     return ,$bytes
 }
 
-function New-NativeProgressFrameFromPayload {
-    param([Parameter(Mandatory)][byte[]]$Payload)
-    if ($Payload.Length -le 0 -or $Payload.Length -gt 16 * 1024) {
-        throw 'FAIL: native test payload is outside the bounded frame size.'
-    }
-    $header = New-Object byte[] 9
-    [Array]::Copy([Text.Encoding]::ASCII.GetBytes('LPRG'), 0, $header, 0, 4)
-    $header[4] = [byte]1
-    [Array]::Copy([BitConverter]::GetBytes([int]$Payload.Length), 0, $header, 5, 4)
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try {
-        $headerDigest = $sha.ComputeHash($header)
-        $content = New-Object byte[] ($header.Length + $Payload.Length)
-        [Array]::Copy($header, 0, $content, 0, $header.Length)
-        [Array]::Copy($Payload, 0, $content, $header.Length, $Payload.Length)
-        $digest = $sha.ComputeHash($content)
-    } finally { $sha.Dispose() }
-    return [pscustomobject]@{
-        Header = $header; HeaderDigest = $headerDigest; Payload = $Payload; Digest = $digest
-        Commit = [byte[]]@(0xa5)
-        TotalBytes = [long]$header.Length + $headerDigest.Length + $Payload.Length + $digest.Length + 1
-    }
-}
-
 function Write-NativeProgressFrame {
     param([Parameter(Mandatory)]$Lease, [Parameter(Mandatory)]$Frame)
     $stream = $Lease.Stream
@@ -182,6 +175,22 @@ function Write-NativeProgressFrame {
     $stream.Write($Frame.Commit, 0, $Frame.Commit.Length)
     $stream.Flush($true)
     return $offset
+}
+
+function Get-NativeProgressFrameBytes {
+    param([Parameter(Mandatory)]$Frame)
+    $bytes = New-Object byte[] ([int]$Frame.TotalBytes)
+    $offset = 0
+    [Array]::Copy($Frame.Header, 0, $bytes, $offset, $Frame.Header.Length)
+    $offset += $Frame.Header.Length
+    [Array]::Copy($Frame.HeaderDigest, 0, $bytes, $offset, $Frame.HeaderDigest.Length)
+    $offset += $Frame.HeaderDigest.Length
+    [Array]::Copy($Frame.Payload, 0, $bytes, $offset, $Frame.Payload.Length)
+    $offset += $Frame.Payload.Length
+    [Array]::Copy($Frame.Digest, 0, $bytes, $offset, $Frame.Digest.Length)
+    $offset += $Frame.Digest.Length
+    [Array]::Copy($Frame.Commit, 0, $bytes, $offset, $Frame.Commit.Length)
+    return ,$bytes
 }
 
 function New-NativeArtifactFixture {
@@ -511,6 +520,27 @@ try {
     } finally { Close-RecoveryProgressLeaseHolder $cachedHolder }
 } finally { Remove-NativeProgressFixture $fixture }
 
+# Replay always reconstructs the native phase ledger from the pending baseline.
+# A restarted reader must publish that reconstructed state into the mutable
+# journal and holder mirrors before the cached-context validation runs.
+$fixture = New-NativeProgressFixture
+try {
+    [void](Append-RecoveryProgress -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Phase 'restoring')
+    [void](Append-RecoveryProgress -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Phase 'complete')
+    $fixture.Journal.progressSequence = 0
+    $fixture.Unit.phase = 'pending'
+    $restartHolder = New-RecoveryProgressLeaseHolder
+    try {
+        Read-RecoveryProgress -Manifest $fixture.Manifest -Journal $fixture.Journal -JournalUnits $fixture.Journal.units -ProgressLeaseHolder $restartHolder
+        Assert-Native ($restartHolder.Parsed -and
+            $restartHolder.ValidatedUnitPhases[0] -ceq 'complete' -and
+            $fixture.Unit.phase -ceq 'complete' -and
+            [long]$fixture.Journal.progressSequence -eq 2 -and
+            $restartHolder.PhaseAuthority.GetPhase(0) -ceq 'complete' -and
+            [long]$restartHolder.PhaseAuthority.NextSequence -eq 2) 'restart replay publishes both phase transitions into the journal and holder mirrors.'
+    } finally { Close-RecoveryProgressLeaseHolder $restartHolder }
+} finally { Remove-NativeProgressFixture $fixture }
+
 # Cached phase state is validated independently of mutable journal content.
 # A restoring-to-complete mutation cannot become a false idempotent append or
 # be accepted by a cached read without a durable completion frame.
@@ -657,7 +687,7 @@ $fixture = New-NativeArtifactFixture
 $artifactLease = $null
 try {
     $artifactLease = New-NativeArtifactLease $fixture
-    $progressBefore = [IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))
+    $progressBefore = Get-NativeLeaseBytes $artifactLease.Holder.Lease
     $manifestBackupBefore = [IO.File]::ReadAllBytes($fixture.ManifestBackup)
     $sourceBefore = [IO.File]::ReadAllBytes($fixture.Source)
     $outsideBefore = [IO.File]::ReadAllBytes($fixture.OutsideSentinel)
@@ -679,7 +709,7 @@ try {
     Assert-Native (-not [IO.File]::Exists($fixture.Destination)) 'original destination is removed by handle-bound disposition.'
     Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Source)) -ceq [Convert]::ToBase64String($sourceBefore)) 'source fixture remains unchanged after deletion.'
     Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.ManifestBackup)) -ceq [Convert]::ToBase64String($manifestBackupBefore)) 'manifest backup remains unchanged after deletion.'
-    Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))) -ceq [Convert]::ToBase64String($progressBefore)) 'progress stream remains unchanged after artifact mutation.'
+    Assert-Native ([Convert]::ToBase64String((Get-NativeLeaseBytes $artifactLease.Holder.Lease)) -ceq [Convert]::ToBase64String($progressBefore)) 'progress stream remains unchanged after artifact mutation.'
     [void](Publish-RecoveryArtifactStaged -Context $artifactLease.Context -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Staged $staged)
     Assert-Native ([IO.File]::Exists($fixture.Destination) -and -not [IO.File]::Exists($fixture.Staged)) 'staged publication creates the destination and consumes the staged name.'
     Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Destination)) -ceq [Convert]::ToBase64String($fixture.ReplacementBytes)) 'publication leaves the staged bytes at the destination.'
@@ -698,7 +728,7 @@ $destination = $null
 $quarantine = $null
 try {
     $artifactLease = New-NativeArtifactLease $fixture
-    $progressBefore = [IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))
+    $progressBefore = Get-NativeLeaseBytes $artifactLease.Holder.Lease
     $manifestBackupBefore = [IO.File]::ReadAllBytes($fixture.ManifestBackup)
     $destinationBefore = [IO.File]::ReadAllBytes($fixture.Destination)
     $stagedBefore = [IO.File]::ReadAllBytes($fixture.Staged)
@@ -714,12 +744,12 @@ try {
         Remove-RecoveryArtifactDestination -Context $artifactLease.Context -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Destination $destination -Quarantine $quarantine -CopyReceipt $receipt
     } 'delete without staged capability reaches the PowerShell boundary' 'Recovery artifact deletion requires a staged capability opened through Open-RecoveryArtifactStaged.'
     Assert-Native ([IO.File]::Exists($fixture.Destination) -and
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Destination)) -ceq [Convert]::ToBase64String($destinationBefore)) 'delete without staged capability preserves the destination.'
+        [Convert]::ToBase64String((Get-NativeArtifactBytes $destination)) -ceq [Convert]::ToBase64String($destinationBefore)) 'delete without staged capability preserves the destination.'
     Assert-Native ([IO.File]::Exists($quarantinePath) -and
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes($quarantinePath)) -ceq [Convert]::ToBase64String($fixture.OriginalBytes)) 'delete without staged capability preserves the quarantine.'
+        [Convert]::ToBase64String((Get-NativeArtifactBytes $quarantine)) -ceq [Convert]::ToBase64String($fixture.OriginalBytes)) 'delete without staged capability preserves the quarantine.'
     Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Staged)) -ceq [Convert]::ToBase64String($stagedBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.ManifestBackup)) -ceq [Convert]::ToBase64String($manifestBackupBefore) -and
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))) -ceq [Convert]::ToBase64String($progressBefore) -and
+        [Convert]::ToBase64String((Get-NativeLeaseBytes $artifactLease.Holder.Lease)) -ceq [Convert]::ToBase64String($progressBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.OutsideSentinel)) -ceq [Convert]::ToBase64String($outsideBefore)) 'delete without staged capability preserves staged, manifest, progress, and outside bytes.'
 } finally {
     Close-NativeArtifactLease $artifactLease
@@ -737,7 +767,7 @@ try {
     $wrongDestinationBytes[0] = [byte]0x7f
     [IO.File]::WriteAllBytes($fixture.Destination, $wrongDestinationBytes)
     $artifactLease = New-NativeArtifactLease $fixture
-    $progressBefore = [IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))
+    $progressBefore = Get-NativeLeaseBytes $artifactLease.Holder.Lease
     $sourceBefore = [IO.File]::ReadAllBytes($fixture.Source)
     $stagedBefore = [IO.File]::ReadAllBytes($fixture.Staged)
     $manifestBackupBefore = [IO.File]::ReadAllBytes($fixture.ManifestBackup)
@@ -750,7 +780,7 @@ try {
     Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Source)) -ceq [Convert]::ToBase64String($sourceBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Staged)) -ceq [Convert]::ToBase64String($stagedBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.ManifestBackup)) -ceq [Convert]::ToBase64String($manifestBackupBefore) -and
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))) -ceq [Convert]::ToBase64String($progressBefore) -and
+        [Convert]::ToBase64String((Get-NativeLeaseBytes $artifactLease.Holder.Lease)) -ceq [Convert]::ToBase64String($progressBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.OutsideSentinel)) -ceq [Convert]::ToBase64String($outsideBefore)) 'wrong destination bytes preserve recovery evidence and the outside sentinel.'
 } finally {
     Close-NativeArtifactLease $artifactLease
@@ -768,7 +798,7 @@ try {
     for ($index = 0; $index -lt $wrongStagedBytes.Length; $index++) { $wrongStagedBytes[$index] = [byte]0x63 }
     [IO.File]::WriteAllBytes($fixture.Staged, $wrongStagedBytes)
     $artifactLease = New-NativeArtifactLease $fixture
-    $progressBefore = [IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))
+    $progressBefore = Get-NativeLeaseBytes $artifactLease.Holder.Lease
     $destinationBefore = [IO.File]::ReadAllBytes($fixture.Destination)
     $sourceBefore = [IO.File]::ReadAllBytes($fixture.Source)
     $manifestBackupBefore = [IO.File]::ReadAllBytes($fixture.ManifestBackup)
@@ -778,11 +808,11 @@ try {
         Open-RecoveryArtifactStaged -Context $artifactLease.Context -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0
     } 'wrong staged bytes'
     Assert-Native ([IO.File]::Exists($fixture.Destination) -and
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Destination)) -ceq [Convert]::ToBase64String($destinationBefore)) 'wrong staged bytes preserve the destination before deletion.'
+        [Convert]::ToBase64String((Get-NativeArtifactBytes $destination)) -ceq [Convert]::ToBase64String($destinationBefore)) 'wrong staged bytes preserve the destination before deletion.'
     Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Staged)) -ceq [Convert]::ToBase64String($wrongStagedBytes) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Source)) -ceq [Convert]::ToBase64String($sourceBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.ManifestBackup)) -ceq [Convert]::ToBase64String($manifestBackupBefore) -and
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))) -ceq [Convert]::ToBase64String($progressBefore) -and
+        [Convert]::ToBase64String((Get-NativeLeaseBytes $artifactLease.Holder.Lease)) -ceq [Convert]::ToBase64String($progressBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.OutsideSentinel)) -ceq [Convert]::ToBase64String($outsideBefore)) 'wrong staged bytes preserve staging and recovery evidence.'
 } finally {
     Close-NativeArtifactLease $artifactLease
@@ -851,6 +881,196 @@ try {
     Remove-NativeArtifactFixture $fixture
 }
 
+# The native authority owns the retained lease and replay/commit cursor. The
+# public facades must derive sequence and offset from that state while keeping
+# exact frame bytes on the retained stream.
+$fixture = New-NativeProgressFixture
+$holder = $null
+try {
+    $holder = New-RecoveryProgressLeaseHolder
+    $lease = Get-RecoveryProgressLease -Manifest $fixture.Manifest -Journal $fixture.Journal -Holder $holder
+    $authority = New-RecoveryProgressPhaseAuthority -Phases @('pending') -TransactionId $fixture.Manifest.transactionId -Generation $fixture.Manifest.generation -OperatorSid $fixture.Manifest.operatorSid -ManifestPath $fixture.Manifest.manifestPath -ProgressLease $lease -Checkpoint 0
+    $holder.PhaseAuthority = $authority
+    Assert-Native ([object]::ReferenceEquals($authority, $holder.PhaseAuthority) -and
+        $authority.IsBoundTo($lease.Native) -and
+        $authority.Lifecycle -ceq 'AwaitingInitialLeaf' -and
+        [long]$authority.CommittedOffset -eq 0 -and
+        [long]$authority.NextSequence -eq 0 -and
+        [long]$authority.Checkpoint -eq 0) 'new authority owns the retained ancestor lease and starts with an immutable zero cursor.'
+    $lease = Get-RecoveryProgressLease -Manifest $fixture.Manifest -Journal $fixture.Journal -Holder $holder -CreateIfMissing
+    Assert-Native ($authority.Lifecycle -ceq 'Replaying' -and
+        $authority.IsBoundTo($lease.Native) -and $lease.Native.HasLeaf -and
+        [long]$authority.CommittedOffset -eq 0 -and [long]$authority.NextSequence -eq 0) 'created progress leaf attaches to the same native authority lease.'
+
+    $record0 = New-RecoveryProgressRecord -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Phase 'restoring' -Sequence 0 -UnitCount 1
+    $frame0 = New-RecoveryProgressFrame $record0
+    $replayOffset = Write-NativeProgressFrame -Lease $lease -Frame $frame0
+    Assert-Native ([long]$replayOffset -eq [long]$authority.CommittedOffset) 'replay frame is written at the authority-owned offset.'
+    $replayed = [LifeOSRecoveryProgressNative]::ReplayRecoveryProgressFrame(
+        $authority, $frame0.Header, $frame0.HeaderDigest, $frame0.Payload, $frame0.Digest, $frame0.Commit)
+    Assert-Native ($replayed.Sequence -eq 0 -and $replayed.UnitIndex -eq 0 -and
+        $replayed.Phase -ceq 'restoring' -and [long]$authority.NextSequence -eq 1 -and
+        [long]$authority.CommittedOffset -eq [long]$frame0.TotalBytes) 'replay derives and publishes the next sequence and exact byte offset.'
+    [LifeOSRecoveryProgressNative]::SealRecoveryProgressReplay($authority)
+    Assert-Native ($authority.IsReady -and $authority.Lifecycle -ceq 'Ready') 'sealed replay transitions the authority to Ready.'
+
+    $record1 = New-RecoveryProgressRecord -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Phase 'complete' -Sequence 1 -UnitCount 1
+    $frame1 = New-RecoveryProgressFrame $record1
+    $commitOffset = Write-NativeProgressFrame -Lease $lease -Frame $frame1
+    Assert-Native ([long]$commitOffset -eq [long]$authority.CommittedOffset -and
+        [long]$authority.NextSequence -eq 1) 'commit frame is appended at the authority cursor without caller-supplied offset or sequence.'
+    $committed = [LifeOSRecoveryProgressNative]::CommitRecoveryProgressFrame(
+        $authority, 0, 'complete', $frame1.Header, $frame1.HeaderDigest, $frame1.Payload,
+        $frame1.Digest, $frame1.Commit)
+    Assert-Native ($committed.Sequence -eq 1 -and $committed.Phase -ceq 'complete' -and
+        [long]$authority.NextSequence -eq 2 -and
+        [long]$authority.CommittedOffset -eq [long]($frame0.TotalBytes + $frame1.TotalBytes) -and
+        [long]$lease.Stream.Length -eq [long]$authority.CommittedOffset) 'commit derives and publishes sequence and offset after exact retained-stream readback.'
+    $expectedBytes = New-Object byte[] ([int]($frame0.TotalBytes + $frame1.TotalBytes))
+    $expectedFrame0 = Get-NativeProgressFrameBytes $frame0
+    $expectedFrame1 = Get-NativeProgressFrameBytes $frame1
+    [Array]::Copy($expectedFrame0, 0, $expectedBytes, 0, $expectedFrame0.Length)
+    [Array]::Copy($expectedFrame1, 0, $expectedBytes, $expectedFrame0.Length, $expectedFrame1.Length)
+    Assert-Native ([Convert]::ToBase64String((Get-NativeLeaseBytes $lease)) -ceq
+        [Convert]::ToBase64String($expectedBytes)) 'replay and commit preserve the exact durable frame byte sequence.'
+    [LifeOSRecoveryProgressNative]::CloseRecoveryPhaseAuthority($authority)
+    Assert-Native ($authority.Lifecycle -ceq 'Closed' -and -not $authority.IsReady) 'close facade makes the native authority terminal.'
+} finally {
+    if ($null -ne $holder) { Close-RecoveryProgressLeaseHolder $holder }
+    Remove-NativeProgressFixture $fixture
+}
+
+# Replay rejects the record at the configured limit before publishing a token
+# or cursor. The durable candidate remains inspectable for the caller's
+# recovery decision, while the authority is poisoned for a fresh replay.
+$savedMaxRecords = $script:LifeOSRecoveryProgressMaxRecords
+$script:LifeOSRecoveryProgressMaxRecords = 1
+$fixture = New-NativeProgressFixture
+$holder = $null
+try {
+    $holder = New-RecoveryProgressLeaseHolder
+    $lease = Get-RecoveryProgressLease -Manifest $fixture.Manifest -Journal $fixture.Journal -Holder $holder
+    $authority = New-RecoveryProgressPhaseAuthority -Phases @('pending') -TransactionId $fixture.Manifest.transactionId -Generation $fixture.Manifest.generation -OperatorSid $fixture.Manifest.operatorSid -ManifestPath $fixture.Manifest.manifestPath -ProgressLease $lease -Checkpoint 0
+    $holder.PhaseAuthority = $authority
+    $lease = Get-RecoveryProgressLease -Manifest $fixture.Manifest -Journal $fixture.Journal -Holder $holder -CreateIfMissing
+    $record0 = New-RecoveryProgressRecord -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Phase 'restoring' -Sequence 0 -UnitCount 1
+    $frame0 = New-RecoveryProgressFrame $record0
+    [void](Write-NativeProgressFrame -Lease $lease -Frame $frame0)
+    [void]([LifeOSRecoveryProgressNative]::ReplayRecoveryProgressFrame(
+        $authority, $frame0.Header, $frame0.HeaderDigest, $frame0.Payload, $frame0.Digest, $frame0.Commit))
+    $record1 = [ordered]@{
+        sequence = 1; transactionId = [string]$fixture.Manifest.transactionId
+        generation = [string]$fixture.Manifest.generation; operatorSid = [string]$fixture.Manifest.operatorSid
+        manifestPath = [string]$fixture.Manifest.manifestPath; unitIndex = 0; phase = 'complete'
+    }
+    $frame1 = New-RecoveryProgressFrame $record1
+    [void](Write-NativeProgressFrame -Lease $lease -Frame $frame1)
+    $beforeLimitBytes = Get-NativeLeaseBytes $lease
+    $beforeLimitOffset = [long]$authority.CommittedOffset
+    $beforeLimitSequence = [long]$authority.NextSequence
+    $beforeLimitToken = $authority.GetToken(0)
+    Assert-NativeThrows {
+        [LifeOSRecoveryProgressNative]::ReplayRecoveryProgressFrame(
+            $authority, $frame1.Header, $frame1.HeaderDigest, $frame1.Payload, $frame1.Digest, $frame1.Commit)
+    } 'native replay record limit'
+    Assert-Native ($authority.IsPoisoned -and
+        [long]$authority.CommittedOffset -eq $beforeLimitOffset -and
+        [long]$authority.NextSequence -eq $beforeLimitSequence -and
+        [long]$authority.UpdateCount -eq 1 -and
+        [object]::ReferenceEquals($authority.GetToken(0), $beforeLimitToken) -and
+        [Convert]::ToBase64String((Get-NativeLeaseBytes $lease)) -ceq [Convert]::ToBase64String($beforeLimitBytes)) 'native replay limit rejection preserves the published cursor, token, and exact durable bytes.'
+} finally {
+    if ($null -ne $holder) { Close-RecoveryProgressLeaseHolder $holder }
+    Remove-NativeProgressFixture $fixture
+    $script:LifeOSRecoveryProgressMaxRecords = $savedMaxRecords
+}
+
+# A failed native commit poisons the authority without changing its cursor,
+# token, or retained bytes, and poisoned state cannot authorize artifact access.
+$fixture = New-NativeArtifactFixture
+$artifactLease = $null
+try {
+    $artifactLease = New-NativeArtifactLease $fixture
+    $authority = $artifactLease.Holder.PhaseAuthority
+    $lease = $artifactLease.Holder.Lease
+    $baseBytes = Get-NativeLeaseBytes $lease
+    $baseOffset = [long]$authority.CommittedOffset
+    $baseSequence = [long]$authority.NextSequence
+    $baseToken = $authority.GetToken(0)
+    Assert-Native ($authority.IsReady -and $authority.Lifecycle -ceq 'Ready' -and
+        $authority.IsBoundTo($lease.Native) -and $baseOffset -eq [long]$lease.Length -and
+        $baseSequence -eq [long]$lease.Sequence) 'artifact access starts from a Ready authority bound to the retained lease cursor.'
+    $invalidFramePart = New-Object byte[] 0
+    Assert-NativeThrows {
+        [LifeOSRecoveryProgressNative]::CommitRecoveryProgressFrame(
+            $authority, 0, 'complete', $invalidFramePart, $invalidFramePart,
+            $invalidFramePart, $invalidFramePart, $invalidFramePart)
+    } 'invalid native commit poisons the authority'
+    Assert-Native ($authority.IsPoisoned -and $authority.Lifecycle -ceq 'Poisoned' -and
+        [long]$authority.CommittedOffset -eq $baseOffset -and
+        [long]$authority.NextSequence -eq $baseSequence -and
+        [long]$authority.UpdateCount -eq 1 -and
+        [object]::ReferenceEquals($authority.GetToken(0), $baseToken)) 'poisoned commit leaves the native cursor and token unchanged.'
+    Assert-Native ([Convert]::ToBase64String((Get-NativeLeaseBytes $lease)) -ceq
+        [Convert]::ToBase64String($baseBytes)) 'poisoned commit leaves the retained progress bytes unchanged.'
+    Assert-NativeThrows { $artifactLease.Context.Native.OpenDestination() } 'poisoned authority cannot authorize an artifact operation.'
+    [LifeOSRecoveryProgressNative]::CloseRecoveryPhaseAuthority($authority)
+    Assert-Native ($authority.Lifecycle -ceq 'Closed') 'closed facade remains terminal after poisoning.'
+} finally {
+    Close-NativeArtifactLease $artifactLease
+    Remove-NativeArtifactFixture $fixture
+}
+
+# Native commit owns the exact stream boundary. A valid frame followed by a
+# torn byte or a complete extra frame is rejected before the authority can
+# publish the transition.
+function Invoke-NativeCommitSuffixRejection {
+    param([Parameter(Mandatory)][ValidateSet('byte', 'complete-frames')][string]$SuffixKind)
+    $fixture = New-NativeArtifactFixture
+    $artifactLease = $null
+    try {
+        $artifactLease = New-NativeArtifactLease $fixture
+        $authority = $artifactLease.Holder.PhaseAuthority
+        $lease = $artifactLease.Holder.Lease
+        $frameRecord = New-RecoveryProgressRecord -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Phase 'complete' -Sequence 1 -UnitCount 1
+        $candidate = New-RecoveryProgressFrame $frameRecord
+        if ($SuffixKind -ceq 'byte') {
+            $suffix = [byte[]]@(0x7f)
+        } else {
+            $frameBytes = Get-NativeProgressFrameBytes $candidate
+            $suffix = New-Object byte[] ($frameBytes.Length * 2)
+            [Array]::Copy($frameBytes, 0, $suffix, 0, $frameBytes.Length)
+            [Array]::Copy($frameBytes, 0, $suffix, $frameBytes.Length, $frameBytes.Length)
+        }
+        $baseBytes = Get-NativeLeaseBytes $lease
+        $lease.Stream.Position = $lease.Stream.Length
+        $lease.Stream.Write($suffix, 0, $suffix.Length)
+        $lease.Stream.Flush($true)
+        $expectedBytes = New-Object byte[] ($baseBytes.Length + $suffix.Length)
+        [Array]::Copy($baseBytes, 0, $expectedBytes, 0, $baseBytes.Length)
+        [Array]::Copy($suffix, 0, $expectedBytes, $baseBytes.Length, $suffix.Length)
+        $baseOffset = [long]$authority.CommittedOffset
+        $baseSequence = [long]$authority.NextSequence
+        $baseToken = $authority.GetToken(0)
+        Assert-NativeThrows {
+            [LifeOSRecoveryProgressNative]::CommitRecoveryProgressFrame(
+                $authority, 0, 'complete', $candidate.Header, $candidate.HeaderDigest,
+                $candidate.Payload, $candidate.Digest, $candidate.Commit)
+        } "native commit rejects a $SuffixKind suffix"
+        Assert-Native ($authority.IsPoisoned -and
+            [long]$authority.CommittedOffset -eq $baseOffset -and
+            [long]$authority.NextSequence -eq $baseSequence -and
+            [long]$authority.UpdateCount -eq 1 -and
+            [object]::ReferenceEquals($authority.GetToken(0), $baseToken) -and
+            [Convert]::ToBase64String((Get-NativeLeaseBytes $lease)) -ceq [Convert]::ToBase64String($expectedBytes)) "native commit $SuffixKind rejection preserves cursor, token, and exact bytes"
+    } finally {
+        Close-NativeArtifactLease $artifactLease
+        Remove-NativeArtifactFixture $fixture
+    }
+}
+Invoke-NativeCommitSuffixRejection -SuffixKind 'byte'
+Invoke-NativeCommitSuffixRejection -SuffixKind 'complete-frames'
+
 # A committed phase transition replaces only the affected native token. A
 # context created before that transition is stale even though the ledger object
 # itself remains shared with the holder.
@@ -861,22 +1081,16 @@ try {
     $authority = $artifactLease.Context.PhaseAuthority
     $token = $artifactLease.Context.PhaseToken
     $updatesBefore = [long]$authority.UpdateCount
-    $invalidFramePart = New-Object byte[] 0
-    Assert-NativeThrows {
-        [LifeOSRecoveryProgressNative]::CommitRecoveryProgressFrame(
-            $artifactLease.Holder.Lease.Native, $authority, 0, 'complete',
-            [long]$artifactLease.Holder.Lease.Length, [long]$artifactLease.Holder.Lease.Sequence,
-            $invalidFramePart, $invalidFramePart, $invalidFramePart, $invalidFramePart, $invalidFramePart)
-    } 'phase authority cannot advance without a validated durable frame'
-    Assert-Native ([long]$authority.UpdateCount -eq $updatesBefore -and
-        [object]::ReferenceEquals($authority.GetToken(0), $token)) 'rejected frame leaves the phase token unchanged.'
+    Assert-Native ($authority.IsReady -and $authority.IsBoundTo($artifactLease.Holder.Lease.Native) -and
+        [long]$authority.CommittedOffset -eq [long]$artifactLease.Holder.Lease.Length -and
+        [long]$authority.NextSequence -eq [long]$artifactLease.Holder.Lease.Sequence) 'stale-token test begins from the ready authority-owned cursor.'
     Assert-Native (Append-RecoveryProgress -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Phase 'complete' -ProgressLeaseHolder $artifactLease.Holder) 'committed phase transition advances the native ledger.'
     Assert-Native ([object]::ReferenceEquals($artifactLease.Holder.PhaseAuthority, $authority) -and
         -not [object]::ReferenceEquals($authority.GetToken(0), $token) -and
         [long]$authority.UpdateCount -eq $updatesBefore + 1) 'phase transition replaces one token without rebuilding the authority inventory.'
     Assert-NativeThrowsSpecific {
         $artifactLease.Context.Native.OpenDestination()
-    } 'stale native context after committed phase transition' 'The artifact mutation context uses a stale committed phase token.'
+    } 'stale native context after committed phase transition' 'Recovery artifact access is not bound to the ready progress authority.'
     Assert-NativeThrowsSpecific {
         Assert-RecoveryArtifactMutationBinding -Context $artifactLease.Context -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0
     } 'stale wrapper context after committed phase transition' 'Recovery artifact mutation requires a journal-bound restoring unit.'
@@ -1027,23 +1241,20 @@ try {
         }
     )
     foreach ($case in $cases) {
-        $frame = New-NativeProgressFrameFromPayload -Payload $case.Payload
-        [void](Write-NativeProgressFrame -Lease $lease -Frame $frame)
         $bytesBeforeReject = Get-NativeLeaseBytes $lease
         Assert-NativeThrowsSpecific {
-            [LifeOSRecoveryProgressNative]::CommitRecoveryProgressFrame(
-                $lease.Native, $authority, 0, 'complete', $baseLength, $baseSequence,
-                $frame.Header, $frame.HeaderDigest, $frame.Payload, $frame.Digest, $frame.Commit)
+            [LifeOSRecoveryProgressNative]::ParseRecoveryProgressRecord(
+                $case.Payload, $baseSequence, 0, 'complete', $fixture.Manifest.transactionId,
+                $fixture.Manifest.generation, $fixture.Manifest.operatorSid, $fixture.Manifest.manifestPath)
         } $case.Name $case.Expected
         $bytesAfterReject = Get-NativeLeaseBytes $lease
         Assert-Native ([Convert]::ToBase64String($bytesAfterReject) -ceq
-            [Convert]::ToBase64String($bytesBeforeReject)) "$($case.Name) does not rewrite the rejected frame."
+            [Convert]::ToBase64String($bytesBeforeReject)) "$($case.Name) does not rewrite the retained stream."
         Assert-Native ([long]$authority.UpdateCount -eq 1 -and
-            [object]::ReferenceEquals($authority.GetToken(0), $baseToken)) "$($case.Name) leaves the native token unchanged."
-        $lease.Stream.SetLength($baseLength)
-        $lease.Stream.Flush($true)
-        $lease.Length = $baseLength
-        $lease.Sequence = $baseSequence
+            [object]::ReferenceEquals($authority.GetToken(0), $baseToken) -and
+            [long]$authority.CommittedOffset -eq $baseLength -and
+            [long]$authority.NextSequence -eq $baseSequence -and
+            $authority.IsReady) "$($case.Name) leaves the native token and authority cursor unchanged."
         Assert-Native ([Convert]::ToBase64String((Get-NativeLeaseBytes $lease)) -ceq
             [Convert]::ToBase64String($baseBytes)) "$($case.Name) leaves the committed progress bytes unchanged."
     }
@@ -1202,7 +1413,7 @@ $fixture = New-NativeArtifactFixture
 $artifactLease = $null
 try {
     $artifactLease = New-NativeArtifactLease $fixture -MaxBytes ([long]$fixture.OriginalBytes.Length - 1)
-    $progressBefore = [IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))
+    $progressBefore = Get-NativeLeaseBytes $artifactLease.Holder.Lease
     $destinationBefore = [IO.File]::ReadAllBytes($fixture.Destination)
     $stagedBefore = [IO.File]::ReadAllBytes($fixture.Staged)
     $sourceBefore = [IO.File]::ReadAllBytes($fixture.Source)
@@ -1215,7 +1426,7 @@ try {
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Staged)) -ceq [Convert]::ToBase64String($stagedBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Source)) -ceq [Convert]::ToBase64String($sourceBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.ManifestBackup)) -ceq [Convert]::ToBase64String($manifestBackupBefore) -and
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))) -ceq [Convert]::ToBase64String($progressBefore) -and
+        [Convert]::ToBase64String((Get-NativeLeaseBytes $artifactLease.Holder.Lease)) -ceq [Convert]::ToBase64String($progressBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.OutsideSentinel)) -ceq [Convert]::ToBase64String($outsideBefore)) 'one-byte-over-bound rejection preserves every evidence file.'
 } finally {
     Close-NativeArtifactLease $artifactLease
@@ -1230,22 +1441,22 @@ $artifactLease = $null
 $quarantinePath = $null
 try {
     $artifactLease = New-NativeArtifactLease $fixture
-    $progressBefore = [IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))
+    $progressBefore = Get-NativeLeaseBytes $artifactLease.Holder.Lease
     $manifestBackupBefore = [IO.File]::ReadAllBytes($fixture.ManifestBackup)
     $sourceBefore = [IO.File]::ReadAllBytes($fixture.Source)
     $destinationBefore = [IO.File]::ReadAllBytes($fixture.Destination)
     $destination = Open-RecoveryArtifactDestination -Context $artifactLease.Context -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0
     $quarantine = New-RecoveryArtifactQuarantineSibling -Context $artifactLease.Context -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0
     $quarantinePath = Join-Path $fixture.Backup $quarantine.Name
-    # An unusable quarantine wrapper with its managed stream closed must be
+    # A quarantine stream whose length changed behind its wrapper must be
     # rejected before copying. Its native leaf remains open so cleanup can
     # delete the unverified name by handle.
-    $quarantine.Native.Stream.Dispose()
+    $quarantine.Native.Stream.SetLength($fixture.OriginalBytes.Length + 1)
     Assert-NativeThrows { Copy-RecoveryArtifactToQuarantine -Context $artifactLease.Context -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Destination $destination -Quarantine $quarantine } 'unusable quarantine stream cleanup'
     Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Source)) -ceq [Convert]::ToBase64String($sourceBefore)) 'failed copy preserves source bytes.'
-    Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Destination)) -ceq [Convert]::ToBase64String($destinationBefore)) 'failed copy preserves destination bytes.'
+    Assert-Native ([Convert]::ToBase64String((Get-NativeArtifactBytes $destination)) -ceq [Convert]::ToBase64String($destinationBefore)) 'failed copy preserves destination bytes.'
     Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.ManifestBackup)) -ceq [Convert]::ToBase64String($manifestBackupBefore)) 'failed copy preserves manifest backup bytes.'
-    Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))) -ceq [Convert]::ToBase64String($progressBefore)) 'failed copy preserves progress bytes.'
+    Assert-Native ([Convert]::ToBase64String((Get-NativeLeaseBytes $artifactLease.Holder.Lease)) -ceq [Convert]::ToBase64String($progressBefore)) 'failed copy preserves progress bytes.'
 } finally {
     Close-NativeArtifactLease $artifactLease
     if ($null -ne $quarantinePath) { Assert-Native (-not [IO.File]::Exists($quarantinePath)) 'failed copy leaves no unverified quarantine orphan.' }
@@ -1262,7 +1473,7 @@ $artifactLease = $null
 $competingReader = $null
 try {
     $artifactLease = New-NativeArtifactLease $fixture
-    $progressBefore = [IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))
+    $progressBefore = Get-NativeLeaseBytes $artifactLease.Holder.Lease
     $manifestBackupBefore = [IO.File]::ReadAllBytes($fixture.ManifestBackup)
     $destinationBefore = [IO.File]::ReadAllBytes($fixture.Destination)
     $competingReader = [IO.File]::Open($fixture.Destination, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -1276,7 +1487,7 @@ try {
     Assert-Native ([IO.File]::Exists($fixture.Destination) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Destination)) -ceq [Convert]::ToBase64String($destinationBefore)) 'failed acquisition preserves the destination.'
     Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.ManifestBackup)) -ceq [Convert]::ToBase64String($manifestBackupBefore) -and
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))) -ceq [Convert]::ToBase64String($progressBefore)) 'failed delete preserves manifest backup and progress.'
+        [Convert]::ToBase64String((Get-NativeLeaseBytes $artifactLease.Holder.Lease)) -ceq [Convert]::ToBase64String($progressBefore)) 'failed delete preserves manifest backup and progress.'
 } finally {
     if ($null -ne $competingReader) { $competingReader.Dispose() }
     Close-NativeArtifactLease $artifactLease
@@ -1292,7 +1503,7 @@ $artifactLease = $null
 $competingLease = $null
 try {
     $artifactLease = New-NativeArtifactLease $fixture
-    $progressBefore = [IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))
+    $progressBefore = Get-NativeLeaseBytes $artifactLease.Holder.Lease
     $manifestBackupBefore = [IO.File]::ReadAllBytes($fixture.ManifestBackup)
     $stagedBefore = [IO.File]::ReadAllBytes($fixture.Staged)
     $outsideBefore = [IO.File]::ReadAllBytes($fixture.OutsideSentinel)
@@ -1308,11 +1519,11 @@ try {
     $competingLease.Stream.Write($competingBytes, 0, $competingBytes.Length)
     $competingLease.Stream.Flush($true)
     Assert-NativeThrows { Publish-RecoveryArtifactStaged -Context $artifactLease.Context -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Staged $staged } 'competing destination no-replace publication'
-    Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Destination)) -ceq [Convert]::ToBase64String($competingBytes)) 'publication never replaces the competing destination.'
-    Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Staged)) -ceq [Convert]::ToBase64String($stagedBefore)) 'failed publication preserves staged bytes.'
+    Assert-Native ([Convert]::ToBase64String((Get-NativeHandleLeaseBytes $competingLease)) -ceq [Convert]::ToBase64String($competingBytes)) 'publication never replaces the competing destination.'
+    Assert-Native ([Convert]::ToBase64String((Get-NativeArtifactBytes $staged)) -ceq [Convert]::ToBase64String($stagedBefore)) 'failed publication preserves staged bytes.'
     Assert-Native ([IO.File]::Exists($quarantinePath) -and
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes($quarantinePath)) -ceq [Convert]::ToBase64String($fixture.OriginalBytes)) 'failed publication preserves quarantine bytes.'
-    Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))) -ceq [Convert]::ToBase64String($progressBefore) -and
+        [Convert]::ToBase64String((Get-NativeArtifactBytes $quarantine)) -ceq [Convert]::ToBase64String($fixture.OriginalBytes)) 'failed publication preserves quarantine bytes.'
+    Assert-Native ([Convert]::ToBase64String((Get-NativeLeaseBytes $artifactLease.Holder.Lease)) -ceq [Convert]::ToBase64String($progressBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.ManifestBackup)) -ceq [Convert]::ToBase64String($manifestBackupBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.OutsideSentinel)) -ceq [Convert]::ToBase64String($outsideBefore)) 'failed publication preserves recovery evidence and outside sentinel.'
 } finally {
@@ -1340,7 +1551,9 @@ try {
     Assert-NativeThrows { Open-RecoveryArtifactDestination -Context $artifactLease.Context -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 } 'reparse ancestor'
 } finally {
     Close-NativeArtifactLease $artifactLease
-    if ($null -ne $junction) { Remove-Item -LiteralPath $junction -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $junction) {
+        try { [IO.Directory]::Delete($junction) } catch { }
+    }
     Remove-NativeArtifactFixture $fixture
 }
 
@@ -1417,7 +1630,7 @@ $replacementLease = $null
 $quarantinePath = $null
 try {
     $artifactLease = New-NativeArtifactLease $fixture
-    $progressBefore = [IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))
+    $progressBefore = Get-NativeLeaseBytes $artifactLease.Holder.Lease
     $manifestBackupBefore = [IO.File]::ReadAllBytes($fixture.ManifestBackup)
     $oldBytes = [IO.File]::ReadAllBytes($fixture.Destination)
     $sourceBefore = [IO.File]::ReadAllBytes($fixture.Source)
@@ -1431,11 +1644,11 @@ try {
     $replacementLease.Stream.Write($replacementBytes, 0, $replacementBytes.Length)
     $replacementLease.Stream.Flush($true)
     Assert-NativeThrows { Copy-RecoveryArtifactToQuarantine -Context $artifactLease.Context -Manifest $fixture.Manifest -Journal $fixture.Journal -UnitIndex 0 -Destination $destination -Quarantine $quarantine } 'replaced destination leaf identity'
-    Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.RenamedDestination)) -ceq [Convert]::ToBase64String($oldBytes) -and
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Destination)) -ceq [Convert]::ToBase64String($replacementBytes)) 'leaf replacement leaves both identities and bytes distinct.'
+    Assert-Native ([Convert]::ToBase64String((Get-NativeArtifactBytes $destination)) -ceq [Convert]::ToBase64String($oldBytes) -and
+        [Convert]::ToBase64String((Get-NativeHandleLeaseBytes $replacementLease)) -ceq [Convert]::ToBase64String($replacementBytes)) 'leaf replacement leaves both identities and bytes distinct.'
     Assert-Native ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.Source)) -ceq [Convert]::ToBase64String($sourceBefore) -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.ManifestBackup)) -ceq [Convert]::ToBase64String($manifestBackupBefore) -and
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Get-RecoveryProgressPath $fixture.Manifest))) -ceq [Convert]::ToBase64String($progressBefore)) 'leaf replacement rejection preserves source, manifest backup, and progress.'
+        [Convert]::ToBase64String((Get-NativeLeaseBytes $artifactLease.Holder.Lease)) -ceq [Convert]::ToBase64String($progressBefore)) 'leaf replacement rejection preserves source, manifest backup, and progress.'
 } finally {
     if ($null -ne $replacementLease) { try { $replacementLease.Dispose() } catch { } }
     Close-NativeArtifactLease $artifactLease

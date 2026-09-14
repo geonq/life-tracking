@@ -3829,6 +3829,7 @@ public static class LifeOSRecoveryProgressNative
     private const uint FileTraverse = 0x00000020u;
     private const uint FileReadAttributes = 0x00000080u;
     private const uint FileShareRead = 0x00000001u;
+    private const uint FileShareWrite = 0x00000002u;
     private const uint FileShareDelete = 0x00000004u;
     private const uint FileAttributeDirectory = 0x00000010u;
     private const uint FileAttributeReparsePoint = 0x00000400u;
@@ -4321,8 +4322,9 @@ public static class LifeOSRecoveryProgressNative
                 }
                 IntPtr rawHandle;
                 IoStatusBlock ioStatus;
+                uint shareAccess = directory ? FileShareRead | FileShareWrite : FileShareRead;
                 status = NtCreateFile(out rawHandle, desiredAccess, ref attributes, out ioStatus,
-                    IntPtr.Zero, 0x00000080u, FileShareRead, disposition, options,
+                    IntPtr.Zero, 0x00000080u, shareAccess, disposition, options,
                     IntPtr.Zero, 0);
                 if (status != 0)
                 {
@@ -5184,33 +5186,87 @@ public static class LifeOSRecoveryProgressNative
     // state; it is not a sandbox against hostile code replacing the holder.
     public sealed class RecoveryPhaseAuthority
     {
+        private enum AuthorityState { Replaying, AwaitingInitialLeaf, Ready, Poisoned, Closed }
+
+        private readonly object sync = new object();
         private readonly RecoveryPhaseToken[] tokens;
+        private readonly HandleLease progressLease;
+        private readonly SafeFileHandle[] retainedAncestorHandles;
+        private readonly string[] retainedAncestorIdentities;
         private readonly string expectedTransactionId;
         private readonly string expectedGeneration;
         private readonly string expectedOperatorSid;
         private readonly string expectedManifestPath;
+        private readonly long checkpoint;
+        private readonly long maxRecords;
+        private long committedOffset;
+        private long nextSequence;
+        private SafeFileHandle retainedLeafHandle;
+        private string leafIdentity;
+        private AuthorityState state;
         private long updateCount;
 
-        private RecoveryPhaseAuthority(string[] committedPhases)
-            : this(committedPhases, null, null, null, null)
-        {
-        }
-
         private RecoveryPhaseAuthority(string[] committedPhases, string transactionId,
-            string generation, string operatorSid, string manifestPath)
+            string generation, string operatorSid, string manifestPath,
+            HandleLease retainedProgressLease, long replayCheckpoint, long recordLimit)
         {
             if (committedPhases == null || committedPhases.Length <= 0 || committedPhases.Length > 65536)
             {
                 throw new ArgumentException("Recovery phase authority unit count is out of bounds.", "committedPhases");
             }
+            if (retainedProgressLease == null || retainedProgressLease.IsDisposed)
+            {
+                throw new ArgumentException("Recovery phase authority requires a retained progress lease.", "retainedProgressLease");
+            }
             bool anyIdentity = transactionId != null || generation != null ||
                 operatorSid != null || manifestPath != null;
-            if (anyIdentity)
+            if (!anyIdentity)
             {
-                expectedTransactionId = CopyExpectedIdentity(transactionId, "transactionId");
-                expectedGeneration = CopyExpectedIdentity(generation, "generation");
-                expectedOperatorSid = CopyExpectedIdentity(operatorSid, "operatorSid");
-                expectedManifestPath = CopyExpectedIdentity(manifestPath, "manifestPath");
+                throw new ArgumentException("Recovery phase authority identity is incomplete.", "transactionId");
+            }
+            expectedTransactionId = CopyExpectedIdentity(transactionId, "transactionId");
+            expectedGeneration = CopyExpectedIdentity(generation, "generation");
+            expectedOperatorSid = CopyExpectedIdentity(operatorSid, "operatorSid");
+            expectedManifestPath = CopyExpectedIdentity(manifestPath, "manifestPath");
+            if (recordLimit <= 0 || recordLimit > 1000000)
+            {
+                throw new ArgumentOutOfRangeException("recordLimit");
+            }
+            if (replayCheckpoint < 0 || replayCheckpoint > recordLimit)
+            {
+                throw new ArgumentOutOfRangeException("replayCheckpoint");
+            }
+            if (retainedProgressLease.AncestorHandles == null ||
+                retainedProgressLease.AncestorIdentities == null ||
+                retainedProgressLease.AncestorHandles.Length == 0 ||
+                retainedProgressLease.AncestorHandles.Length != retainedProgressLease.AncestorIdentities.Length)
+            {
+                throw new ArgumentException("Recovery phase authority parent binding is invalid.", "retainedProgressLease");
+            }
+            progressLease = retainedProgressLease;
+            checkpoint = replayCheckpoint;
+            maxRecords = recordLimit;
+            retainedAncestorHandles = new SafeFileHandle[retainedProgressLease.AncestorHandles.Length];
+            retainedAncestorIdentities = new string[retainedProgressLease.AncestorIdentities.Length];
+            for (int index = 0; index < retainedAncestorHandles.Length; index++)
+            {
+                if (retainedProgressLease.AncestorHandles[index] == null ||
+                    retainedProgressLease.AncestorHandles[index].IsInvalid ||
+                    retainedProgressLease.AncestorHandles[index].IsClosed ||
+                    String.IsNullOrWhiteSpace(retainedProgressLease.AncestorIdentities[index]))
+                {
+                    throw new ArgumentException("Recovery phase authority parent binding is invalid.", "retainedProgressLease");
+                }
+                retainedAncestorHandles[index] = retainedProgressLease.AncestorHandles[index];
+                retainedAncestorIdentities[index] = String.Copy(retainedProgressLease.AncestorIdentities[index]);
+            }
+            state = progressLease.HasLeaf ? AuthorityState.Replaying : AuthorityState.AwaitingInitialLeaf;
+            committedOffset = 0;
+            nextSequence = 0;
+            if (progressLease.HasLeaf)
+            {
+                retainedLeafHandle = progressLease.LeafHandle;
+                leafIdentity = CopyExpectedIdentity(GetIdentity(retainedLeafHandle), "leafIdentity");
             }
             tokens = new RecoveryPhaseToken[committedPhases.Length];
             for (int index = 0; index < committedPhases.Length; index++)
@@ -5223,16 +5279,34 @@ public static class LifeOSRecoveryProgressNative
         // Keep construction private to the ledger. The outer native facade
         // uses this internal factory, while PowerShell can only reach the
         // validated facade method below.
-        internal static RecoveryPhaseAuthority Create(string[] committedPhases)
-        {
-            return new RecoveryPhaseAuthority(committedPhases);
-        }
-
         internal static RecoveryPhaseAuthority CreateWithExpectedIdentity(string[] committedPhases,
-            string transactionId, string generation, string operatorSid, string manifestPath)
+            string transactionId, string generation, string operatorSid, string manifestPath,
+            HandleLease retainedProgressLease, long replayCheckpoint, long recordLimit)
         {
             return new RecoveryPhaseAuthority(committedPhases, transactionId, generation,
-                operatorSid, manifestPath);
+                operatorSid, manifestPath, retainedProgressLease, replayCheckpoint, recordLimit);
+        }
+
+        private void EnsureAncestorsNoLock()
+        {
+            if (progressLease == null || progressLease.IsDisposed ||
+                progressLease.AncestorHandles == null || progressLease.AncestorIdentities == null ||
+                progressLease.AncestorHandles.Length != retainedAncestorHandles.Length ||
+                progressLease.AncestorIdentities.Length != retainedAncestorIdentities.Length)
+            {
+                throw new InvalidOperationException("Recovery progress authority parent binding is invalid.");
+            }
+            for (int index = 0; index < retainedAncestorHandles.Length; index++)
+            {
+                SafeFileHandle parent = progressLease.AncestorHandles[index];
+                if (!Object.ReferenceEquals(parent, retainedAncestorHandles[index]) ||
+                    !String.Equals(progressLease.AncestorIdentities[index], retainedAncestorIdentities[index], StringComparison.Ordinal) ||
+                    parent == null || parent.IsInvalid || parent.IsClosed ||
+                    !String.Equals(GetIdentity(parent), retainedAncestorIdentities[index], StringComparison.Ordinal))
+                {
+                    throw new IOException("Recovery progress authority parent identity changed.");
+                }
+            }
         }
 
         private static string CopyExpectedIdentity(string value, string fieldName)
@@ -5259,6 +5333,152 @@ public static class LifeOSRecoveryProgressNative
         public string ExpectedGeneration { get { return expectedGeneration; } }
         public string ExpectedOperatorSid { get { return expectedOperatorSid; } }
         public string ExpectedManifestPath { get { return expectedManifestPath; } }
+        public string Lifecycle { get { lock (sync) { return state.ToString(); } } }
+        public bool IsReady { get { lock (sync) { return state == AuthorityState.Ready; } } }
+        public bool IsPoisoned { get { lock (sync) { return state == AuthorityState.Poisoned; } } }
+        public long CommittedOffset { get { lock (sync) { return committedOffset; } } }
+        public long NextSequence { get { lock (sync) { return nextSequence; } } }
+        public long Checkpoint { get { return checkpoint; } }
+        public long MaxRecords { get { return maxRecords; } }
+
+        public bool IsBoundTo(HandleLease candidate)
+        {
+            lock (sync) { return Object.ReferenceEquals(progressLease, candidate); }
+        }
+
+        private void EnsureLeaseNoLock(bool requireLeaf, bool requireWritable)
+        {
+            EnsureAncestorsNoLock();
+            if (requireLeaf && !progressLease.HasLeaf)
+            {
+                throw new InvalidOperationException("Recovery progress authority has no retained leaf.");
+            }
+            if (progressLease.HasLeaf)
+            {
+                if (retainedLeafHandle == null ||
+                    !Object.ReferenceEquals(progressLease.LeafHandle, retainedLeafHandle) ||
+                    String.IsNullOrWhiteSpace(leafIdentity) ||
+                    !String.Equals(GetIdentity(progressLease.LeafHandle), leafIdentity, StringComparison.Ordinal))
+                {
+                    throw new IOException("Recovery progress authority leaf identity changed.");
+                }
+                if (progressLease.Stream == null || progressLease.Stream.CanRead == false ||
+                    (requireWritable && !progressLease.Stream.CanWrite) ||
+                    progressLease.Stream.SafeFileHandle == null ||
+                    progressLease.Stream.SafeFileHandle.IsClosed ||
+                    progressLease.Stream.SafeFileHandle.DangerousGetHandle() != progressLease.LeafHandle.DangerousGetHandle())
+                {
+                    throw new InvalidOperationException("Recovery progress authority leaf stream is not usable.");
+                }
+            }
+        }
+
+        private void EnsureStateNoLock(AuthorityState expected)
+        {
+            if (state == AuthorityState.Poisoned)
+            {
+                throw new InvalidOperationException("Recovery progress authority is poisoned and requires fresh replay.");
+            }
+            if (state == AuthorityState.Closed)
+            {
+                throw new InvalidOperationException("Recovery progress authority is closed.");
+            }
+            if (state != expected)
+            {
+                throw new InvalidOperationException("Recovery progress authority is not in the required lifecycle state.");
+            }
+        }
+
+        private void PoisonNoLock()
+        {
+            if (state != AuthorityState.Closed) { state = AuthorityState.Poisoned; }
+        }
+
+        internal void AttachCreatedRecoveryProgressLeaf()
+        {
+            lock (sync)
+            {
+                try
+                {
+                    EnsureStateNoLock(AuthorityState.AwaitingInitialLeaf);
+                    EnsureAncestorsNoLock();
+                    if (!progressLease.HasLeaf || !progressLease.Created ||
+                        progressLease.Stream == null || !progressLease.Stream.CanWrite ||
+                        progressLease.Stream.Length != 0)
+                    {
+                        throw new InvalidOperationException("Recovery progress authority requires a newly created empty leaf.");
+                    }
+                    retainedLeafHandle = progressLease.LeafHandle;
+                    leafIdentity = CopyExpectedIdentity(GetIdentity(retainedLeafHandle), "leafIdentity");
+                    EnsureLeaseNoLock(true, true);
+                    committedOffset = 0;
+                    nextSequence = 0;
+                    state = AuthorityState.Replaying;
+                }
+                catch { PoisonNoLock(); throw; }
+            }
+        }
+
+        internal void SealRecoveryProgressReplay()
+        {
+            lock (sync)
+            {
+                try
+                {
+                    EnsureStateNoLock(AuthorityState.Replaying);
+                    EnsureLeaseNoLock(true, false);
+                    if (nextSequence < checkpoint || progressLease.Stream.Length != committedOffset)
+                    {
+                        throw new IOException("Recovery progress authority replay cursor is not sealed.");
+                    }
+                    state = AuthorityState.Ready;
+                }
+                catch { PoisonNoLock(); throw; }
+            }
+        }
+
+        internal void SealInitialAbsence()
+        {
+            lock (sync)
+            {
+                try
+                {
+                    EnsureStateNoLock(AuthorityState.AwaitingInitialLeaf);
+                    EnsureAncestorsNoLock();
+                    if (progressLease.HasLeaf || checkpoint != 0 || nextSequence != 0 || committedOffset != 0)
+                    {
+                        throw new IOException("Recovery progress authority initial absence is not empty.");
+                    }
+                }
+                catch { PoisonNoLock(); throw; }
+            }
+        }
+
+        internal void AssertArtifactAccess(HandleLease candidate, int unitIndex, RecoveryPhaseToken token)
+        {
+            lock (sync)
+            {
+                EnsureStateNoLock(AuthorityState.Ready);
+                EnsureLeaseNoLock(true, true);
+                if (!Object.ReferenceEquals(progressLease, candidate) ||
+                    unitIndex < 0 || unitIndex >= tokens.Length ||
+                    token == null || !Object.ReferenceEquals(tokens[unitIndex], token) ||
+                    !String.Equals(token.Phase, "restoring", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("Recovery artifact access is not bound to the ready progress authority.");
+                }
+            }
+        }
+
+        internal void Poison()
+        {
+            lock (sync) { PoisonNoLock(); }
+        }
+
+        internal void Close()
+        {
+            lock (sync) { state = AuthorityState.Closed; }
+        }
 
         public RecoveryPhaseToken GetToken(int unitIndex)
         {
@@ -5281,21 +5501,94 @@ public static class LifeOSRecoveryProgressNative
 
         public bool IsCurrent(int unitIndex, RecoveryPhaseToken token)
         {
-            return token != null && token.UnitIndex == unitIndex && Object.ReferenceEquals(GetToken(unitIndex), token);
+            lock (sync)
+            {
+                return state == AuthorityState.Ready && token != null && token.UnitIndex == unitIndex &&
+                    unitIndex >= 0 && unitIndex < tokens.Length && Object.ReferenceEquals(tokens[unitIndex], token);
+            }
         }
 
-        internal RecoveryPhaseToken Advance(int unitIndex, string nextPhase)
+        private void ValidateTransitionNoLock(int unitIndex, string nextPhase)
         {
             ValidatePhase(nextPhase);
-            RecoveryPhaseToken current = GetToken(unitIndex);
-            if (String.Equals(current.Phase, nextPhase, StringComparison.Ordinal))
+            if (unitIndex < 0 || unitIndex >= tokens.Length)
             {
-                return current;
+                throw new ArgumentOutOfRangeException("unitIndex");
             }
+            string currentPhase = tokens[unitIndex].Phase;
+            if ((currentPhase == "pending" && nextPhase != "restoring" && nextPhase != "complete") ||
+                (currentPhase == "restoring" && nextPhase != "complete") ||
+                currentPhase == "complete" || currentPhase == nextPhase)
+            {
+                throw new InvalidDataException("Recovery progress phase transition is invalid.");
+            }
+        }
+
+        private RecoveryPhaseToken AdvanceNoLock(int unitIndex, string nextPhase)
+        {
+            ValidateTransitionNoLock(unitIndex, nextPhase);
+            RecoveryPhaseToken current = tokens[unitIndex];
             RecoveryPhaseToken replacement = new RecoveryPhaseToken(unitIndex, nextPhase, current.Revision + 1);
             tokens[unitIndex] = replacement;
             updateCount++;
             return replacement;
+        }
+
+        internal RecoveryProgressRecord ReplayFrame(byte[] header, byte[] headerDigest,
+            byte[] payload, byte[] digest, byte[] commit)
+        {
+            lock (sync)
+            {
+                try
+                {
+                    EnsureStateNoLock(AuthorityState.Replaying);
+                    EnsureLeaseNoLock(true, false);
+                    long totalBytes;
+                    ValidateRecoveryProgressFrameParts(header, headerDigest, payload, digest, commit, out totalBytes);
+                    RecoveryProgressRecord record = ParseRecoveryProgressRecord(payload, nextSequence,
+                        -1, null, expectedTransactionId, expectedGeneration, expectedOperatorSid,
+                        expectedManifestPath);
+                    ValidateTransitionNoLock(record.UnitIndex, record.Phase);
+                    VerifyRecoveryProgressFrameAt(progressLease, committedOffset, totalBytes,
+                        header, headerDigest, payload, digest, commit, false, false);
+                    if (nextSequence >= maxRecords)
+                    {
+                        throw new IOException("Recovery progress log contains too many records.");
+                    }
+                    AdvanceNoLock(record.UnitIndex, record.Phase);
+                    committedOffset += totalBytes;
+                    nextSequence++;
+                    return record;
+                }
+                catch { PoisonNoLock(); throw; }
+            }
+        }
+
+        internal RecoveryProgressRecord CommitFrame(int unitIndex, string nextPhase,
+            byte[] header, byte[] headerDigest, byte[] payload, byte[] digest, byte[] commit)
+        {
+            lock (sync)
+            {
+                try
+                {
+                    EnsureStateNoLock(AuthorityState.Ready);
+                    EnsureLeaseNoLock(true, true);
+                    long totalBytes;
+                    ValidateRecoveryProgressFrameParts(header, headerDigest, payload, digest, commit, out totalBytes);
+                    if (nextSequence >= maxRecords) { throw new IOException("Recovery progress log contains too many records."); }
+                    RecoveryProgressRecord record = ParseRecoveryProgressRecord(payload, nextSequence,
+                        unitIndex, nextPhase, expectedTransactionId, expectedGeneration,
+                        expectedOperatorSid, expectedManifestPath);
+                    ValidateTransitionNoLock(unitIndex, nextPhase);
+                    VerifyRecoveryProgressFrameAt(progressLease, committedOffset, totalBytes,
+                        header, headerDigest, payload, digest, commit, true, true);
+                    AdvanceNoLock(unitIndex, nextPhase);
+                    committedOffset += totalBytes;
+                    nextSequence++;
+                    return record;
+                }
+                catch { PoisonNoLock(); throw; }
+            }
         }
     }
 
@@ -5390,6 +5683,7 @@ public static class LifeOSRecoveryProgressNative
             expectedPostState = expectedPostStateValue;
             phaseAuthority = retainedPhaseAuthority;
             phaseToken = retainedPhaseAuthority.GetToken(unitIndex);
+            retainedPhaseAuthority.AssertArtifactAccess(retainedProgressLease, unitIndex, phaseToken);
             UnitIndex = unitIndex;
             TransactionId = transactionId;
             Generation = generation;
@@ -5708,10 +6002,7 @@ public static class LifeOSRecoveryProgressNative
         private void EnsureActive()
         {
             if (disposed) { throw new InvalidOperationException("The artifact mutation context is disposed."); }
-            if (!phaseAuthority.IsCurrent(UnitIndex, phaseToken))
-            {
-                throw new InvalidOperationException("The artifact mutation context uses a stale committed phase token.");
-            }
+            phaseAuthority.AssertArtifactAccess(progressLease, UnitIndex, phaseToken);
             if (progressLease == null || progressLease.IsDisposed || !progressLease.HasLeaf)
             {
                 throw new InvalidOperationException("The retained progress lease is no longer active.");
@@ -5828,8 +6119,13 @@ public static class LifeOSRecoveryProgressNative
             }
             IntPtr rawHandle;
             IoStatusBlock ioStatus;
-            uint shareAccess = contract == ArtifactOpenContract.ReadOnlyIdentityProbe
-                ? FileShareRead | FileShareDelete : FileShareRead;
+            // Ntfs opens the rename target relative to the retained parent and
+            // requests write access. The parent lease must share writes for
+            // that internal open, while the source lease must share deletes so
+            // its own handle-bound rename is legal. The app still holds the
+            // exact parent/file handles and rechecks identities before every
+            // mutation, so sharing is not treated as authorization.
+            uint shareAccess = FileShareRead | FileShareDelete;
             status = NtCreateFile(out rawHandle, desiredAccess, ref attributes, out ioStatus,
                 IntPtr.Zero, FileAttributeNormal, shareAccess, disposition, options,
                 IntPtr.Zero, 0);
@@ -6192,17 +6488,14 @@ public static class LifeOSRecoveryProgressNative
             phaseAuthority);
     }
 
-    public static RecoveryPhaseAuthority NewRecoveryPhaseAuthority(string[] committedPhases)
-    {
-        return RecoveryPhaseAuthority.Create(committedPhases);
-    }
-
     public static RecoveryPhaseAuthority NewRecoveryPhaseAuthorityWithExpectedIdentity(
         string[] committedPhases, string transactionId, string generation,
-        string operatorSid, string manifestPath)
+        string operatorSid, string manifestPath, HandleLease retainedProgressLease,
+        long replayCheckpoint, long maxRecords)
     {
         return RecoveryPhaseAuthority.CreateWithExpectedIdentity(committedPhases,
-            transactionId, generation, operatorSid, manifestPath);
+            transactionId, generation, operatorSid, manifestPath, retainedProgressLease,
+            replayCheckpoint, maxRecords);
     }
 
     public static RecoveryProgressRecord ParseRecoveryProgressRecord(
@@ -6236,6 +6529,43 @@ public static class LifeOSRecoveryProgressNative
         }
     }
 
+    private static void ValidateRecoveryProgressFrameParts(byte[] header, byte[] headerDigest,
+        byte[] payload, byte[] digest, byte[] commit, out long totalBytes)
+    {
+        if (!BitConverter.IsLittleEndian)
+        {
+            throw new InvalidDataException("Recovery progress framing requires little-endian byte order.");
+        }
+        AssertRecoveryProgressFramePart(header, 9, "Recovery progress frame header");
+        AssertRecoveryProgressFramePart(headerDigest, 32, "Recovery progress frame header digest");
+        AssertRecoveryProgressFramePart(digest, 32, "Recovery progress frame digest");
+        AssertRecoveryProgressFramePart(commit, 1, "Recovery progress frame commit marker");
+        if (payload == null || payload.Length <= 0 || payload.Length > 16 * 1024 ||
+            commit[0] != 0xa5 || header[0] != 0x4c || header[1] != 0x50 ||
+            header[2] != 0x52 || header[3] != 0x47 || header[4] != 1 ||
+            BitConverter.ToInt32(header, 5) != payload.Length)
+        {
+            throw new InvalidDataException("Recovery progress frame header or payload is invalid.");
+        }
+        using (System.Security.Cryptography.SHA256 hash = System.Security.Cryptography.SHA256.Create())
+        {
+            byte[] expectedHeaderDigest = hash.ComputeHash(header);
+            if (!BytesEqual(expectedHeaderDigest, headerDigest))
+            {
+                throw new InvalidDataException("Recovery progress frame header digest is invalid.");
+            }
+            byte[] content = new byte[header.Length + payload.Length];
+            Buffer.BlockCopy(header, 0, content, 0, header.Length);
+            Buffer.BlockCopy(payload, 0, content, header.Length, payload.Length);
+            byte[] expectedDigest = hash.ComputeHash(content);
+            if (!BytesEqual(expectedDigest, digest))
+            {
+                throw new InvalidDataException("Recovery progress frame digest is invalid.");
+            }
+        }
+        totalBytes = (long)header.Length + headerDigest.Length + payload.Length + digest.Length + commit.Length;
+    }
+
     private static void AssertRecoveryProgressBytes(FileStream stream, byte[] expected, string description)
     {
         byte[] actual = new byte[expected.Length];
@@ -6255,89 +6585,87 @@ public static class LifeOSRecoveryProgressNative
         }
     }
 
-    public static void CommitRecoveryProgressFrame(
-        HandleLease progressLease, RecoveryPhaseAuthority authority, int unitIndex,
-        string nextPhase, long expectedOffset, long expectedSequence,
-        byte[] header, byte[] headerDigest, byte[] payload, byte[] digest, byte[] commit)
+    private static void VerifyRecoveryProgressFrameAt(HandleLease progressLease, long offset,
+        long totalBytes, byte[] header, byte[] headerDigest, byte[] payload, byte[] digest,
+        byte[] commit, bool flushBeforeReadback, bool requireExactEnd)
     {
-        if (progressLease == null || progressLease.IsDisposed || !progressLease.HasLeaf ||
-            progressLease.Stream == null || !progressLease.Stream.CanRead || !progressLease.Stream.CanWrite)
+        if (progressLease == null || progressLease.Stream == null || !progressLease.Stream.CanRead)
         {
-            throw new InvalidOperationException("Recovery progress frame commit requires a writable retained leaf.");
+            throw new InvalidOperationException("Recovery progress frame verification requires a readable retained leaf.");
         }
-        if (authority == null || authority.Count <= unitIndex || unitIndex < 0)
+        if (flushBeforeReadback) { progressLease.Stream.Flush(true); }
+        long streamLength = progressLease.Stream.Length;
+        long expectedEnd = offset + totalBytes;
+        if (offset < 0 || totalBytes <= 0 || offset > long.MaxValue - totalBytes ||
+            (requireExactEnd ? streamLength != expectedEnd : streamLength < expectedEnd))
         {
-            throw new ArgumentException("Recovery progress frame authority binding is invalid.");
-        }
-        if (expectedOffset < 0 || expectedSequence < 0)
-        {
-            throw new ArgumentOutOfRangeException("expectedOffset");
-        }
-        if (nextPhase != "restoring" && nextPhase != "complete")
-        {
-            throw new ArgumentException("Recovery progress frame phase is invalid.", "nextPhase");
-        }
-        if (authority.GetPhase(unitIndex) == nextPhase)
-        {
-            throw new InvalidOperationException("Recovery progress frame phase is already committed.");
-        }
-        AssertRecoveryProgressFramePart(header, 9, "Recovery progress frame header");
-        AssertRecoveryProgressFramePart(headerDigest, 32, "Recovery progress frame header digest");
-        AssertRecoveryProgressFramePart(digest, 32, "Recovery progress frame digest");
-        AssertRecoveryProgressFramePart(commit, 1, "Recovery progress frame commit marker");
-        if (payload == null || payload.Length <= 0 || payload.Length > 16 * 1024 ||
-            commit[0] != 0xa5 || header[0] != 0x4c || header[1] != 0x50 ||
-            header[2] != 0x52 || header[3] != 0x47 || header[4] != 1 ||
-            BitConverter.ToInt32(header, 5) != payload.Length)
-        {
-            throw new InvalidDataException("Recovery progress frame header or payload is invalid.");
-        }
-        using (System.Security.Cryptography.SHA256 hash = System.Security.Cryptography.SHA256.Create())
-        {
-            byte[] expectedHeaderDigest = hash.ComputeHash(header);
-            for (int index = 0; index < expectedHeaderDigest.Length; index++)
-            {
-                if (expectedHeaderDigest[index] != headerDigest[index])
-                {
-                    throw new InvalidDataException("Recovery progress frame header digest is invalid.");
-                }
-            }
-            byte[] content = new byte[header.Length + payload.Length];
-            Buffer.BlockCopy(header, 0, content, 0, header.Length);
-            Buffer.BlockCopy(payload, 0, content, header.Length, payload.Length);
-            byte[] expectedDigest = hash.ComputeHash(content);
-            for (int index = 0; index < expectedDigest.Length; index++)
-            {
-                if (expectedDigest[index] != digest[index])
-                {
-                    throw new InvalidDataException("Recovery progress frame digest is invalid.");
-                }
-            }
-        }
-        RecoveryProgressRecord parsedRecord = ParseRecoveryProgressRecord(payload,
-            expectedSequence, unitIndex, nextPhase, authority.ExpectedTransactionId,
-            authority.ExpectedGeneration, authority.ExpectedOperatorSid,
-            authority.ExpectedManifestPath);
-        long totalBytes = (long)header.Length + headerDigest.Length + payload.Length + digest.Length + commit.Length;
-        if (expectedOffset > long.MaxValue - totalBytes ||
-            progressLease.Stream.Length != expectedOffset + totalBytes)
-        {
-            throw new IOException("Recovery progress frame length is not bound to the retained stream.");
+            throw new IOException(requireExactEnd
+                ? "Recovery progress frame does not end at the retained stream boundary."
+                : "Recovery progress frame is not contained by the retained stream.");
         }
         long position = progressLease.Stream.Position;
         try
         {
-            progressLease.Stream.Flush(true);
-            progressLease.Stream.Position = expectedOffset;
+            progressLease.Stream.Position = offset;
             AssertRecoveryProgressBytes(progressLease.Stream, header, "Recovery progress frame header");
             AssertRecoveryProgressBytes(progressLease.Stream, headerDigest, "Recovery progress frame header digest");
             AssertRecoveryProgressBytes(progressLease.Stream, payload, "Recovery progress frame payload");
             AssertRecoveryProgressBytes(progressLease.Stream, digest, "Recovery progress frame digest");
             AssertRecoveryProgressBytes(progressLease.Stream, commit, "Recovery progress frame commit marker");
-            progressLease.Stream.Flush(true);
+            if (flushBeforeReadback) { progressLease.Stream.Flush(true); }
         }
         finally { progressLease.Stream.Position = position; }
-        authority.Advance(unitIndex, nextPhase);
+    }
+
+    public static void AttachCreatedRecoveryProgressLeaf(RecoveryPhaseAuthority authority)
+    {
+        if (authority == null) { throw new ArgumentNullException("authority"); }
+        authority.AttachCreatedRecoveryProgressLeaf();
+    }
+
+    public static void SealRecoveryProgressReplay(RecoveryPhaseAuthority authority)
+    {
+        if (authority == null) { throw new ArgumentNullException("authority"); }
+        authority.SealRecoveryProgressReplay();
+    }
+
+    public static void SealRecoveryProgressInitialAbsence(RecoveryPhaseAuthority authority)
+    {
+        if (authority == null) { throw new ArgumentNullException("authority"); }
+        authority.SealInitialAbsence();
+    }
+
+    public static void PoisonRecoveryPhaseAuthority(RecoveryPhaseAuthority authority)
+    {
+        if (authority != null) { authority.Poison(); }
+    }
+
+    public static void CloseRecoveryPhaseAuthority(RecoveryPhaseAuthority authority)
+    {
+        if (authority != null) { authority.Close(); }
+    }
+
+    public static RecoveryProgressRecord ReplayRecoveryProgressFrame(
+        RecoveryPhaseAuthority authority,
+        byte[] header, byte[] headerDigest, byte[] payload, byte[] digest, byte[] commit)
+    {
+        if (authority == null)
+        {
+            throw new ArgumentNullException("authority");
+        }
+        return authority.ReplayFrame(header, headerDigest, payload, digest, commit);
+    }
+
+    public static RecoveryProgressRecord CommitRecoveryProgressFrame(
+        RecoveryPhaseAuthority authority, int unitIndex, string nextPhase,
+        byte[] header, byte[] headerDigest, byte[] payload, byte[] digest, byte[] commit)
+    {
+        if (authority == null)
+        {
+            throw new ArgumentNullException("authority");
+        }
+        return authority.CommitFrame(unitIndex, nextPhase, header, headerDigest,
+            payload, digest, commit);
     }
 
     public static HandleLease OpenExisting(string path, bool writable)
@@ -6433,6 +6761,7 @@ function Close-RecoveryProgressLeaseHolder {
     param([AllowNull()]$Holder)
     if ($null -eq $Holder) { return }
     $lease = $Holder.Lease
+    $authority = $Holder.PhaseAuthority
     $Holder.Lease = $null
     $Holder.Parsed = $false
     $Holder.JournalReference = $null
@@ -6445,6 +6774,9 @@ function Close-RecoveryProgressLeaseHolder {
     $Holder.UnitCount = 0
     $Holder.FullUnitValidationCount = 0
     $Holder.IndexedUnitValidationCount = 0
+    if ($null -ne $authority) {
+        try { [LifeOSRecoveryProgressNative]::CloseRecoveryPhaseAuthority($authority) } catch { }
+    }
     if ($null -ne $lease) { Close-RecoveryProgressLease $lease }
 }
 
@@ -6641,6 +6973,10 @@ function Get-RecoveryProgressLease {
             Assert-RecoveryProgressLeaseBinding -Lease $Holder.Lease -Manifest $Manifest -Journal $Journal
             if (($CreateNewOnly -or $CreateIfMissing) -and -not [bool]$Holder.Lease.Native.HasLeaf) {
                 [void](Complete-RecoveryProgressLeaseLeaf -Lease $Holder.Lease -Manifest $Manifest -Journal $Journal -Strict:$Strict)
+                if ($null -ne $Holder.PhaseAuthority -and
+                    [string]$Holder.PhaseAuthority.Lifecycle -ceq 'AwaitingInitialLeaf') {
+                    [LifeOSRecoveryProgressNative]::AttachCreatedRecoveryProgressLeaf($Holder.PhaseAuthority)
+                }
                 $Holder.Parsed = $false
             } elseif ($CreateNewOnly -and [bool]$Holder.Lease.Native.HasLeaf) {
                 throw 'Recovery progress leaf already exists for create-new acquisition.'
@@ -6660,6 +6996,10 @@ function Get-RecoveryProgressLease {
     $Holder.Parsed = $false
     if ($null -ne $lease -and $CreateIfMissing -and -not [bool]$lease.Native.HasLeaf) {
         [void](Complete-RecoveryProgressLeaseLeaf -Lease $lease -Manifest $Manifest -Journal $Journal -Strict:$Strict)
+        if ($null -ne $Holder.PhaseAuthority -and
+            [string]$Holder.PhaseAuthority.Lifecycle -ceq 'AwaitingInitialLeaf') {
+            [LifeOSRecoveryProgressNative]::AttachCreatedRecoveryProgressLeaf($Holder.PhaseAuthority)
+        }
     }
     if ($null -ne $lease -and $Strict -and [bool]$lease.Native.HasLeaf) {
         [void](Assert-RecoveryProgressLeaseSecurity -Lease $lease -Manifest $Manifest -Strict)
@@ -6913,23 +7253,33 @@ function New-RecoveryProgressPhaseAuthority {
         [Parameter(Mandatory)][string]$TransactionId,
         [Parameter(Mandatory)][string]$Generation,
         [Parameter(Mandatory)][string]$OperatorSid,
-        [Parameter(Mandatory)][string]$ManifestPath
+        [Parameter(Mandatory)][string]$ManifestPath,
+        [Parameter(Mandatory)]$ProgressLease,
+        [Parameter(Mandatory)][long]$Checkpoint
     )
     Initialize-LifeOSRecoveryProgressNative
-    return [LifeOSRecoveryProgressNative]::NewRecoveryPhaseAuthorityWithExpectedIdentity($Phases, $TransactionId, $Generation, $OperatorSid, $ManifestPath)
+    if ($null -eq $ProgressLease -or $null -eq $ProgressLease.Native) {
+        throw 'Recovery progress phase authority requires the retained native lease.'
+    }
+    return [LifeOSRecoveryProgressNative]::NewRecoveryPhaseAuthorityWithExpectedIdentity(
+        $Phases, $TransactionId, $Generation, $OperatorSid, $ManifestPath,
+        $ProgressLease.Native, $Checkpoint, [long]$script:LifeOSRecoveryProgressMaxRecords)
 }
 
 function Get-RecoveryProgressLeaseHolderContext {
     param(
         [Parameter(Mandatory)]$Journal,
         [Parameter(Mandatory)]$JournalUnits,
-        [Parameter(Mandatory)][int]$UnitCount
+        [Parameter(Mandatory)][int]$UnitCount,
+        [Parameter(Mandatory)]$ProgressLease,
+        [Parameter(Mandatory)][long]$Checkpoint
     )
     $ownedUnits = Get-RecoveryJournalUnits $Journal
     if ($null -eq $ownedUnits) { $ownedUnits = $JournalUnits }
     $unitReferences = New-Object object[] $UnitCount
     $unitContent = New-Object string[] $UnitCount
     $validatedUnitPhases = New-Object string[] $UnitCount
+    $authorityPhases = New-Object string[] $UnitCount
     for ($index = 0; $index -lt $UnitCount; $index++) {
         $unit = Get-RecoveryProgressUnit -Units $ownedUnits -UnitIndex $index
         if ($null -eq $unit) { throw 'Recovery progress unit binding is invalid.' }
@@ -6940,6 +7290,11 @@ function Get-RecoveryProgressLeaseHolderContext {
         $unitReferences[$index] = $unit
         $unitContent[$index] = Get-RecoveryProgressUnitContent $unit
         $validatedUnitPhases[$index] = [string]$phase
+        # The journal phase is the last published mirror and may already be
+        # ahead of the progress stream after a process restart. Replay always
+        # reconstructs from the immutable all-pending baseline, then the final
+        # holder validation proves that the journal mirror matches the stream.
+        $authorityPhases[$index] = 'pending'
     }
     return [pscustomobject]@{
         JournalReference = $Journal
@@ -6948,7 +7303,7 @@ function Get-RecoveryProgressLeaseHolderContext {
         UnitReferences = $unitReferences
         UnitContent = $unitContent
         ValidatedUnitPhases = $validatedUnitPhases
-        PhaseAuthority = New-RecoveryProgressPhaseAuthority -Phases $validatedUnitPhases -TransactionId ([string](Get-JournalProperty $Journal 'transactionId')) -Generation ([string](Get-JournalProperty $Journal 'generation')) -OperatorSid ([string](Get-JournalProperty $Journal 'operatorSid')) -ManifestPath ([string](Get-JournalProperty $Journal 'manifestPath'))
+        PhaseAuthority = New-RecoveryProgressPhaseAuthority -Phases $authorityPhases -TransactionId ([string](Get-JournalProperty $Journal 'transactionId')) -Generation ([string](Get-JournalProperty $Journal 'generation')) -OperatorSid ([string](Get-JournalProperty $Journal 'operatorSid')) -ManifestPath ([string](Get-JournalProperty $Journal 'manifestPath')) -ProgressLease $ProgressLease -Checkpoint $Checkpoint
         UnitCount = $UnitCount
         FullUnitValidationCount = 1
     }
@@ -6959,13 +7314,15 @@ function Set-RecoveryProgressLeaseHolderContext {
         [Parameter(Mandatory)]$Holder,
         [Parameter(Mandatory)]$Journal,
         [Parameter(Mandatory)]$JournalUnits,
-        [Parameter(Mandatory)][int]$UnitCount
+        [Parameter(Mandatory)][int]$UnitCount,
+        [Parameter(Mandatory)]$ProgressLease,
+        [Parameter(Mandatory)][long]$Checkpoint
     )
     if ($null -ne $Holder.JournalReference) {
         Assert-RecoveryProgressLeaseHolderContext -Holder $Holder -Journal $Journal -JournalUnits $JournalUnits -UnitCount $UnitCount -ValidateAllUnits
         return
     }
-    $context = Get-RecoveryProgressLeaseHolderContext -Journal $Journal -JournalUnits $JournalUnits -UnitCount $UnitCount
+    $context = Get-RecoveryProgressLeaseHolderContext -Journal $Journal -JournalUnits $JournalUnits -UnitCount $UnitCount -ProgressLease $ProgressLease -Checkpoint $Checkpoint
     $Holder.JournalReference = $context.JournalReference
     $Holder.JournalContent = $context.JournalContent
         $Holder.UnitCollectionReference = $context.UnitCollectionReference
@@ -6993,6 +7350,10 @@ function Assert-RecoveryProgressLeaseHolderContext {
         [string]$Holder.PhaseAuthority.GetType().FullName -cne 'LifeOSRecoveryProgressNative+RecoveryPhaseAuthority' -or
         [int]$Holder.PhaseAuthority.Count -ne [int]$UnitCount) {
         throw 'Recovery progress lease holder phase authority is missing or changed.'
+    }
+    if ($null -eq $Holder.Lease -or $null -eq $Holder.Lease.Native -or
+        -not $Holder.PhaseAuthority.IsBoundTo($Holder.Lease.Native)) {
+        throw 'Recovery progress lease holder phase authority is not bound to the retained lease.'
     }
     $ownedUnits = Get-RecoveryJournalUnits $Journal
     if ($null -eq $ownedUnits -or
@@ -7042,6 +7403,20 @@ function Get-RecoveryJournalUnits {
         if ($Journal.Contains('units')) { return ,$Journal['units'] }
     } elseif ($null -ne $Journal) {
         $property = $Journal.PSObject.Properties['units']
+        if ($null -ne $property) { return ,$property.Value }
+    }
+    return $null
+}
+
+function Get-RecoveryJournalTreeRoots {
+    param([Parameter(Mandatory)]$Journal)
+    # Preserve the property's collection shape. A one-root journal otherwise
+    # gets unwrapped by a pipeline-returning helper and is indistinguishable
+    # from the malformed scalar form at the call site.
+    if ($Journal -is [System.Collections.IDictionary]) {
+        if ($Journal.Contains('treeRoots')) { return ,$Journal['treeRoots'] }
+    } elseif ($null -ne $Journal) {
+        $property = $Journal.PSObject.Properties['treeRoots']
         if ($null -ne $property) { return ,$property.Value }
     }
     return $null
@@ -7109,8 +7484,9 @@ function Read-RecoveryProgress {
     if ($null -eq $progressLease -or -not [bool]$progressLease.Native.HasLeaf) {
         Assert-RecoveryProgressInitialAbsence -Journal $Journal -JournalUnits $ownedJournalUnits -UnitCount $unitCount
         Set-JournalProperty $Journal 'progressSequence' 0
+        Set-RecoveryProgressLeaseHolderContext -Holder $ProgressLeaseHolder -Journal $Journal -JournalUnits $ownedJournalUnits -UnitCount $unitCount -ProgressLease $progressLease -Checkpoint 0
+        [LifeOSRecoveryProgressNative]::SealRecoveryProgressInitialAbsence($ProgressLeaseHolder.PhaseAuthority)
         $ProgressLeaseHolder.Parsed = $true
-        Set-RecoveryProgressLeaseHolderContext -Holder $ProgressLeaseHolder -Journal $Journal -JournalUnits $ownedJournalUnits -UnitCount $unitCount
         $progressReadPhaseSucceeded = $true
         return
     }
@@ -7119,6 +7495,9 @@ function Read-RecoveryProgress {
         # first frame. It must still carry the all-pending, sequence-zero
         # envelope before the reader treats it as resumable.
         Assert-RecoveryProgressInitialAbsence -Journal $Journal -JournalUnits $ownedJournalUnits -UnitCount $unitCount
+    }
+    if ($null -eq $ProgressLeaseHolder.JournalReference) {
+        Set-RecoveryProgressLeaseHolderContext -Holder $ProgressLeaseHolder -Journal $Journal -JournalUnits $ownedJournalUnits -UnitCount $unitCount -ProgressLease $progressLease -Checkpoint $checkpoint
     }
     if ($ProgressLeaseHolder.Parsed) {
         Assert-RecoveryProgressLeaseBinding -Lease $progressLease -Manifest $Manifest -Journal $Journal
@@ -7218,6 +7597,8 @@ function Read-RecoveryProgress {
         }
         $payload = New-Object byte[] $payloadLength
         [Array]::Copy($buffer, [int]$offset + $script:LifeOSRecoveryProgressFrameHeaderBytes, $payload, 0, $payloadLength)
+        $headerDigest = New-Object byte[] $script:LifeOSRecoveryProgressHeaderDigestBytes
+        [Array]::Copy($buffer, [int]$offset + $script:LifeOSRecoveryProgressHeaderBytes, $headerDigest, 0, $script:LifeOSRecoveryProgressHeaderDigestBytes)
         $storedDigest = New-Object byte[] $script:LifeOSRecoveryProgressDigestBytes
         [Array]::Copy($buffer, [int]$offset + $script:LifeOSRecoveryProgressFrameHeaderBytes + $payloadLength, $storedDigest, 0, $script:LifeOSRecoveryProgressDigestBytes)
         $content = New-RecoveryProgressDigestInput -Header $header -Payload $payload
@@ -7228,16 +7609,17 @@ function Read-RecoveryProgress {
             if ($storedDigest[$digestIndex] -ne $actualDigest[$digestIndex]) { $digestMatches = $false; break }
         }
         if (-not $digestMatches) { throw 'Recovery progress committed record digest is invalid.' }
-        $record = ([Text.UTF8Encoding]::new($false, $true).GetString($payload)) | ConvertFrom-Json -ErrorAction Stop
-        Assert-RecoveryProgressRecord -Record $record -Manifest $Manifest -UnitCount $unitCount -ExpectedSequence $sequence
-        $progressUnit = Get-RecoveryProgressUnit -Units $ownedJournalUnits -UnitIndex ([int](Get-JournalProperty $record 'unitIndex'))
-        Set-JournalProperty $progressUnit 'phase' ([string](Get-JournalProperty $record 'phase'))
+        $commit = [byte[]]@($buffer[$commitOffset])
+        $record = [LifeOSRecoveryProgressNative]::ReplayRecoveryProgressFrame(
+            $ProgressLeaseHolder.PhaseAuthority, $header, $headerDigest, $payload, $storedDigest, $commit)
+        $progressUnit = Get-RecoveryProgressUnit -Units $ownedJournalUnits -UnitIndex ([int]$record.UnitIndex)
+        if ($null -eq $progressUnit) { throw 'Recovery progress unit index is out of bounds.' }
+        Set-JournalProperty $progressUnit 'phase' ([string]$record.Phase)
         Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'units'
         Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'committedFrames'
-        $sequence++
-        $offset += $frameBytes
+        $sequence = [long]$ProgressLeaseHolder.PhaseAuthority.NextSequence
+        $offset = [long]$ProgressLeaseHolder.PhaseAuthority.CommittedOffset
         $committedOffset = $offset
-        if ($sequence -gt $script:LifeOSRecoveryProgressMaxRecords) { throw 'Recovery progress log contains too many records.' }
         if (($sequence % 1024) -eq 0) { [void](Write-LifeOSRecoveryDiagnosticDetailHeartbeat -Token $progressReplayPhase) }
     }
     # A durable journal checkpoint is evidence of committed history. Reject a
@@ -7260,15 +7642,31 @@ function Read-RecoveryProgress {
             throw
         }
     }
+    [LifeOSRecoveryProgressNative]::SealRecoveryProgressReplay($ProgressLeaseHolder.PhaseAuthority)
+    $sequence = [long]$ProgressLeaseHolder.PhaseAuthority.NextSequence
+    $committedOffset = [long]$ProgressLeaseHolder.PhaseAuthority.CommittedOffset
+    if ([long]$progressLease.Stream.Length -ne $committedOffset) {
+        throw 'Recovery progress log length changed while it was being sealed.'
+    }
+    # Replay reconstructs native truth from the all-pending baseline. The
+    # journal and holder phase arrays are only mirrors, so synchronize them
+    # before the existing holder validation rechecks the restarted context.
+    for ($index = 0; $index -lt $unitCount; $index++) {
+        $ProgressLeaseHolder.ValidatedUnitPhases[$index] =
+            [string]$ProgressLeaseHolder.PhaseAuthority.GetPhase($index)
+    }
     Set-JournalProperty $Journal 'progressSequence' $sequence
     $progressLease.Sequence = $sequence
     $ProgressLeaseHolder.Parsed = $true
-    Set-RecoveryProgressLeaseHolderContext -Holder $ProgressLeaseHolder -Journal $Journal -JournalUnits $ownedJournalUnits -UnitCount $unitCount
+    Set-RecoveryProgressLeaseHolderContext -Holder $ProgressLeaseHolder -Journal $Journal -JournalUnits $ownedJournalUnits -UnitCount $unitCount -ProgressLease $progressLease -Checkpoint $checkpoint
     $progressReplayPhaseSucceeded = $true
     } finally {
         [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $progressReplayPhase -Succeeded:$progressReplayPhaseSucceeded)
     }
     } catch {
+        if ($null -ne $progressLease -and $null -ne $ProgressLeaseHolder.PhaseAuthority) {
+            [LifeOSRecoveryProgressNative]::PoisonRecoveryPhaseAuthority($ProgressLeaseHolder.PhaseAuthority)
+        }
         Poison-RecoveryProgressLease $progressLease
         throw
     } finally {
@@ -7336,6 +7734,12 @@ function Append-RecoveryProgress {
     if ($null -eq $progressLease.Sequence -or $sequence -ne [long]$progressLease.Sequence) {
         throw 'Recovery progress sequence is not bound to the retained stream.'
     }
+    if ($null -eq $ProgressLeaseHolder.PhaseAuthority -or
+        [long]$ProgressLeaseHolder.PhaseAuthority.NextSequence -ne $sequence -or
+        [long]$ProgressLeaseHolder.PhaseAuthority.CommittedOffset -ne [long]$progressLease.Length -or
+        -not [bool]$ProgressLeaseHolder.PhaseAuthority.IsReady) {
+        throw 'Recovery progress sequence or offset is not bound to the ready native authority.'
+    }
     if ([long]$progressLease.Stream.Length -ne [long]$progressLease.Length) {
         throw 'Recovery progress length changed while the lease was active.'
     }
@@ -7368,22 +7772,25 @@ function Append-RecoveryProgress {
     # retained stream and advances only the affected private ledger slot after
     # that verification. The replacement token revokes stale contexts without
     # copying the entire phase inventory for every record.
-    [LifeOSRecoveryProgressNative]::CommitRecoveryProgressFrame(
-        $progressLease.Native, $ProgressLeaseHolder.PhaseAuthority, $UnitIndex,
-        $Phase, [long]$progressLease.Length, $sequence, $frame.Header,
+    $committedRecord = [LifeOSRecoveryProgressNative]::CommitRecoveryProgressFrame(
+        $ProgressLeaseHolder.PhaseAuthority, $UnitIndex, $Phase, $frame.Header,
         $frame.HeaderDigest, $frame.Payload, $frame.Digest, $frame.Commit)
-    $progressLease.Length = [long]$stream.Length
-    $progressLease.Sequence = $sequence + 1
-    Set-JournalProperty $unit 'phase' $Phase
+    $nextSequence = [long]$ProgressLeaseHolder.PhaseAuthority.NextSequence
+    $progressLease.Length = [long]$ProgressLeaseHolder.PhaseAuthority.CommittedOffset
+    $progressLease.Sequence = $nextSequence
+    Set-JournalProperty $unit 'phase' ([string]$committedRecord.Phase)
     Set-JournalProperty $Journal 'progressPath' (Get-FullPath $progressPath)
-    Set-JournalProperty $Journal 'progressSequence' ($sequence + 1)
+    Set-JournalProperty $Journal 'progressSequence' $nextSequence
     # The frame commit marker and flush are durable before the cached phase
     # ledger is advanced. A later cached read cannot accept an in-memory phase
     # transition that has no corresponding committed progress frame.
-    $ProgressLeaseHolder.ValidatedUnitPhases[$UnitIndex] = $Phase
+    $ProgressLeaseHolder.ValidatedUnitPhases[$UnitIndex] = [string]$committedRecord.Phase
     return $true
     } catch {
         if ($null -ne $progressLease) {
+            if ($null -ne $ProgressLeaseHolder.PhaseAuthority) {
+                [LifeOSRecoveryProgressNative]::PoisonRecoveryPhaseAuthority($ProgressLeaseHolder.PhaseAuthority)
+            }
             Poison-RecoveryProgressLease $progressLease
             Close-RecoveryProgressLeaseHolder $ProgressLeaseHolder
         }
@@ -7484,7 +7891,7 @@ function Get-RecoveryArtifactMutationBinding {
         throw 'Recovery artifact mutation destination and staging paths must share one parent.'
     }
 
-    $treeRoots = Get-JournalProperty $Journal 'treeRoots'
+    $treeRoots = Get-RecoveryJournalTreeRoots $Journal
     if ($null -eq $treeRoots -or $treeRoots -is [string]) {
         throw 'Recovery artifact mutation journal tree roots are missing.'
     }
