@@ -1,11 +1,11 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-14; local source `f0d59a5` plus coordination
-checkpoint `5d28735`; `origin/main` is **16e0855**, five commits behind.
-D2a/D2b is Astra Medium **MERGE**. Approved documentation-only plan; Windows
-facts are read-only; release is NO-GO. Progress is **70–75% implemented** /
+Planning baseline: 2026-09-14; source checkpoint `b6bc465`; local `main`
+matches `origin/main` with zero divergence. D2a/D2b/D3 are Astra Medium
+**MERGE**. Approved documentation-only plan; Windows facts are read-only;
+release is NO-GO. Progress is **70–75% implemented** /
 **35–45% release-ready**, kept separate.
 ## 1. Current truth and explicit gates
-- **NO-GO.** The current local checkpoint is `f0d59a5`, including the reviewed
+- **NO-GO.** The current checkpoint is `b6bc465`, including the reviewed
   dashboard refinement at `0d094ee`, calendar zoom safety, the T12b calendar
   viewport/midnight correction, T13a bounded widget snapshot I/O, visual
   foundation at `5b90539`, and the clean production dependency audit.
@@ -20,8 +20,8 @@ facts are read-only; release is NO-GO. Progress is **70–75% implemented** /
   marker. No final runtime or registry acceptance is implied.
 - HANDOFF records FROZEN registry validation: 258 scored leaves, seven aliases, zero accepted, failing --score. Historical scoped GREEN is neither whole-product acceptance nor an effort percentage.
 - Recorded receipts: Usage visuals3/3; Finance16/16 plus phone contracts; Fitness Recovery1/1 Mac and1/1 phone; Calendar107/107 simulator plus Mac build; installer13/13; backend148/148. Mac snapshots executed51/51 before archive failure; this is not a passing final archive. Tax has scoped AX/picker proof, not a successful whole Mac UI suite.
-- Windows recorded state: C: and D: fully encrypted/protection ON; **BitLocker is healthy**. No recovery/install process; API stopped; gateway absent; marker active, journal artifacts-complete,31,401 units, sequence59,167. Resume stopped after45 minutes without final checkpoint. Candidate6baa1f3 and disposable diagnostics through0a8d5b6 do not certify canonical recovery/install.
-- Rejected recovery optimization and Mac shell candidate remain excluded. Two security workers closed without reports. Calendar unavailable-symbol fix has local tests, but its blocked targeted Astra re-review remains open. Live banking, physical signing/widgets, whole-app visuals/runtime, Zepp fidelity, Canvas and final operational security remain unverified.
+- Windows recorded state: C: and D: fully encrypted/protection ON; **BitLocker is healthy**. No recovery/install process; API stopped; gateway absent; marker active with a manifest but no current stage, `recovery.json`, or `recovery.progress.jsonl` at the default backup root. The older 31,401-unit receipt is not current. Candidate `6baa1f3` and disposable diagnostics through `0a8d5b6` do not certify canonical recovery/install.
+- Rejected recovery optimization and Mac shell candidate remain excluded. Two security workers closed without reports. D3 has a final Astra Medium **MERGE** review; D4/D5 remain open. Live banking, physical signing/widgets, whole-app visuals/runtime, Zepp fidelity, Canvas and final operational security remain unverified.
 - Review inputs: Coordination/HANDOFF.md, Coordination/DECISIONS.md, Coordination/PHASE_STATUS.md, tasks/ACTIVE.md, this file, tasks/design.md, docs/LIFEOS_ACCEPTANCE_REGISTRY.md and relevant referenced source filenames only. Issue#2 architecture below is inherited from these inputs; its current remote body/status was not fetched.
 - Current user instructions/DECISIONS govern authority/security; compatible tasks/design.md governs visuals. Both current documents already specify Calendar40/64/120. Keep SF Pro, green estimates, orange calories and native Home NavigationStack.
 - Shared visual foundation `5b90539` is Astra Medium GREEN after an exact
@@ -50,8 +50,8 @@ facts are read-only; release is NO-GO. Progress is **70–75% implemented** /
   matched-geometry ownership, and reduced-motion paint retention; its
   serialized Mac build-for-testing passed. The iOS lane reaches changed Swift
   compilation but stops at actool because no iphonesimulator runtime is
-  available. T12d D2–D5 security/reconciliation, simulator execution, physical
-  gesture, and widget evidence remain open.
+  available. T12d D1–D3 are accepted through `b6bc465`; D4–D5, simulator
+  execution, physical gesture, and widget evidence remain open.
 - T0 must reconcile registry RM-01 hero morph, RM-02 ring reveal/halo, RM-03 chart draw, related atomic/non-overlap metadata and BF coaching language with current design. Preserve original hash, reviewed replacement contracts, rationale, amendment/refreeze history and unrelated thresholds; never silently accept obsolete behavior, prune scope or implement generic AI.
 - All ACTIVE phases1–9 and registry leaves remain scope: Finance/ledger, Tax/Documents, Business, Investments, Reminders Tasks/Grocery/Shopping, shell/settings/reports, bounded full Fitness and hardware; issue#2 Canvas adds explicit completion scope. Honest unavailable states do not erase unfinished functionality.
 - Gates: G0 reconciled contracts/evidence; G1 successful canonical Windows recovery/protected gateway; G2 live bank/import/health provenance; G3 permitted signed Mac+iPhone/widgets/App Groups; G4 full visual/runtime/performance matrix; G5 Canvas decisions/round trip; G6 final security, registry, branch/PR parity and geonq acceptance. All remain open here.
@@ -152,12 +152,12 @@ facts are read-only; release is NO-GO. Progress is **70–75% implemented** /
 - Normal registry validation after evidence changes; final python3 -B scripts/validate_acceptance_registry.py --score. Every P0, aggregate≥95%, every workstream≥90% and geonq visual approval form the registry checkpoint. Full requested completion also resolves remaining ACTIVE/user/Canvas scope; unexplained5% omission is not completion.
 - Final future operator verifies local branch/index/base, origin, PR#1 head/base/diff/CI/comments and exact candidate/signed/deployed provenance. Documentation-only commits may follow code only with recorded source-tree equality. Draft/open/mergeable status remains historical until rechecked; no Windows/GitHub access here.
 - Release requires operational recovery/restart/backup/restore, live bank/import/health proof, permitted physical Mac+iPhone/widgets, every matrix, final security review, registry and geonq product acceptance. geonq has authorized merging this personal checkpoint; merge is an integration action and does not close G6 or convert NO-GO into release acceptance. Resolve review comments before merge when present, then retain NO-GO/blocked-external leaves until the release gates pass.
-
-**Immediate next dispatch:** bounded T12d D3 transient occurrence/DST mutation repair after T12c/D1 and local D2a/D2b at `f0d59a5`. T10a remains a source-gap
-  receipt, and the T1 owner repair for A1 RED findings must precede canonical recovery mutation. Remaining
-  blockers are live provider data, Personal Team capability/signing/devices,
-  Zepp fidelity, vault/writer/plugin decisions, runtime/visual/security/registry
-  and final operator evidence.
+**Immediate next dispatch:** bounded T1/A1.1 Windows recovery source repair.
+  D3 is accepted at `b6bc465`; T12d D4/D5 follow the A1 owner repair. T10a
+  remains a source-gap receipt, and A1 repair precedes canonical recovery
+  mutation. Remaining blockers are live provider data, Personal Team
+  capability/signing/devices, Zepp fidelity, vault/writer/plugin decisions,
+  runtime/visual/security/registry, and final operator evidence.
 
 ## 10. Dispatch contract replacing broad one-worker tranches
 - Sections 3 paths are exclusive OWNER inventories, not permission to dispatch an entire row. Every invocation gets one packet below, exact expanded paths, current symbol/line anchors from `rg -n`, its own focused tests, and at most one behavior change. NEW paths are proposals; verify absence before creating. No line numbers are invented here.

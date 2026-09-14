@@ -35,15 +35,12 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint: `f0d59a5` (synced compensating
-  calendar undo), plus coordination checkpoint `5d28735` on local `main`;
-  `origin/main` remains at `16e0855`, five commits behind. It includes the
-  security reconciliation and production dependency audit updates. The
-  feature branch push and merge succeeded; GitHub CLI reports PR #1 merged
-  into `main`. The deployable Windows candidate is the verified `6baa1f3`
-  source checkpoint;
-  recovery reached journal unit 31,400 and was stopped before its final stage.
-  The marker remains active and `LifeOSAPI` remains stopped before install.
+- Current application source checkpoint is `b6bc465`, pushed on `main` with
+  zero local/remote divergence. PR #1 is merged and no open PR is recorded.
+  The verified Windows candidate is `6baa1f3`; current read-only observation
+  has BitLocker protection, stopped `LifeOSAPI`, absent `LifeOSGateway`, and an
+  active marker without current stage/recovery/progress at the default backup
+  root. The older 31,401-unit receipt is historical and not current.
   Backend boundary security is Astra scoped GREEN at `87e7db6`. Calendar
   security and merge hardening is committed at `8942b8e`, with 107/107 focused
   iPhone tests and a passing macOS build. Usage hierarchy is committed at
@@ -78,11 +75,13 @@ name the concrete gate moved, the evidence produced, and the next dependency.
   `fc1b3c1` adds the Astra-reviewed T12c Mac header pinch, guarded settle,
   cancellation, and matched-geometry ownership pass. The serialized Mac
   build-for-testing passed. The iOS lane reaches changed Swift compilation but
-  stops at actool because no iphonesimulator runtime is available. T12d,
+  stops at actool because no iphonesimulator runtime is available. D4–D5,
   simulator execution, physical gestures, and widgets remain open. D1 at
   `16e0855` bounds local store reads before decode and is Astra-reviewed
   MERGE; D2a/D2b at `f0d59a5` add normalized revision ceilings and synced
-  one-item undo compensation, with an Astra Medium **MERGE**. D3 is next.
+  one-item undo compensation, with an Astra Medium **MERGE**. D3 is accepted
+  at `b6bc465` with an Astra Medium **MERGE**, Mac build-for-testing success,
+  and a standalone Berlin DST/month-end behavior probe.
   Bounded recovery diagnostics are committed at `14a3b7f`; strict progress
   validation is committed at `4e14e38`; strict journal observation is committed
   at `9e43dd7`. Bounded phase telemetry is committed at `0a8d5b6`; the current
@@ -117,8 +116,9 @@ name the concrete gate moved, the evidence produced, and the next dependency.
   `artifacts/final/T0/t10a-capability-preflight.md`; three T1a recovery review
   attempts produced no usable report and made no mutation. T12c is now source
   reviewed and pushed; the bounded T12d D1 store-bound repair is now pushed at
-  `16e0855`; D2 revision/undo reconciliation is complete locally at `f0d59a5`;
-  the next calendar dispatch is transient occurrence and DST series mutation.
+  `16e0855`; D2 revision/undo reconciliation is pushed at `f0d59a5`, and D3
+  is pushed at `b6bc465`; the next calendar dispatch is D4/D5 reconciliation
+  after the Windows A1 owner repair.
   The T1 owner
   repair for A1 RED findings remains required before
   canonical recovery. A1.4 truthfulness is pushed at `9539841`; A1.1–A1.3

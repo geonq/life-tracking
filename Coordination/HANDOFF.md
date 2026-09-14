@@ -12,11 +12,10 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
 
 ## Current source checkpoint
 
-- Application source checkpoint: `f0d59a5 Make calendar undo a synced
-  compensating mutation`; coordination checkpoint `5d28735` is also on local
-  `main`, which is five commits ahead of `origin/main` (`16e0855`). PR #1 is
-  merged and no open PRs are recorded. Reviewed source includes dashboard,
-  calendar, usage, finance, backend-security, and installer; Windows recovery-
+- Application source checkpoint: `b6bc465 Harden recurring calendar mutations`;
+  local `main` matches `origin/main` with zero divergence. PR #1 is merged and
+  no open PRs are recorded. Reviewed source includes dashboard, calendar,
+  usage, finance, backend-security, and installer; Windows recovery-
   instrumentation checkpoint is `0a8d5b6`, historical candidate `6baa1f3`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
@@ -172,29 +171,24 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
   Medium reviewed the source **MERGE**; the serialized Mac build-for-testing
   passes. Generic iOS compilation reached the target, but actool/runtime
   verification is blocked by the unavailable simulator runtime and full disk.
-  D3–D5, physical gesture, simulator execution, and widget evidence remain open.
+  D3 is accepted at `b6bc465` after an Astra Medium source **MERGE**, a
+  serialized Mac build-for-testing success, and a standalone Berlin DST/month
+  end probe. The iOS lane still stops at actool because no iphonesimulator
+  runtime is installed. D4–D5, physical gesture, simulator execution, and
+  widget evidence remain open.
 
 ## Boundaries and next action
 
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. The bounded T0 CalendarStore security reconciliation is pushed at
-`e07a0a4`; current local source is `f0d59a5` with the dashboard refinement, T11a
-  visual foundation, T12a zoom safety, T12b timeline rollover/viewport pass,
-  T12c Mac header pinch/settle wiring, and T13a widget snapshot boundary
-  integrated. The next source step is the bounded T12d calendar
-  reconciliation/security pass; D1 bounded local reads and D2 revision/undo
-  reconciliation are complete; D3 transient occurrence/DST mutation is the
-  next source packet;
-  the T1 owner repair for the A1 RED findings remains required before canonical
-  recovery mutation. Conforming source remains subject to runtime verification.
-  The latest
-committed Usage tranche is `e8bbefa`. Calendar gesture work is not accepted and
-must use the smaller T12 packets in `tasks/final-execution-plan.md`. The two
-broad security workers returned no report, so any further reconciliation must
-use a completed bounded execution method before code changes. Keep the Windows
-  marker untouched until fresh strict recovery observation, identity/ACL checks,
-  and reviewed performance authorize mutation. Current banking work is
-  deployment/native readback re-certification. Physical signing/widgets,
-  whole-app visual/runtime, Zepp, Obsidian, and final release evidence remain open.
+`070b7db`. T0 is pushed at `e07a0a4`; current source is `b6bc465`, with T11a
+visual foundation, T12a zoom, T12b viewport, T12c Mac pinch/settle, T13a widget
+I/O, and T12d D1–D3 integrated. Next is bounded T1/A1.1 Windows recovery
+source repair, then T12d D4/D5; conforming source remains subject to runtime
+verification. Usage is at `e8bbefa`; keep Calendar work in the smaller packets
+in `tasks/final-execution-plan.md`. The two broad security workers returned no
+report, so later reconciliation needs a completed bounded method. Keep the
+Windows marker untouched until strict recovery, identity/ACL, and performance
+evidence authorize mutation. Banking readback, physical signing/widgets,
+whole-app visual/runtime, Zepp, Obsidian, and final release evidence remain open.

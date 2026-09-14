@@ -3,10 +3,9 @@
 Updated 2026-09-14 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Main source checkpoint: `f0d59a5` (`Make calendar undo a synced
-  compensating mutation`) plus coordination checkpoint `5d28735` on local
-  `main`; `origin/main` remains at `16e0855`, five commits behind. D2a/D2b
-  are Astra Medium source-reviewed **MERGE**. The deployable Windows
+- Main source checkpoint: `b6bc465` (`Harden recurring calendar mutations`)
+  on local `main` and `origin/main` with zero divergence. D2a/D2b and D3 are
+  Astra Medium source-reviewed **MERGE**. The deployable Windows
   candidate remains `6baa1f3`; PR #1 is already merged.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
@@ -79,12 +78,13 @@ Updated 2026-09-14 Europe/Berlin.
   source-covered. The iOS build reaches changed Swift compilation but stops
   at actool because no iphonesimulator runtime is installed; physical gesture
   behavior remains unverified.
-- T12d D1 at `16e0855` plus D2a/D2b at `f0d59a5` are Astra Medium
-  source-reviewed **MERGE**: bounded reads, normalized revision ceilings, and
-  atomic one-item undo compensation with stale-target rejection, create
-  tombstones, unrelated-record preservation, and peer broadcast. Mac
-  build-for-testing passes; iOS asset/runtime verification remains blocked by
-  the unavailable simulator runtime. D3–D5 remain open.
+- T12d D1 at `16e0855`, D2a/D2b at `f0d59a5`, and D3 at `b6bc465` are Astra
+  Medium source-reviewed **MERGE**. D3 rejects transient persistence,
+  validates live occurrences, handles Berlin DST gap/fold and fractional
+  seconds, rejects unrepresentable month-end moves, and fences anchor races.
+  Mac build-for-testing and a standalone behavior probe pass; iOS
+  asset/runtime verification remains blocked by the unavailable simulator.
+  D4–D5 remain open.
 - Astra Medium produced the current 180-line execution plan and 196-line
   worker-facing design contract on 2026-09-14. The parent reconciled their
   branch, PR, and runtime wording; they are planning specifications, not
@@ -144,10 +144,9 @@ Updated 2026-09-14 Europe/Berlin.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 - T12d calendar reconciliation/security work remains open: D1 bounded local
-  reads are merged at `16e0855`, and D2a/D2b revision/undo convergence is
-  merged locally at `f0d59a5`; transient occurrence rejection and DST series
-  mutation still need targeted owner packets and tests. T12c source is
-  accepted at `fc1b3c1`; physical gesture/runtime evidence remains open.
+  reads, D2a/D2b revision/undo convergence, and D3 transient occurrence/DST
+  series mutation are accepted through `b6bc465`. D4–D5 and physical
+  gesture/runtime evidence remain open. T12c source is accepted at `fc1b3c1`.
 
 No generic advisor, usage watcher, demo fallback, or conversational AI belongs
 in the product. Calorie-photo tracking is the only permitted in-app AI flow.
