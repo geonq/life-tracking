@@ -264,6 +264,36 @@ typealias CalendarEditorCompletion = (CalendarLocalSaveResult) -> Void
 typealias CalendarEditorMutationHandler = (CalendarItem, @escaping CalendarEditorCompletion) -> Void
 typealias CalendarEditorRetryHandler = (@escaping CalendarEditorCompletion) -> Void
 
+#if os(macOS)
+private enum CalendarMacMonthExpansionGesture {
+    static let outwardThreshold: CGFloat = 1.12
+    static let inwardThreshold: CGFloat = 0.88
+    static let fullMotionSettleDuration: TimeInterval = 0.24
+
+    static func progress(startedExpanded: Bool, magnification: CGFloat) -> CGFloat {
+        guard magnification.isFinite else { return startedExpanded ? 1 : 0 }
+        let rawProgress: CGFloat
+        if startedExpanded {
+            rawProgress = (magnification - inwardThreshold) / (1 - inwardThreshold)
+        } else {
+            rawProgress = (magnification - 1) / (outwardThreshold - 1)
+        }
+        return min(1, max(0, rawProgress))
+    }
+
+    static func target(startedExpanded: Bool, magnification: CGFloat) -> Bool? {
+        guard magnification.isFinite, magnification > 0 else { return nil }
+        if magnification >= outwardThreshold {
+            return startedExpanded ? nil : true
+        }
+        if magnification <= inwardThreshold {
+            return startedExpanded ? false : nil
+        }
+        return nil
+    }
+}
+#endif
+
 public struct CalendarView: View {
     @ObservedObject private var coordinator: CalendarCoordinator
     @StateObject private var presentationState: CalendarPresentationState
@@ -283,6 +313,16 @@ public struct CalendarView: View {
 #if os(macOS)
     @State private var editorAnchorFrame: CGRect?
     @State private var editorPresentationGeneration = 0
+    @State private var macMonthExpansionGestureStartedExpanded: Bool?
+    @State private var macMonthExpansionLastGestureProgress: CGFloat?
+    @State private var macMonthExpansionSettlingProgress: CGFloat?
+    @State private var macMonthExpansionSettlingFrameProgress: CGFloat?
+    @State private var macMonthExpansionSettlingOpacityProgress: CGFloat?
+    @State private var macMonthExpansionSettlingTarget: Bool?
+    @State private var macMonthExpansionGeneration = 0
+    @State private var macMonthExpansionSettlingGeneration: Int?
+    @GestureState private var macMonthExpansionGestureActive = false
+    @GestureState private var macMonthExpansionGestureMagnification: CGFloat = 1
 #endif
     @Binding private var requestNewEvent: Bool
     private let requestNewEventID: UUID?
@@ -499,6 +539,7 @@ public struct CalendarView: View {
             // a callback that reaches the queue before SwiftUI tears down the
             // outgoing view.
             cancelMacEditor()
+            cancelMacMonthExpansionPresentation()
         }
 #endif
         .task(id: displayItemsSourceKey) {
@@ -825,7 +866,9 @@ public struct CalendarView: View {
                 retainedTimelineAnchor: $presentationState.timelineScrollAnchor,
                 didRestoreTimelinePosition: $presentationState.didRestoreTimelinePosition,
                 monthNamespace: reduceMotion ? nil : calendarMonthNamespace,
-                monthExpanded: monthExpanded,
+                // Both sides of the matched-geometry pair use the same
+                // presentation ownership while a Mac settle is in flight.
+                monthExpanded: monthExpansionGridSourceState,
                 monthSelectedDate: headerDate,
                 reduceMotion: reduceMotion
             )
@@ -840,7 +883,7 @@ public struct CalendarView: View {
                 ),
                 calendar: calendar,
                 namespace: reduceMotion ? nil : calendarMonthNamespace,
-                isSource: monthExpanded,
+                isSource: monthExpansionGridSourceState,
                 reduceMotion: reduceMotion,
                 onSelectDate: selectExpandedDate
             )
@@ -849,11 +892,24 @@ public struct CalendarView: View {
             // When open it overlays the timeline's pinned header, matching the
             // Notion interaction without consuming timed viewport height.
             .frame(maxWidth: .infinity)
+#if os(macOS)
+            .frame(
+                height: CalendarExpandedMonthGrid.preferredHeight * macMonthExpansionFrameProgress,
+                alignment: .top
+            )
+#else
             .frame(
                 height: monthExpanded ? CalendarExpandedMonthGrid.preferredHeight : 0,
                 alignment: .top
             )
+#endif
             .clipped()
+#if os(macOS)
+            // Geometry is driven directly by the gesture/settle state. In
+            // Reduced Motion only the separate opacity state is animated.
+            .opacity(macMonthExpansionOpacityPresentationProgress)
+#endif
+#if os(iOS)
             .opacity(monthExpanded ? 1 : 0)
             // Reduced motion keeps the matched-geometry namespace
             // disabled, but still gives the month panel a short,
@@ -864,9 +920,28 @@ public struct CalendarView: View {
                     : LifeOSMotion.heroMorph,
                 value: monthExpanded
             )
+#endif
+#if os(macOS)
+            .allowsHitTesting(
+                macMonthExpansionSettlingGeneration == nil &&
+                    !macMonthExpansionGestureActive &&
+                    monthExpanded &&
+                    macMonthExpansionGeometryProgress >= 1
+            )
+            .accessibilityHidden(
+                macMonthExpansionGestureActive ||
+                    macMonthExpansionSettlingGeneration != nil ||
+                    macMonthExpansionGeometryProgress < 1
+            )
+            .zIndex(
+                macMonthExpansionSettlingGeneration != nil ||
+                    macMonthExpansionGeometryProgress > 0 ? 1 : -1
+            )
+#else
             .allowsHitTesting(monthExpanded)
             .accessibilityHidden(!monthExpanded)
             .zIndex(monthExpanded ? 1 : -1)
+#endif
         }
     }
 
@@ -1027,23 +1102,122 @@ public struct CalendarView: View {
         { hourHeight = $0 }
     }
 
+    private var monthExpansionGridSourceState: Bool {
 #if os(macOS)
+        macMonthExpansionSettlingTarget
+            ?? macMonthExpansionGestureStartedExpanded
+            ?? monthExpanded
+#else
+        monthExpanded
+#endif
+    }
+
+#if os(macOS)
+    private var macMonthExpansionFrameProgress: CGFloat {
+        // The month panel is a ZStack overlay, so preserving its paint bounds
+        // during a reduced-motion collapse does not consume timeline space.
+        // It lets the outgoing layer fade instead of being clipped at once.
+        if reduceMotion,
+           macMonthExpansionSettlingGeneration != nil,
+           macMonthExpansionSettlingTarget == false,
+           let settlingFrameProgress = macMonthExpansionSettlingFrameProgress {
+            return boundedMonthExpansionProgress(
+                settlingFrameProgress,
+                fallback: macMonthExpansionGeometryProgress
+            )
+        }
+        return macMonthExpansionGeometryProgress
+    }
+
+    private func boundedMonthExpansionProgress(_ value: CGFloat, fallback: CGFloat) -> CGFloat {
+        guard value.isFinite else { return fallback }
+        return min(1, max(0, value))
+    }
+
+    private var macMonthExpansionGeometryProgress: CGFloat {
+        if let settlingProgress = macMonthExpansionSettlingProgress {
+            return boundedMonthExpansionProgress(
+                settlingProgress,
+                fallback: monthExpanded ? 1 : 0
+            )
+        }
+        guard let startedExpanded = macMonthExpansionGestureStartedExpanded else {
+            return monthExpanded ? 1 : 0
+        }
+        if let lastGestureProgress = macMonthExpansionLastGestureProgress {
+            return boundedMonthExpansionProgress(
+                lastGestureProgress,
+                fallback: startedExpanded ? 1 : 0
+            )
+        }
+        return boundedMonthExpansionProgress(
+            CalendarMacMonthExpansionGesture.progress(
+                startedExpanded: startedExpanded,
+                magnification: macMonthExpansionGestureMagnification
+            ),
+            fallback: startedExpanded ? 1 : 0
+        )
+    }
+
+    private var macMonthExpansionPresentationProgress: CGFloat {
+        macMonthExpansionGeometryProgress
+    }
+
+    private var macMonthExpansionOpacityPresentationProgress: CGFloat {
+        guard let settlingOpacityProgress = macMonthExpansionSettlingOpacityProgress else {
+            return macMonthExpansionGeometryProgress
+        }
+        return boundedMonthExpansionProgress(
+            settlingOpacityProgress,
+            fallback: macMonthExpansionGeometryProgress
+        )
+    }
+
     private var calendarMacPrimaryHeader: some View {
         GeometryReader { proxy in
             let compact = proxy.size.width < 760
             HStack(alignment: .center, spacing: compact ? 6 : 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(selectedDate, format: .dateTime.month(.wide).year())
-                        .lifeOSTypography(.pageTitle)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.82)
-                        .accessibilityIdentifier("calendar-header-date")
-                        .accessibilityValue(calendarISODate(selectedDate))
-                    Text(displayMode == .month ? "Month" : timelineSubtitle)
-                        .lifeOSTypography(.metadata)
-                        .foregroundStyle(LifeOSTokens.secondaryText)
+                Button(action: toggleMonthExpansion) {
+                    HStack(alignment: .center, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(selectedDate, format: .dateTime.month(.wide).year())
+                                .lifeOSTypography(.pageTitle)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.82)
+                                .accessibilityIdentifier("calendar-header-date")
+                                .accessibilityValue(calendarISODate(selectedDate))
+                            Text(displayMode == .month ? "Month" : timelineSubtitle)
+                                .lifeOSTypography(.metadata)
+                                .foregroundStyle(LifeOSTokens.secondaryText)
+                        }
+                        LifeOSIcon(.chevronRight)
+                            .rotationEffect(
+                                .degrees(90 - 180 * Double(macMonthExpansionPresentationProgress))
+                            )
+                            .foregroundStyle(LifeOSTokens.secondaryText)
+                            .frame(width: 16, height: 16)
+                    }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
                 .layoutPriority(1)
+                .disabled(
+                    displayMode != .timeline ||
+                        macMonthExpansionSettlingGeneration != nil ||
+                        macMonthExpansionGestureActive
+                )
+                .accessibilityLabel(
+                    displayMode == .timeline
+                        ? (monthExpanded ? "Collapse month" : "Expand month")
+                        : "Month view"
+                )
+                .accessibilityIdentifier("calendar-month-toggle")
+                .accessibilityValue(calendarISODate(selectedDate))
+                .accessibilityHint(
+                    displayMode == .timeline
+                        ? "Toggle the month calendar overlay"
+                        : "Month view is active"
+                )
 
                 Spacer(minLength: compact ? 4 : 10)
                 calendarMacPeriodButton(direction: -1)
@@ -1073,6 +1247,170 @@ public struct CalendarView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
         .frame(minHeight: 44, maxHeight: 48)
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            macMonthExpansionMagnificationGesture,
+            including: .all
+        )
+        .onChange(of: macMonthExpansionGestureActive) { _, active in
+            guard !active else { return }
+            // MagnifyGesture has no public cancellation callback. When the
+            // recognizer resets without onEnded, settle to the captured start
+            // state using the last finite progress rather than snapping.
+            cancelMacMonthExpansionGesture()
+        }
+    }
+
+    private var macMonthExpansionMagnificationGesture: some Gesture {
+        MagnifyGesture(minimumScaleDelta: 0.01)
+            .updating($macMonthExpansionGestureActive) { _, active, _ in
+                active = true
+            }
+            .updating($macMonthExpansionGestureMagnification) { value, magnification, _ in
+                guard value.magnification.isFinite else {
+                    magnification = 1
+                    return
+                }
+                magnification = value.magnification
+            }
+            .onChanged { value in
+                guard displayMode == .timeline,
+                      macMonthExpansionSettlingGeneration == nil,
+                      value.magnification.isFinite,
+                      value.magnification > 0 else { return }
+                if macMonthExpansionGestureStartedExpanded == nil {
+                    invalidateMacMonthExpansionSettle()
+                    // Capture the owner once. The end decision uses this
+                    // snapshot rather than the potentially changed state.
+                    macMonthExpansionGestureStartedExpanded = monthExpanded
+                }
+                guard let startedExpanded = macMonthExpansionGestureStartedExpanded else { return }
+                macMonthExpansionLastGestureProgress = boundedMonthExpansionProgress(
+                    CalendarMacMonthExpansionGesture.progress(
+                        startedExpanded: startedExpanded,
+                        magnification: value.magnification
+                    ),
+                    fallback: startedExpanded ? 1 : 0
+                )
+            }
+            .onEnded { value in
+                let startedExpanded = macMonthExpansionGestureStartedExpanded
+                let currentProgress = macMonthExpansionGestureProgress
+                let target = startedExpanded.flatMap {
+                    CalendarMacMonthExpansionGesture.target(
+                        startedExpanded: $0,
+                        magnification: value.magnification
+                    )
+                }
+                guard displayMode == .timeline,
+                      macMonthExpansionSettlingGeneration == nil,
+                      let startedExpanded else {
+                    cancelMacMonthExpansionGesture()
+                    return
+                }
+                settleMacMonthExpansion(
+                    from: currentProgress,
+                    startedExpanded: startedExpanded,
+                    target: target ?? startedExpanded
+                )
+            }
+    }
+
+    private func cancelMacMonthExpansionGesture() {
+        guard let startedExpanded = macMonthExpansionGestureStartedExpanded else { return }
+        settleMacMonthExpansion(
+            from: macMonthExpansionGestureProgress,
+            startedExpanded: startedExpanded,
+            target: startedExpanded
+        )
+    }
+
+    private var macMonthExpansionGestureProgress: CGFloat {
+        if let lastGestureProgress = macMonthExpansionLastGestureProgress {
+            return boundedMonthExpansionProgress(
+                lastGestureProgress,
+                fallback: monthExpanded ? 1 : 0
+            )
+        }
+        guard let startedExpanded = macMonthExpansionGestureStartedExpanded else {
+            return monthExpanded ? 1 : 0
+        }
+        return boundedMonthExpansionProgress(
+            CalendarMacMonthExpansionGesture.progress(
+                startedExpanded: startedExpanded,
+                magnification: macMonthExpansionGestureMagnification
+            ),
+            fallback: startedExpanded ? 1 : 0
+        )
+    }
+
+    private func invalidateMacMonthExpansionSettle() {
+        macMonthExpansionGeneration &+= 1
+        macMonthExpansionSettlingGeneration = nil
+        macMonthExpansionSettlingTarget = nil
+        macMonthExpansionSettlingProgress = nil
+        macMonthExpansionSettlingFrameProgress = nil
+        macMonthExpansionSettlingOpacityProgress = nil
+    }
+
+    private func settleMacMonthExpansion(from progress: CGFloat, startedExpanded: Bool, target: Bool) {
+        let startProgress = boundedMonthExpansionProgress(
+            progress,
+            fallback: startedExpanded ? 1 : 0
+        )
+        let targetProgress: CGFloat = target ? 1 : 0
+        macMonthExpansionGeneration &+= 1
+        let generation = macMonthExpansionGeneration
+        macMonthExpansionSettlingGeneration = generation
+        macMonthExpansionSettlingTarget = target
+        macMonthExpansionSettlingProgress = startProgress
+        macMonthExpansionSettlingFrameProgress = target ? nil : startProgress
+        macMonthExpansionSettlingOpacityProgress = startProgress
+        macMonthExpansionGestureStartedExpanded = nil
+        macMonthExpansionLastGestureProgress = nil
+
+        let duration = reduceMotion
+            ? CalendarInteractionLayout.reducedMotionMonthCrossfadeDuration
+            : CalendarMacMonthExpansionGesture.fullMotionSettleDuration
+        let finish = {
+            guard self.macMonthExpansionSettlingGeneration == generation else { return }
+            self.monthExpanded = target
+            self.macMonthExpansionSettlingGeneration = nil
+            self.macMonthExpansionSettlingTarget = nil
+            self.macMonthExpansionSettlingProgress = nil
+            self.macMonthExpansionSettlingFrameProgress = nil
+            self.macMonthExpansionSettlingOpacityProgress = nil
+        }
+
+        if reduceMotion {
+            // Keep the frame change immediate while animating only the
+            // separate opacity state. This makes Reduced Motion predictable
+            // without removing the useful visual confirmation of the action.
+            macMonthExpansionSettlingProgress = targetProgress
+            withAnimation(.easeInOut(duration: duration)) {
+                macMonthExpansionSettlingOpacityProgress = targetProgress
+            }
+        } else {
+            withAnimation(.easeOut(duration: duration)) {
+                macMonthExpansionSettlingProgress = targetProgress
+                macMonthExpansionSettlingOpacityProgress = targetProgress
+            }
+        }
+
+        Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(0, duration) * 1_000_000_000))
+            } catch {
+                return
+            }
+            finish()
+        }
+    }
+
+    private func cancelMacMonthExpansionPresentation() {
+        invalidateMacMonthExpansionSettle()
+        macMonthExpansionGestureStartedExpanded = nil
+        macMonthExpansionLastGestureProgress = nil
     }
 
     @ViewBuilder
@@ -1254,12 +1592,38 @@ public struct CalendarView: View {
     }
 
     private func toggleMonthExpansion() {
-        let update = { monthExpanded.toggle() }
+#if os(macOS)
+        guard displayMode == .timeline else { return }
+#endif
+        setMonthExpansion(!monthExpanded, useMacHeaderSettle: true)
+    }
+
+    private func setMonthExpansion(_ expanded: Bool, useMacHeaderSettle: Bool = false) {
+        guard monthExpanded != expanded else { return }
+#if os(macOS)
+        guard displayMode == .timeline else { return }
+        if useMacHeaderSettle {
+            settleMacMonthExpansion(
+                from: monthExpanded ? 1 : 0,
+                startedExpanded: monthExpanded,
+                target: expanded
+            )
+            return
+        }
+#endif
+        let update = { monthExpanded = expanded }
         switch CalendarInteractionLayout.monthExpansionMotionPolicy(reduceMotion: reduceMotion) {
         case .opacityCrossfade(let duration):
             withAnimation(.easeInOut(duration: duration), update)
         case .matchedGeometryMorph:
+#if os(macOS)
+            let animation = useMacHeaderSettle
+                ? .easeOut(duration: CalendarMacMonthExpansionGesture.fullMotionSettleDuration)
+                : LifeOSMotion.heroMorph
+            withAnimation(animation, update)
+#else
             withAnimation(LifeOSMotion.heroMorph, update)
+#endif
         }
     }
 
@@ -1331,6 +1695,18 @@ public struct CalendarView: View {
     }
 
     private func selectExpandedDate(_ date: Date) {
+#if os(macOS)
+        let update = {
+            selectedDate = calendar.startOfDay(for: date)
+            displayMode = .timeline
+        }
+        if reduceMotion {
+            update()
+        } else {
+            withAnimation(LifeOSMotion.easeNavigate, update)
+        }
+        setMonthExpansion(false, useMacHeaderSettle: true)
+#else
         let update = {
             selectedDate = calendar.startOfDay(for: date)
             monthExpanded = false
@@ -1341,6 +1717,7 @@ public struct CalendarView: View {
         } else {
             withAnimation(LifeOSMotion.heroMorph, update)
         }
+#endif
     }
 
     private func create() {
