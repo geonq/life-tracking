@@ -1,8 +1,8 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-14 Europe/Berlin. Release: **NO-GO**. Main is pushed at
-`fc1b3c1`; T12c has an Astra Medium source **MERGE** and a passing serialized
-Mac build-for-testing.
+`16e0855`; T12c has an Astra Medium source **MERGE**, D1 has an Astra Medium
+source **MERGE**, and the serialized Mac build-for-testing passes.
 
 ## Ordered work
 
@@ -13,7 +13,8 @@ Mac build-for-testing.
 2. Continue serialized native runtime captures. The Usage visual slice is
    checked in at `33c74c9`, Fitness Recovery at `03a78a1`, and Finance
    responsive hierarchy at `fd8ccfb`, each with scoped evidence. T12c now
-   covers Mac calendar scroll/pinch source wiring; finish T12d reconciliation,
+   covers Mac calendar scroll/pinch source wiring; finish T12d D2–D5
+   reconciliation,
    then continue the remaining Finance/live, motion, and widget evidence.
 3. Use the bounded recovery diagnostics and strict journal observation in a
   disposable validation, finish the
@@ -56,7 +57,9 @@ tested, while a targeted Astra re-review was blocked by worker file access and
 is not claimed as a sign-off. T12c is pushed at `fc1b3c1`; its frontend parses
 pass, the Mac build-for-testing exits 0, and the iOS lane is blocked at actool
 by the missing simulator runtime.
-These results do not prove live, runtime, device, visual, or operational
+The D1 store-bound repair is pushed at `16e0855`; exact-limit, overflow, and
+replacement-preservation regressions pass on the Mac build lane. These results
+do not prove live, runtime, device, visual, or operational
 completion.
 
 The frozen registry is structurally valid but has 0 accepted leaves; do not use

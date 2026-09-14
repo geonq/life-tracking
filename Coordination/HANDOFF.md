@@ -11,8 +11,8 @@ evidence is still incomplete.
 
 ## Current source checkpoint
 
-- Application source checkpoint: `fc1b3c1 Add Mac calendar pinch month
-  expansion`;
+- Application source checkpoint: `16e0855 Bound calendar store reads before
+  decode`;
   it is pushed to `origin/main`, with PR #1 merged and no open PRs. The
   reviewed source includes the dashboard, calendar, usage, finance,
   backend-security, and installer slices.
@@ -171,8 +171,10 @@ evidence is still incomplete.
   matched-geometry ownership. Astra Medium reviewed the corrected source
   **MERGE** and the serialized Mac build-for-testing passed. The iOS lane
   reaches changed Swift parsing/compilation but stops at asset compilation
-  because no iphonesimulator runtime is available. T12d, physical gesture,
-  simulator execution, and widget evidence remain open.
+  because no iphonesimulator runtime is available. T12d D1 is pushed at
+  `16e0855` with bounded CalendarStore reads and exact-limit/overflow/store-
+  preservation regressions. D2–D5, physical gesture, simulator execution, and
+  widget evidence remain open.
 
 ## Boundaries and next action
 
@@ -180,11 +182,12 @@ Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
 `070b7db`. The bounded T0 CalendarStore security reconciliation is pushed at
-`e07a0a4`; current source is `fc1b3c1` with the dashboard refinement, T11a
+`e07a0a4`; current source is `16e0855` with the dashboard refinement, T11a
   visual foundation, T12a zoom safety, T12b timeline rollover/viewport pass,
   T12c Mac header pinch/settle wiring, and T13a widget snapshot boundary
   integrated. The next source step is the bounded T12d calendar
-  reconciliation/security pass;
+  reconciliation/security pass; D1 bounded local reads are complete and D2
+  coordinator reconciliation is the next source packet;
   the T1 owner repair for the A1 RED findings remains required before canonical
   recovery mutation. Conforming source remains subject to runtime verification.
   The latest
@@ -193,6 +196,4 @@ must use the smaller T12 packets in `tasks/final-execution-plan.md`. The two
 broad security workers returned no report, so any further reconciliation must
 use a completed bounded execution method before code changes. Keep the Windows
 marker untouched until fresh strict recovery observation, identity/ACL checks,
-and reviewed performance authorize mutation. Live bank readback, physical
-signing/widgets, whole-app visual/runtime, Zepp, Obsidian, and final release
-evidence remain open.
+and reviewed performance authorize mutation. Live bank readback, physical signing/widgets, whole-app visual/runtime, Zepp, Obsidian, and final release evidence remain open.

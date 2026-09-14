@@ -3,8 +3,8 @@
 Updated 2026-09-14 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Main source checkpoint: `fc1b3c1` (`Add Mac calendar pinch month
-  expansion`), pushed to `origin/main`. It includes the reviewed calendar
+- Main source checkpoint: `16e0855` (`Bound calendar store reads before
+  decode`), pushed to `origin/main`. It includes the reviewed calendar
   pinch/settle pass, shared visual foundation, and clean production dependency
   audit. The deployable Windows candidate remains `6baa1f3`; PR #1 is already
   merged.
@@ -79,6 +79,11 @@ Updated 2026-09-14 Europe/Berlin.
   source-covered. The iOS build reaches changed Swift compilation but stops
   at actool because no iphonesimulator runtime is installed; physical gesture
   behavior remains unverified.
+- T12d D1 at `16e0855` is Astra Medium source-reviewed **MERGE**: local
+  CalendarStore reads are bounded before allocation/decode and exact-limit,
+  overflow, and replacement-preservation regressions are covered. The Mac
+  build-for-testing passes; iOS remains environment-blocked at actool. D2
+  coordinator reconciliation and D3–D5 remain open.
 - Astra Medium produced the current 180-line execution plan and 196-line
   worker-facing design contract on 2026-09-14. The parent reconciled their
   branch, PR, and runtime wording; they are planning specifications, not
@@ -135,10 +140,11 @@ Updated 2026-09-14 Europe/Berlin.
   owner repair must land before disposable measurement or T2.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
-- T12d calendar reconciliation/security work remains open: bounded local
-  reads, revision/undo convergence, transient occurrence rejection, and DST
-  series mutation still need the targeted owner packet and tests. T12c source
-  is accepted at `fc1b3c1`; physical gesture/runtime evidence remains open.
+- T12d calendar reconciliation/security work remains open: D1 bounded local
+  reads are merged at `16e0855`; revision/undo convergence, transient
+  occurrence rejection, and DST series mutation still need targeted owner
+  packets and tests. T12c source is accepted at `fc1b3c1`; physical
+  gesture/runtime evidence remains open.
 
 No generic advisor, usage watcher, demo fallback, or conversational AI belongs
 in the product. Calorie-photo tracking is the only permitted in-app AI flow.

@@ -1,8 +1,8 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-14; current pushed main checkpoint is **fc1b3c1** and the latest reviewed source checkpoint is **fc1b3c1**. Approved planning artifact; documentation only. Windows service facts below are the last recorded read-only observation. Release remains NO-GO.
+Planning baseline: 2026-09-14; current pushed main checkpoint is **16e0855** and the latest reviewed source checkpoint is **16e0855**. Approved planning artifact; documentation only. Windows service facts below are the last recorded read-only observation. Release remains NO-GO.
 
 ## 1. Current truth and explicit gates
-- **NO-GO.** The current main checkpoint is `fc1b3c1`, including the reviewed
+- **NO-GO.** The current main checkpoint is `16e0855`, including the reviewed
   dashboard refinement at `0d094ee`, calendar zoom safety, the T12b calendar
   viewport/midnight correction, T13a bounded widget snapshot I/O, visual
   foundation at `5b90539`, and the clean production dependency audit.
@@ -47,7 +47,7 @@ Planning baseline: 2026-09-14; current pushed main checkpoint is **fc1b3c1** and
   matched-geometry ownership, and reduced-motion paint retention; its
   serialized Mac build-for-testing passed. The iOS lane reaches changed Swift
   compilation but stops at actool because no iphonesimulator runtime is
-  available. T12d security/reconciliation, simulator execution, physical
+  available. T12d D2–D5 security/reconciliation, simulator execution, physical
   gesture, and widget evidence remain open.
 - T0 must reconcile registry RM-01 hero morph, RM-02 ring reveal/halo, RM-03 chart draw, related atomic/non-overlap metadata and BF coaching language with current design. Preserve original hash, reviewed replacement contracts, rationale, amendment/refreeze history and unrelated thresholds; never silently accept obsolete behavior, prune scope or implement generic AI.
 - All ACTIVE phases1–9 and registry leaves remain scope: Finance/ledger, Tax/Documents, Business, Investments, Reminders Tasks/Grocery/Shopping, shell/settings/reports, bounded full Fitness and hardware; issue#2 Canvas adds explicit completion scope. Honest unavailable states do not erase unfinished functionality.
@@ -151,8 +151,9 @@ Planning baseline: 2026-09-14; current pushed main checkpoint is **fc1b3c1** and
 - Final future operator verifies local branch/index/base, origin, PR#1 head/base/diff/CI/comments and exact candidate/signed/deployed provenance. Documentation-only commits may follow code only with recorded source-tree equality. Draft/open/mergeable status remains historical until rechecked; no Windows/GitHub access here.
 - Release requires operational recovery/restart/backup/restore, live bank/import/health proof, permitted physical Mac+iPhone/widgets, every matrix, final security review, registry and geonq product acceptance. geonq has authorized merging this personal checkpoint; merge is an integration action and does not close G6 or convert NO-GO into release acceptance. Resolve review comments before merge when present, then retain NO-GO/blocked-external leaves until the release gates pass.
 
-**Immediate next dispatch:** bounded T12d calendar security/reconciliation
-  repair after reviewed T12c `CalendarView.swift` pinch wiring. T10a remains a source-gap
+**Immediate next dispatch:** bounded T12d D2 coordinator security/reconciliation
+  repair after reviewed T12c `CalendarView.swift` pinch wiring and merged D1 bounded
+  `CalendarStore` reads at `16e0855`. T10a remains a source-gap
   receipt, and the T1 owner repair for A1 RED findings must precede canonical recovery mutation. Remaining
   blockers are live provider data, Personal Team capability/signing/devices,
   Zepp fidelity, vault/writer/plugin decisions, runtime/visual/security/registry
@@ -196,5 +197,4 @@ Planning baseline: 2026-09-14; current pushed main checkpoint is **fc1b3c1** and
 | Calendar/tasks | O(n log n+k) interval ordering/layout where k is visible overlaps, O(n) indexed merge, bounded recurrence expansion by viewport+limit; no quadratic duplicate lookup. Measure 1,024-event bound, all-overlap worst case, DST and gesture frames; no layout/storage I/O per frame. |
 | Health/workouts/nutrition | O(delta) anchored ingestion, O(n) rebuild once/revision; keyed deletions/session matching, no all-pairs workout match. Timers O(1) timestamp-derived; bounded images/retention. Measure 12-month corpus/restore and actual battery/background behavior. |
 | Usage/Clipper/widgets | Normalize O(n log n) once if unsorted, aggregate O(n), select O(log n), ≤240 chart points; publisher O(changed snapshots), bounded per-family output. Measure ingestion replay/history, refresh coalescing, render/RSS; no history scan per pointer frame. |
-| Canvas | O(V+E) decode/index rebuild; indexed hit query target O(log V+k), node move O(degree), bounded visible render; worst-case dense maps measured at 1,000/3,000 limits. Journal writes at committed edits, not every drag frame; no blanket O(n) claim. |
-- Tests must measure p95/p99/max, input size, hardware, cold/warm and RSS, not just assert constants or mirror the implementation. Run registry performance thresholds unchanged; if infeasible, record FAIL with causal evidence instead of weakening the threshold.
+| Canvas | O(V+E) decode/index rebuild; indexed hit query target O(log V+k), node move O(degree), bounded visible render; worst-case dense maps measured at 1,000/3,000 limits. Journal writes at committed edits, not every drag frame; no blanket O(n) claim. Tests must measure p95/p99/max, input size, hardware, cold/warm and RSS, not just assert constants or mirror the implementation. Run registry performance thresholds unchanged; if infeasible, record FAIL with causal evidence instead of weakening the threshold. |
