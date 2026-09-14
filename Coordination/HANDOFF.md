@@ -11,8 +11,8 @@ evidence is still incomplete.
 
 ## Current source checkpoint
 
-- Application source checkpoint: `b425ca9 Harden calendar rollover and widget
-  snapshot bounds`;
+- Application source checkpoint: `fc1b3c1 Add Mac calendar pinch month
+  expansion`;
   it is pushed to `origin/main`, with PR #1 merged and no open PRs. The
   reviewed source includes the dashboard, calendar, usage, finance,
   backend-security, and installer slices.
@@ -165,15 +165,14 @@ evidence is still incomplete.
   is parent-led source evidence rather than an Astra release sign-off.
 - T12a calendar zoom normalization is committed at `80d4f5d`: captured density,
   offset, focal inputs, and extreme finite viewport math are bounded while
-  valid iPhone endpoint positions remain restorable. T12b and T13a are now
-  included in `b425ca9`: the iPhone timeline uses its effective viewport,
-  calendar now-line/hour labels reevaluate across midnight, and widget reads
-  and writes enforce a 64 KiB boundary. Astra Medium reviewed the combined
-  source **GREEN**. The serialized Mac build-for-testing passed; iOS
-  build-for-testing reached changed Swift compilation but remains blocked at
-  asset compilation because no iphonesimulator runtime is available.
-  Simulator execution, T12c–T12d gestures, and physical widget evidence
-  remain open.
+  valid iPhone endpoint positions remain restorable. T12b and T13a are in
+  `b425ca9`; T12c is in `fc1b3c1` with direct Mac header pinch progress,
+  guarded release/cancel settling, truthful Month-mode fallback, and shared
+  matched-geometry ownership. Astra Medium reviewed the corrected source
+  **MERGE** and the serialized Mac build-for-testing passed. The iOS lane
+  reaches changed Swift parsing/compilation but stops at asset compilation
+  because no iphonesimulator runtime is available. T12d, physical gesture,
+  simulator execution, and widget evidence remain open.
 
 ## Boundaries and next action
 
@@ -181,10 +180,11 @@ Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
 `070b7db`. The bounded T0 CalendarStore security reconciliation is pushed at
-`e07a0a4`; current source is `b425ca9` with the dashboard refinement, T11a
+`e07a0a4`; current source is `fc1b3c1` with the dashboard refinement, T11a
   visual foundation, T12a zoom safety, T12b timeline rollover/viewport pass,
-  and T13a widget snapshot boundary integrated. The next source step is the
-  bounded T12c CalendarView header/timeline gesture wiring pass;
+  T12c Mac header pinch/settle wiring, and T13a widget snapshot boundary
+  integrated. The next source step is the bounded T12d calendar
+  reconciliation/security pass;
   the T1 owner repair for the A1 RED findings remains required before canonical
   recovery mutation. Conforming source remains subject to runtime verification.
   The latest

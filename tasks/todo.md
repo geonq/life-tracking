@@ -1,7 +1,8 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-14 Europe/Berlin. Release: **NO-GO**. Main is pushed at
-`5b90539`; the latest shared visual foundation review is Astra **GREEN**.
+`fc1b3c1`; T12c has an Astra Medium source **MERGE** and a passing serialized
+Mac build-for-testing.
 
 ## Ordered work
 
@@ -11,9 +12,9 @@ Updated 2026-09-14 Europe/Berlin. Release: **NO-GO**. Main is pushed at
    deferred-editor runtime evidence remain open.
 2. Continue serialized native runtime captures. The Usage visual slice is
    checked in at `33c74c9`, Fitness Recovery at `03a78a1`, and Finance
-   responsive hierarchy at `fd8ccfb`, each with scoped evidence. Finish the
-   remaining Finance live-data/interaction pass, then SF Symbols, motion,
-   calendar scroll/pinch, and widget states against the approved design plan.
+   responsive hierarchy at `fd8ccfb`, each with scoped evidence. T12c now
+   covers Mac calendar scroll/pinch source wiring; finish T12d reconciliation,
+   then continue the remaining Finance/live, motion, and widget evidence.
 3. Use the bounded recovery diagnostics and strict journal observation in a
   disposable validation, finish the
    Windows recovery, install the verified `6baa1f3` candidate, and
@@ -52,7 +53,9 @@ is also Astra-reviewed GREEN at `87e7db6` with 148/148 API tests; native
 Windows execution and deployment ACLs remain open. The calendar review found
 no P0/P1; its P2 unavailable-symbol compatibility finding is fixed and locally
 tested, while a targeted Astra re-review was blocked by worker file access and
-is not claimed as a sign-off.
+is not claimed as a sign-off. T12c is pushed at `fc1b3c1`; its frontend parses
+pass, the Mac build-for-testing exits 0, and the iOS lane is blocked at actool
+by the missing simulator runtime.
 These results do not prove live, runtime, device, visual, or operational
 completion.
 

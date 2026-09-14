@@ -24,8 +24,8 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint: `b425ca9` (calendar rollover and
-  widget snapshot bounds), pushed to `origin/main`; it includes the
+- Current application source checkpoint: `fc1b3c1` (Mac calendar pinch month
+  expansion), pushed to `origin/main`; it includes the
   security reconciliation and production dependency audit updates. The
   feature branch push and merge succeeded; GitHub CLI reports PR #1 merged
   into `main`. The deployable Windows candidate is the verified `6baa1f3`
@@ -62,10 +62,12 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   Astra Medium GREEN review. Browser runtime capture is unavailable here.
   T12a calendar zoom normalization is committed at `80d4f5d`, and `b425ca9`
   adds the reviewed T12b timeline viewport/midnight pass plus T13a bounded
-  widget snapshot reads/writes and valid oversized-payload regressions. The
-  serialized Mac build-for-testing passed. The iOS lane reaches changed Swift
-  compilation but stops at actool because no iphonesimulator runtime is
-  available. Simulator execution and T12c–T12d remain open.
+  widget snapshot reads/writes and valid oversized-payload regressions.
+  `fc1b3c1` adds the Astra-reviewed T12c Mac header pinch, guarded settle,
+  cancellation, and matched-geometry ownership pass. The serialized Mac
+  build-for-testing passed. The iOS lane reaches changed Swift compilation but
+  stops at actool because no iphonesimulator runtime is available. T12d,
+  simulator execution, physical gestures, and widgets remain open.
   Bounded recovery diagnostics are committed at `14a3b7f`; strict progress
   validation is committed at `4e14e38`; strict journal observation is committed
   at `9e43dd7`. Bounded phase telemetry is committed at `0a8d5b6`; the current
@@ -98,9 +100,11 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - T0 requirements mapping is generated from the validated frozen registry.
   T10a capability preflight completed as **SOURCE GAP** and is retained at
   `artifacts/final/T0/t10a-capability-preflight.md`; three T1a recovery review
-  attempts produced no usable report and made no mutation. The next dispatch is
-  the bounded T1 owner repair for the A1 RED findings after the pushed
-  CalendarStore fix. A1.4 truthfulness is pushed at `9539841`; A1.1–A1.3
+  attempts produced no usable report and made no mutation. T12c is now source
+  reviewed and pushed; the next calendar dispatch is the bounded T12d owner
+  repair for store bounds, revision/undo reconciliation, and DST series
+  mutation. The T1 owner repair for A1 RED findings remains required before
+  canonical recovery. A1.4 truthfulness is pushed at `9539841`; A1.1–A1.3
   still block recovery. The calendar reconciliation receipt is at
   `artifacts/final/T0/calendar-security-reconciliation.md`.
 
