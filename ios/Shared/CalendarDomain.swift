@@ -70,6 +70,7 @@ public enum CalendarValidationError: Error, Equatable, Sendable {
     case invalidInterval
     case invalidTimestamp
     case invalidIconAsset
+    case transientOccurrence
 }
 
 /// How often a recurring item repeats.
@@ -323,6 +324,239 @@ public enum CalendarRecurrence {
     }
 }
 
+public enum CalendarSeriesMutationError: Error, Equatable, Sendable, LocalizedError {
+    case occurrenceNotDerived
+    case anchorMismatch
+    case anchorDeleted
+    case anchorNotRecurring
+    case transientAnchor
+    case occurrenceMismatch
+    case invalidInterval
+    case invalidTimestamp
+    case nonexistentLocalTime
+    case dateArithmetic
+    case unrepresentableOccurrence
+
+    public var errorDescription: String? {
+        switch self {
+        case .occurrenceNotDerived:
+            return "The selected calendar item is not a recurring occurrence."
+        case .anchorMismatch:
+            return "The recurring calendar series no longer matches this occurrence."
+        case .anchorDeleted:
+            return "The recurring calendar series was deleted."
+        case .anchorNotRecurring:
+            return "The selected calendar series is no longer recurring."
+        case .transientAnchor:
+            return "The recurring series anchor is not durable."
+        case .occurrenceMismatch:
+            return "The selected occurrence is stale and cannot be edited safely."
+        case .invalidInterval:
+            return "The calendar interval must have a positive duration."
+        case .invalidTimestamp:
+            return "The calendar contains an invalid timestamp."
+        case .nonexistentLocalTime:
+            return "That local time does not exist in the series time zone."
+        case .dateArithmetic:
+            return "The calendar date could not be resolved safely."
+        case .unrepresentableOccurrence:
+            return "That change cannot be represented by this recurring rule."
+        }
+    }
+}
+
+/// Resolves a visible recurring occurrence into one durable anchor mutation.
+/// Occurrences are verified through the bounded recurrence engine before any
+/// user-requested interval is applied. The resulting value is always the
+/// anchor itself; no derived occurrence can cross a persistence boundary.
+public enum CalendarSeriesMutation {
+    public static func resolveInterval(
+        displayedOccurrence: CalendarItem,
+        anchor: CalendarItem,
+        start requestedStart: Date,
+        end requestedEnd: Date,
+        calendar fallbackCalendar: Calendar = .current,
+        at mutationDate: Date = .now
+    ) throws -> CalendarItem {
+        guard let sourceID = displayedOccurrence.occurrenceSourceID else {
+            throw CalendarSeriesMutationError.occurrenceNotDerived
+        }
+        guard displayedOccurrence.id == sourceID, anchor.id == sourceID else {
+            throw CalendarSeriesMutationError.anchorMismatch
+        }
+        guard anchor.occurrenceSourceID == nil else {
+            throw CalendarSeriesMutationError.transientAnchor
+        }
+        guard !anchor.isDeleted else {
+            throw CalendarSeriesMutationError.anchorDeleted
+        }
+        guard anchor.recurrence != nil else {
+            throw CalendarSeriesMutationError.anchorNotRecurring
+        }
+        do {
+            try anchor.validatedForPersistence()
+        } catch {
+            throw CalendarSeriesMutationError.invalidTimestamp
+        }
+        guard !displayedOccurrence.isDeleted,
+              displayedOccurrence.end > displayedOccurrence.start,
+              displayedOccurrence.start.timeIntervalSinceReferenceDate.isFinite,
+              displayedOccurrence.end.timeIntervalSinceReferenceDate.isFinite,
+              requestedStart.timeIntervalSinceReferenceDate.isFinite,
+              requestedEnd.timeIntervalSinceReferenceDate.isFinite,
+              mutationDate.timeIntervalSinceReferenceDate.isFinite else {
+            throw CalendarSeriesMutationError.invalidTimestamp
+        }
+        let duration = requestedEnd.timeIntervalSince(requestedStart)
+        guard duration.isFinite, duration > 0 else {
+            throw CalendarSeriesMutationError.invalidInterval
+        }
+
+        // The displayed item is trusted only if the live anchor expands to
+        // that exact derived value. The window is deliberately the displayed
+        // interval, so the existing exponential/binary bounded search does
+        // not enumerate the series from its beginning.
+        let displayedWindow = DateInterval(
+            start: displayedOccurrence.start,
+            end: displayedOccurrence.end
+        )
+        let matchesLiveExpansion = CalendarRecurrence.occurrences(
+            of: anchor,
+            overlapping: displayedWindow,
+            calendar: fallbackCalendar
+        ).contains { $0 == displayedOccurrence }
+        guard matchesLiveExpansion else {
+            throw CalendarSeriesMutationError.occurrenceMismatch
+        }
+
+        let calendar = Self.calendar(for: anchor, fallback: fallbackCalendar)
+        let displayedDay = calendar.startOfDay(for: displayedOccurrence.start)
+        let requestedDay = calendar.startOfDay(for: requestedStart)
+        guard let dayDelta = calendar.dateComponents([.day], from: displayedDay, to: requestedDay).day,
+              let targetAnchorDay = calendar.date(byAdding: .day, value: dayDelta, to: calendar.startOfDay(for: anchor.start)) else {
+            throw CalendarSeriesMutationError.dateArithmetic
+        }
+
+        let resolvedStart: Date
+        if requestedStart == displayedOccurrence.start {
+            // This preserves a second-fold anchor exactly when the user has
+            // not changed the occurrence's civil start at all.
+            resolvedStart = anchor.start
+        } else {
+            resolvedStart = try Self.resolveLocalStart(
+                on: targetAnchorDay,
+                matching: requestedStart,
+                calendar: calendar
+            )
+        }
+        guard resolvedStart.timeIntervalSinceReferenceDate.isFinite else {
+            throw CalendarSeriesMutationError.invalidTimestamp
+        }
+        guard let resolvedEnd = resolvedStart.addingTimeIntervalSafely(duration),
+              resolvedEnd > resolvedStart,
+              resolvedEnd.timeIntervalSinceReferenceDate.isFinite else {
+            throw CalendarSeriesMutationError.invalidInterval
+        }
+
+        let updatedAnchor: CalendarItem
+        do {
+            updatedAnchor = try anchor.updating(
+                start: resolvedStart,
+                end: resolvedEnd,
+                at: mutationDate
+            )
+        } catch CalendarValidationError.invalidInterval {
+            throw CalendarSeriesMutationError.invalidInterval
+        } catch {
+            throw CalendarSeriesMutationError.invalidTimestamp
+        }
+
+        // Calendar arithmetic can clamp month-end dates. A direct civil-day
+        // translation may therefore leave the selected occurrence unchanged
+        // while still looking like a successful anchor edit. Re-expand the
+        // candidate in the requested window and acknowledge the mutation only
+        // when the same requested interval is actually representable.
+        let requestedWindow = DateInterval(start: requestedStart, end: requestedEnd)
+        let matchesRequestedInterval = CalendarRecurrence.occurrences(
+            of: updatedAnchor,
+            overlapping: requestedWindow,
+            calendar: fallbackCalendar
+        ).contains { occurrence in
+            occurrence.start == requestedStart && occurrence.end == requestedEnd
+        }
+        guard matchesRequestedInterval else {
+            throw CalendarSeriesMutationError.unrepresentableOccurrence
+        }
+        return updatedAnchor
+    }
+
+    private static func calendar(for anchor: CalendarItem, fallback: Calendar) -> Calendar {
+        guard let identifier = anchor.timeZoneIdentifier,
+              let timeZone = TimeZone(identifier: identifier) else {
+            return fallback
+        }
+        var adjusted = fallback
+        adjusted.timeZone = timeZone
+        return adjusted
+    }
+
+    private static func resolveLocalStart(
+        on day: Date,
+        matching requestedDate: Date,
+        calendar: Calendar
+    ) throws -> Date {
+        let dayComponents = calendar.dateComponents([.era, .year, .month, .day], from: day)
+        let timeComponents = calendar.dateComponents([.hour, .minute, .second], from: requestedDate)
+        let fractionalNanoseconds = calendar.component(.nanosecond, from: requestedDate)
+        var requestedComponents = dayComponents
+        requestedComponents.hour = timeComponents.hour
+        requestedComponents.minute = timeComponents.minute
+        requestedComponents.second = timeComponents.second
+        // Match only the integral second. `nextDate` already returns that
+        // second; the fractional part is added exactly once below.
+        requestedComponents.nanosecond = 0
+
+        guard let searchStart = day.addingTimeIntervalSafely(-1),
+              let wholeSecond = calendar.nextDate(
+                  after: searchStart,
+                  matching: requestedComponents,
+                  matchingPolicy: .strict,
+                  repeatedTimePolicy: .first,
+                  direction: .forward
+              ) else {
+            throw CalendarSeriesMutationError.nonexistentLocalTime
+        }
+
+        let resolvedComponents = calendar.dateComponents(
+            [.era, .year, .month, .day, .hour, .minute, .second],
+            from: wholeSecond
+        )
+        guard resolvedComponents.era == requestedComponents.era,
+              resolvedComponents.year == requestedComponents.year,
+              resolvedComponents.month == requestedComponents.month,
+              resolvedComponents.day == requestedComponents.day,
+              resolvedComponents.hour == requestedComponents.hour,
+              resolvedComponents.minute == requestedComponents.minute,
+              resolvedComponents.second == requestedComponents.second else {
+            throw CalendarSeriesMutationError.nonexistentLocalTime
+        }
+
+        let fractionalSecond = Double(fractionalNanoseconds) / 1_000_000_000
+        guard let resolved = wholeSecond.addingTimeIntervalSafely(fractionalSecond) else {
+            throw CalendarSeriesMutationError.invalidTimestamp
+        }
+        return resolved
+    }
+}
+
+private extension Date {
+    func addingTimeIntervalSafely(_ interval: TimeInterval) -> Date? {
+        guard timeIntervalSinceReferenceDate.isFinite, interval.isFinite else { return nil }
+        let result = addingTimeInterval(interval)
+        return result.timeIntervalSinceReferenceDate.isFinite ? result : nil
+    }
+}
+
 public enum CalendarSnapshotError: Error, Equatable, Sendable, LocalizedError {
     case unsupportedSchemaVersion(Int)
     case tooManyItems
@@ -463,6 +697,9 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     /// boundary. The throwing initializer protects decoded values; this
     /// method also protects callers that mutate a public field afterwards.
     public func validatedForPersistence() throws {
+        guard occurrenceSourceID == nil else {
+            throw CalendarValidationError.transientOccurrence
+        }
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else { throw CalendarValidationError.blankTitle }
         guard trimmedTitle.utf8.count <= Self.maximumTitleUTF8Bytes else {
@@ -531,6 +768,9 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     }
 
     public func encode(to encoder: Encoder) throws {
+        guard occurrenceSourceID == nil else {
+            throw CalendarValidationError.transientOccurrence
+        }
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(title, forKey: .title)
@@ -588,13 +828,15 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
                          start: Date? = nil, end: Date? = nil, at: Date,
                          timeZoneIdentifier: String? = nil,
                          recurrence: CalendarRecurrenceRule? = nil, clearRecurrence: Bool = false) throws -> CalendarItem {
-        try CalendarItem(id: id, title: title ?? self.title, kind: kind ?? self.kind, icon: clearIcon ? nil : (icon ?? self.icon),
+        var updated = try CalendarItem(id: id, title: title ?? self.title, kind: kind ?? self.kind, icon: clearIcon ? nil : (icon ?? self.icon),
                          iconAsset: clearIconAsset ? nil : (iconAsset ?? self.iconAsset),
                          systemIconName: clearSystemIconName ? nil : (systemIconName ?? self.systemIconName),
                          status: status ?? self.status,
                          start: start ?? self.start, end: end ?? self.end, createdAt: createdAt, updatedAt: at, deletedAt: deletedAt,
                          timeZoneIdentifier: timeZoneIdentifier ?? self.timeZoneIdentifier,
                          recurrence: clearRecurrence ? nil : (recurrence ?? self.recurrence))
+        updated.occurrenceSourceID = occurrenceSourceID
+        return updated
     }
 
     /// A to-do is complete when its durable progress is `.done`; toggling the

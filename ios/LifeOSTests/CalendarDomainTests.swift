@@ -75,6 +75,23 @@ private actor CalendarStoreFailureSwitch {
     }
 }
 
+private actor CalendarDurableRewriteOnce {
+    private let url: URL
+    private let snapshot: CalendarSnapshot
+    private var armed = true
+
+    init(url: URL, snapshot: CalendarSnapshot) {
+        self.url = url
+        self.snapshot = snapshot
+    }
+
+    func run() async throws {
+        guard armed else { return }
+        armed = false
+        _ = try await CalendarStore(url: url).save(snapshot)
+    }
+}
+
 private actor CalendarRemoteScript {
     struct Observation: Sendable {
         let fetchCount: Int
@@ -2700,6 +2717,545 @@ final class CalendarDomainTests: XCTestCase {
         let identifier = "group.com.hermes.lifeos.\(AppGroupConfiguration.releasePlaceholder)"
         XCTAssertNil(AppGroupConfiguration.validatedIdentifier(identifier))
 #endif
+    }
+
+    func testDerivedOccurrencesCannotCrossPersistenceAndUpdatesRetainTheirMarker() async throws {
+        let calendar = berlinCalendar()
+        let anchorStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 1, hour: 9)))
+        let anchor = try CalendarItem(
+            title: "Recurring focus",
+            icon: "📌",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(3_600),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            timeZoneIdentifier: "Europe/Berlin",
+            recurrence: CalendarRecurrenceRule(frequency: .daily)
+        )
+        let occurrence = try XCTUnwrap(
+            CalendarRecurrence.occurrences(
+                of: anchor,
+                overlapping: DateInterval(start: anchorStart.addingTimeInterval(86_400), end: anchorStart.addingTimeInterval(172_800)),
+                calendar: calendar
+            ).first(where: { $0.occurrenceSourceID != nil })
+        )
+
+        XCTAssertEqual(occurrence.occurrenceSourceID, anchor.id)
+        XCTAssertThrowsError(try occurrence.validatedForPersistence()) { error in
+            XCTAssertEqual(error as? CalendarValidationError, .transientOccurrence)
+        }
+        XCTAssertThrowsError(try JSONEncoder.calendar.encode(occurrence)) { error in
+            XCTAssertEqual(error as? CalendarValidationError, .transientOccurrence)
+        }
+        do {
+            _ = try await CalendarStore(url: URL(fileURLWithPath: "/tmp/lifeos-d3-transient/calendar.json")).save(CalendarSnapshot(items: [occurrence]))
+            XCTFail("A derived occurrence must never be written to the store")
+        } catch {
+            XCTAssertEqual(error as? CalendarValidationError, .transientOccurrence)
+        }
+
+        let updated = try occurrence.updating(title: "Renamed occurrence", at: anchorStart.addingTimeInterval(10))
+        XCTAssertEqual(updated.occurrenceSourceID, anchor.id)
+        XCTAssertEqual(updated.title, "Renamed occurrence")
+    }
+
+    func testSeriesMutationPreservesAnchorMetadataAndAppliesFractionalSecondsOnce() throws {
+        let calendar = berlinCalendar()
+        let anchorStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 1, hour: 9, minute: 15, second: 30, nanosecond: 125_000_000)))
+        let createdAt = anchorStart.addingTimeInterval(-86_400)
+        let updatedAt = anchorStart.addingTimeInterval(-3_600)
+        let until = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 12, day: 31, hour: 18)))
+        let rule = try CalendarRecurrenceRule(frequency: .weekly, interval: 2, until: until)
+        let anchor = try CalendarItem(
+            id: UUID(uuidString: "2B8CB6B7-7C51-4D5E-A4E0-B6C28E1C6A90")!,
+            title: "Deep work",
+            kind: .todo,
+            icon: "📌",
+            status: .inProgress,
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(3_600),
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            timeZoneIdentifier: "Europe/Berlin",
+            recurrence: rule
+        )
+        let displayed = try XCTUnwrap(
+            CalendarRecurrence.occurrences(
+                of: anchor,
+                overlapping: DateInterval(start: anchorStart.addingTimeInterval(1_209_600), end: anchorStart.addingTimeInterval(1_209_600 + 7_200)),
+                calendar: calendar
+            ).first(where: { $0.occurrenceSourceID != nil })
+        )
+        let requestedStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 9, day: 12, hour: 10, minute: 45, second: 12, nanosecond: 375_000_000)))
+        let requestedEnd = requestedStart.addingTimeInterval(5_400.25)
+        let mutationDate = anchorStart.addingTimeInterval(7_200)
+
+        let result = try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: displayed,
+            anchor: anchor,
+            start: requestedStart,
+            end: requestedEnd,
+            calendar: calendar,
+            at: mutationDate
+        )
+
+        let expectedStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 29, hour: 10, minute: 45, second: 12, nanosecond: 375_000_000)))
+        XCTAssertEqual(result.id, anchor.id)
+        XCTAssertNil(result.occurrenceSourceID)
+        XCTAssertEqual(result.start.timeIntervalSinceReferenceDate, expectedStart.timeIntervalSinceReferenceDate, accuracy: 0.000_001)
+        XCTAssertEqual(result.end.timeIntervalSince(result.start), 5_400.25, accuracy: 0.000_001)
+        XCTAssertEqual(result.title, anchor.title)
+        XCTAssertEqual(result.kind, anchor.kind)
+        XCTAssertEqual(result.icon, anchor.icon)
+        XCTAssertEqual(result.status, anchor.status)
+        XCTAssertEqual(result.timeZoneIdentifier, anchor.timeZoneIdentifier)
+        XCTAssertEqual(result.recurrence, anchor.recurrence)
+        XCTAssertEqual(result.createdAt, anchor.createdAt)
+        XCTAssertEqual(result.updatedAt, mutationDate)
+    }
+
+    func testSeriesMutationRejectsStaleAndInvalidAnchors() throws {
+        let calendar = berlinCalendar()
+        let anchorStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 1, hour: 9)))
+        let anchor = try CalendarItem(
+            title: "Series",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(3_600),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            recurrence: CalendarRecurrenceRule(frequency: .daily)
+        )
+        let displayed = try XCTUnwrap(
+            CalendarRecurrence.occurrences(
+                of: anchor,
+                overlapping: DateInterval(start: anchorStart.addingTimeInterval(86_400), end: anchorStart.addingTimeInterval(172_800)),
+                calendar: calendar
+            ).first(where: { $0.occurrenceSourceID != nil })
+        )
+        let requestedStart = displayed.start.addingTimeInterval(3_600)
+        let requestedEnd = requestedStart.addingTimeInterval(1_800)
+
+        XCTAssertThrowsError(try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: anchor,
+            anchor: anchor,
+            start: requestedStart,
+            end: requestedEnd,
+            calendar: calendar,
+            at: anchorStart
+        )) { error in
+            XCTAssertEqual(error as? CalendarSeriesMutationError, .occurrenceNotDerived)
+        }
+
+        let otherAnchor = try CalendarItem(
+            title: "Other",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(3_600),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            recurrence: CalendarRecurrenceRule(frequency: .daily)
+        )
+        XCTAssertThrowsError(try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: displayed,
+            anchor: otherAnchor,
+            start: requestedStart,
+            end: requestedEnd,
+            calendar: calendar,
+            at: anchorStart
+        )) { error in
+            XCTAssertEqual(error as? CalendarSeriesMutationError, .anchorMismatch)
+        }
+
+        var staleOccurrence = displayed
+        staleOccurrence.title = "Changed behind the editor"
+        XCTAssertThrowsError(try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: staleOccurrence,
+            anchor: anchor,
+            start: requestedStart,
+            end: requestedEnd,
+            calendar: calendar,
+            at: anchorStart
+        )) { error in
+            XCTAssertEqual(error as? CalendarSeriesMutationError, .occurrenceMismatch)
+        }
+
+        let deletedAnchor = anchor.deleting(at: anchorStart.addingTimeInterval(60))
+        XCTAssertThrowsError(try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: displayed,
+            anchor: deletedAnchor,
+            start: requestedStart,
+            end: requestedEnd,
+            calendar: calendar,
+            at: anchorStart
+        )) { error in
+            XCTAssertEqual(error as? CalendarSeriesMutationError, .anchorDeleted)
+        }
+
+        let nonRecurringAnchor = try anchor.updating(at: anchorStart.addingTimeInterval(60), clearRecurrence: true)
+        XCTAssertThrowsError(try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: displayed,
+            anchor: nonRecurringAnchor,
+            start: requestedStart,
+            end: requestedEnd,
+            calendar: calendar,
+            at: anchorStart
+        )) { error in
+            XCTAssertEqual(error as? CalendarSeriesMutationError, .anchorNotRecurring)
+        }
+
+        var transientAnchor = anchor
+        transientAnchor.occurrenceSourceID = anchor.id
+        XCTAssertThrowsError(try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: displayed,
+            anchor: transientAnchor,
+            start: requestedStart,
+            end: requestedEnd,
+            calendar: calendar,
+            at: anchorStart
+        )) { error in
+            XCTAssertEqual(error as? CalendarSeriesMutationError, .transientAnchor)
+        }
+
+        XCTAssertThrowsError(try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: displayed,
+            anchor: anchor,
+            start: requestedStart,
+            end: requestedStart,
+            calendar: calendar,
+            at: anchorStart
+        )) { error in
+            XCTAssertEqual(error as? CalendarSeriesMutationError, .invalidInterval)
+        }
+    }
+
+    func testSeriesMutationRejectsBerlinSpringForwardGap() throws {
+        let calendar = berlinCalendar()
+        let anchorStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 27, hour: 2, minute: 30)))
+        let anchor = try CalendarItem(
+            title: "DST series",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(3_600),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            timeZoneIdentifier: "Europe/Berlin",
+            recurrence: CalendarRecurrenceRule(frequency: .daily)
+        )
+        let displayed = try XCTUnwrap(
+            CalendarRecurrence.occurrences(
+                of: anchor,
+                overlapping: DateInterval(
+                    start: try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 28))),
+                    end: try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 29)))
+                ),
+                calendar: calendar
+            ).first(where: { $0.occurrenceSourceID != nil })
+        )
+        let requestedStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 30, hour: 2, minute: 30)))
+
+        XCTAssertThrowsError(try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: displayed,
+            anchor: anchor,
+            start: requestedStart,
+            end: requestedStart.addingTimeInterval(3_600),
+            calendar: calendar,
+            at: anchorStart
+        )) { error in
+            XCTAssertEqual(error as? CalendarSeriesMutationError, .nonexistentLocalTime)
+        }
+    }
+
+    func testSeriesMutationUsesFirstBerlinAutumnFold() throws {
+        let calendar = berlinCalendar()
+        let anchorStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 23, hour: 2, minute: 30)))
+        let anchor = try CalendarItem(
+            title: "Fold series",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(3_600),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            timeZoneIdentifier: "Europe/Berlin",
+            recurrence: CalendarRecurrenceRule(frequency: .daily)
+        )
+        let displayed = try XCTUnwrap(
+            CalendarRecurrence.occurrences(
+                of: anchor,
+                overlapping: DateInterval(
+                    start: try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 24))),
+                    end: try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 25)))
+                ),
+                calendar: calendar
+            ).first(where: { $0.occurrenceSourceID != nil })
+        )
+        let requestedStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 26, hour: 2, minute: 30)))
+        let result = try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: displayed,
+            anchor: anchor,
+            start: requestedStart,
+            end: requestedStart.addingTimeInterval(3_600),
+            calendar: calendar,
+            at: anchorStart
+        )
+
+        XCTAssertEqual(calendar.component(.day, from: result.start), 25)
+        XCTAssertEqual(calendar.component(.hour, from: result.start), 2)
+        XCTAssertEqual(calendar.component(.minute, from: result.start), 30)
+        XCTAssertEqual(calendar.timeZone.secondsFromGMT(for: result.start), 7_200)
+    }
+
+    func testSeriesMutationRejectsUnrepresentableMonthlyClampAndAcceptsLeapYearMonthEnd() throws {
+        let calendar = berlinCalendar()
+        let anchorStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 1, day: 31, hour: 10)))
+        let anchor = try CalendarItem(
+            title: "Month end",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(3_600),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            timeZoneIdentifier: "Europe/Berlin",
+            recurrence: CalendarRecurrenceRule(frequency: .monthly)
+        )
+        let displayed = try XCTUnwrap(
+            CalendarRecurrence.occurrences(
+                of: anchor,
+                overlapping: DateInterval(
+                    start: try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 2, day: 1))),
+                    end: try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 1)))
+                ),
+                calendar: calendar
+            ).first(where: { $0.occurrenceSourceID != nil })
+        )
+        let impossibleStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 2, day: 27, hour: 10)))
+        XCTAssertThrowsError(try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: displayed,
+            anchor: anchor,
+            start: impossibleStart,
+            end: impossibleStart.addingTimeInterval(3_600),
+            calendar: calendar,
+            at: anchorStart
+        )) { error in
+            XCTAssertEqual(error as? CalendarSeriesMutationError, .unrepresentableOccurrence)
+        }
+
+        let leapAnchorStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2028, month: 1, day: 31, hour: 10)))
+        let leapAnchor = try CalendarItem(
+            title: "Leap month end",
+            start: leapAnchorStart,
+            end: leapAnchorStart.addingTimeInterval(3_600),
+            createdAt: leapAnchorStart,
+            updatedAt: leapAnchorStart,
+            timeZoneIdentifier: "Europe/Berlin",
+            recurrence: CalendarRecurrenceRule(frequency: .monthly)
+        )
+        let leapDisplayed = try XCTUnwrap(
+            CalendarRecurrence.occurrences(
+                of: leapAnchor,
+                overlapping: DateInterval(
+                    start: try XCTUnwrap(calendar.date(from: DateComponents(year: 2028, month: 2, day: 1))),
+                    end: try XCTUnwrap(calendar.date(from: DateComponents(year: 2028, month: 3, day: 1)))
+                ),
+                calendar: calendar
+            ).first(where: { $0.occurrenceSourceID != nil })
+        )
+        let leapRequested = try XCTUnwrap(calendar.date(from: DateComponents(year: 2028, month: 3, day: 29, hour: 10)))
+        let leapResult = try CalendarSeriesMutation.resolveInterval(
+            displayedOccurrence: leapDisplayed,
+            anchor: leapAnchor,
+            start: leapRequested,
+            end: leapRequested.addingTimeInterval(3_600),
+            calendar: calendar,
+            at: leapAnchorStart
+        )
+        XCTAssertEqual(calendar.component(.year, from: leapResult.start), 2028)
+        XCTAssertEqual(calendar.component(.month, from: leapResult.start), 2)
+        XCTAssertEqual(calendar.component(.day, from: leapResult.start), 29)
+    }
+
+    @MainActor
+    func testSeriesMutationRejectsAnchorMissingFromDurableStore() async throws {
+        let calendar = berlinCalendar()
+        let anchorStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 1, hour: 9)))
+        let anchor = try CalendarItem(
+            title: "Durable series",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(3_600),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            recurrence: CalendarRecurrenceRule(frequency: .daily)
+        )
+        let displayed = try XCTUnwrap(
+            CalendarRecurrence.occurrences(
+                of: anchor,
+                overlapping: DateInterval(start: anchorStart.addingTimeInterval(86_400), end: anchorStart.addingTimeInterval(172_800)),
+                calendar: calendar
+            ).first(where: { $0.occurrenceSourceID != nil })
+        )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarSnapshot(items: [anchor]),
+            storeURL: directory.appendingPathComponent("calendar.json")
+        )
+
+        let result = await coordinator.updateSeries(
+            displayed,
+            using: anchor,
+            start: displayed.start.addingTimeInterval(3_600),
+            end: displayed.start.addingTimeInterval(5_400),
+            calendar: calendar,
+            at: anchorStart.addingTimeInterval(60)
+        )
+
+        guard case .failure(let message) = result else {
+            return XCTFail("A series absent from durable storage must be rejected")
+        }
+        XCTAssertTrue(message.contains("repeating series changed"))
+        XCTAssertEqual(coordinator.snapshot, CalendarSnapshot(items: [anchor]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("calendar.json").path))
+    }
+
+    @MainActor
+    func testSeriesMutationPersistsDurableAnchorAndPreservesCommitSideEffects() async throws {
+        let calendar = berlinCalendar()
+        let anchorStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 1, hour: 9)))
+        let anchor = try CalendarItem(
+            title: "Durable success",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(3_600),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            recurrence: CalendarRecurrenceRule(frequency: .daily)
+        )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storeURL = directory.appendingPathComponent("calendar.json")
+        _ = try await CalendarStore(url: storeURL).save(CalendarSnapshot(items: [anchor]))
+
+        let peerRevisions = CalendarRevisionRecorder()
+        let widgetReloads = CalendarRevisionRecorder()
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarSnapshot(),
+            storeURL: storeURL,
+            peerSend: { snapshot, _, revision in peerRevisions.append(snapshot, revision: revision) },
+            widgetTimelineReload: { _ in widgetReloads.append(1) },
+            defaults: CalendarCoordinator.makeVisualFixtureDefaults()
+        )
+        await coordinator.load()
+        let displayed = try XCTUnwrap(
+            CalendarRecurrence.occurrences(
+                of: anchor,
+                overlapping: DateInterval(start: anchorStart.addingTimeInterval(86_400), end: anchorStart.addingTimeInterval(172_800)),
+                calendar: calendar
+            ).first(where: { $0.occurrenceSourceID != nil })
+        )
+        let beforeReloadCount = widgetReloads.values.count
+        let requestedEnd = displayed.start.addingTimeInterval(1_800)
+
+        let result = await coordinator.updateSeries(
+            displayed,
+            using: anchor,
+            start: displayed.start,
+            end: requestedEnd,
+            calendar: calendar,
+            at: anchorStart.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(result, .success)
+        let persisted = try await CalendarStore(url: storeURL).load()
+        XCTAssertEqual(persisted.items.count, 1)
+        XCTAssertEqual(persisted.items[0].id, anchor.id)
+        XCTAssertEqual(persisted.items[0].end.timeIntervalSince(persisted.items[0].start), 1_800, accuracy: 0.000_001)
+        XCTAssertEqual(coordinator.snapshot, persisted)
+        XCTAssertEqual(peerRevisions.values, [1])
+        XCTAssertEqual(widgetReloads.values.count, beforeReloadCount + 1)
+        XCTAssertTrue(coordinator.canUndo)
+    }
+
+    @MainActor
+    func testSeriesMutationRejectsChangedAnchorWithoutSideEffectsAndSucceedsAfterRefresh() async throws {
+        let calendar = berlinCalendar()
+        let anchorStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 1, hour: 9)))
+        let anchor = try CalendarItem(
+            title: "Original durable series",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(3_600),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            recurrence: CalendarRecurrenceRule(frequency: .daily)
+        )
+        let changed = try anchor.updating(title: "Changed by another writer", at: anchorStart.addingTimeInterval(60))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storeURL = directory.appendingPathComponent("calendar.json")
+        _ = try await CalendarStore(url: storeURL).save(CalendarSnapshot(items: [anchor]))
+        let rewrite = CalendarDurableRewriteOnce(url: storeURL, snapshot: CalendarSnapshot(items: [changed]))
+        let peerRevisions = CalendarRevisionRecorder()
+        let widgetReloads = CalendarRevisionRecorder()
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarSnapshot(),
+            storeURL: storeURL,
+            peerSend: { snapshot, _, revision in peerRevisions.append(snapshot, revision: revision) },
+            storeMutationHook: { try await rewrite.run() },
+            widgetTimelineReload: { _ in widgetReloads.append(1) },
+            defaults: CalendarCoordinator.makeVisualFixtureDefaults()
+        )
+        await coordinator.load()
+        let displayed = try XCTUnwrap(
+            CalendarRecurrence.occurrences(
+                of: anchor,
+                overlapping: DateInterval(start: anchorStart.addingTimeInterval(86_400), end: anchorStart.addingTimeInterval(172_800)),
+                calendar: calendar
+            ).first(where: { $0.occurrenceSourceID != nil })
+        )
+        let beforeSnapshot = coordinator.snapshot
+        let beforeReloadCount = widgetReloads.values.count
+
+        let rejected = await coordinator.updateSeries(
+            displayed,
+            using: anchor,
+            start: displayed.start,
+            end: displayed.start.addingTimeInterval(1_800),
+            calendar: calendar,
+            at: anchorStart.addingTimeInterval(120)
+        )
+
+        guard case .failure(let message) = rejected else {
+            return XCTFail("A changed durable anchor must be rejected")
+        }
+        XCTAssertTrue(message.contains("repeating series changed"))
+        XCTAssertEqual(coordinator.snapshot, beforeSnapshot)
+        XCTAssertEqual(peerRevisions.values, [])
+        XCTAssertEqual(widgetReloads.values.count, beforeReloadCount)
+        XCTAssertFalse(coordinator.canUndo)
+        let retryWithoutRefresh = await coordinator.retryLastSave()
+        guard case .failure = retryWithoutRefresh else {
+            return XCTFail("A stale-anchor conflict must not replay an obsolete mutation")
+        }
+
+        await coordinator.load()
+        let refreshed = try XCTUnwrap(coordinator.snapshot.items.first)
+        let refreshedOccurrence = try XCTUnwrap(
+            CalendarRecurrence.occurrences(
+                of: refreshed,
+                overlapping: DateInterval(start: refreshed.start.addingTimeInterval(86_400), end: refreshed.start.addingTimeInterval(172_800)),
+                calendar: calendar
+            ).first(where: { $0.occurrenceSourceID != nil })
+        )
+        let recovered = await coordinator.updateSeries(
+            refreshedOccurrence,
+            using: refreshed,
+            start: refreshedOccurrence.start,
+            end: refreshedOccurrence.start.addingTimeInterval(1_800),
+            calendar: calendar,
+            at: anchorStart.addingTimeInterval(180)
+        )
+
+        XCTAssertEqual(recovered, .success)
+        XCTAssertEqual(peerRevisions.values, [1])
+        XCTAssertTrue(coordinator.canUndo)
+        XCTAssertEqual(widgetReloads.values.count, beforeReloadCount + 2)
+        let persisted = try await CalendarStore(url: storeURL).load()
+        let persistedItem = try XCTUnwrap(persisted.items.first)
+        XCTAssertEqual(persistedItem.title, changed.title)
+        XCTAssertEqual(persistedItem.end.timeIntervalSince(persistedItem.start), 1_800, accuracy: 0.000_001)
     }
 }
 

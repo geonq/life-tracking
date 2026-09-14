@@ -1798,14 +1798,20 @@ public struct CalendarView: View {
 
     /// A derived occurrence is never edited directly: selection opens the
     /// anchor item so every change is a series-level change.
-    private func resolveAnchor(for item: CalendarItem) -> CalendarItem {
+    private func resolveAnchor(for item: CalendarItem) -> CalendarItem? {
         guard let sourceID = item.occurrenceSourceID else { return item }
-        return visibleItems.first { $0.id == sourceID } ?? item
+        guard let anchor = visibleItems.first(where: { $0.id == sourceID }),
+              anchor.occurrenceSourceID == nil,
+              anchor.recurrence != nil,
+              !anchor.isDeleted else {
+            return nil
+        }
+        return anchor
     }
 
     private func edit(_ item: CalendarItem) {
         timedCreationPreview = nil
-        let target = resolveAnchor(for: item)
+        guard let target = resolveAnchor(for: item) else { return }
 #if os(macOS)
         presentMacEditor(
             CalendarEditorPresentation(item: target, date: selectedDate),
@@ -1833,7 +1839,7 @@ public struct CalendarView: View {
     /// anchor used by sidebar and command-palette entry points.
     private func edit(_ item: CalendarItem, sourceFrame: CGRect) {
         timedCreationPreview = nil
-        let target = resolveAnchor(for: item)
+        guard let target = resolveAnchor(for: item) else { return }
         presentMacEditor(
             CalendarEditorPresentation(item: target, date: selectedDate),
             sourceFrame: sourceFrame
@@ -1906,23 +1912,25 @@ public struct CalendarView: View {
             completion(.success)
             return
         }
-        // Moving or resizing any occurrence shifts the whole series by the
-        // same delta: recurring items are series-owned in this version.
-        let resolved: CalendarItem?
-        if let sourceID = item.occurrenceSourceID,
-           let anchor = visibleItems.first(where: { $0.id == sourceID }) {
-            let startDelta = start.timeIntervalSince(item.start)
-            let endDelta = end.timeIntervalSince(item.end)
-            resolved = try? anchor.updating(
-                start: anchor.start.addingTimeInterval(startDelta),
-                end: max(anchor.start.addingTimeInterval(startDelta), anchor.end.addingTimeInterval(endDelta)),
-                at: .now
-            )
-        } else {
-            resolved = try? item.updating(start: start, end: end, at: .now)
+        if item.occurrenceSourceID != nil {
+            guard let anchor = resolveAnchor(for: item) else {
+                completion(.failure("Unable to update calendar: the recurring series is unavailable."))
+                return
+            }
+            Task { @MainActor in
+                completion(await coordinator.updateSeries(
+                    item,
+                    using: anchor,
+                    start: start,
+                    end: end,
+                    calendar: calendar,
+                    at: .now
+                ))
+            }
+            return
         }
-        guard let updated = resolved else {
-            completion(.success)
+        guard let updated = try? item.updating(start: start, end: end, at: .now) else {
+            completion(.failure("Unable to update calendar: the requested interval is invalid."))
             return
         }
         Task { @MainActor in
@@ -1938,7 +1946,10 @@ public struct CalendarView: View {
         }
         // A recurring to-do completes as a series; its occurrences all share
         // the anchor's durable progress.
-        let target = resolveAnchor(for: item)
+        guard let target = resolveAnchor(for: item) else {
+            completion(.failure("Unable to update calendar: the recurring series is unavailable."))
+            return
+        }
         guard let updated = try? target.updating(status: status, at: .now) else {
             completion(.failure("Only to-do items have an interactive completion checkbox."))
             return
@@ -1952,7 +1963,10 @@ public struct CalendarView: View {
         // Derived occurrences share the anchor's durable ID. Resolve before
         // tombstoning so deleting one visible occurrence removes the series
         // without persisting that occurrence's transient wall-clock bounds.
-        let target = resolveAnchor(for: item)
+        guard let target = resolveAnchor(for: item) else {
+            completion(.failure("Unable to delete calendar item: the recurring series is unavailable."))
+            return
+        }
         Task { @MainActor in
             completion(await coordinator.delete(target))
         }

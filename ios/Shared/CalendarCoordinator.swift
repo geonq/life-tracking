@@ -56,6 +56,7 @@ private enum CalendarRemoteMutationError: Error {
 
 private enum CalendarLocalMutationError: Error, Equatable, Sendable {
     case staleUpsert
+    case staleAnchor
 }
 
 private enum CalendarUndoError: Error, Equatable, Sendable {
@@ -342,11 +343,11 @@ public final class CalendarCoordinator: ObservableObject {
     private var mutationTail: Task<CalendarLocalSaveResult, Never>?
 
     private enum CalendarMutation: Sendable {
-        case upsert(CalendarItem)
+        case upsert(CalendarItem, expectedAnchor: CalendarItem?)
 
         func applying(to snapshot: CalendarSnapshot) -> CalendarSnapshot {
             switch self {
-            case .upsert(let item):
+            case .upsert(let item, _):
                 // CalendarSnapshot's merge contract provides deterministic
                 // last-write-wins for the same ID while retaining all
                 // independent IDs from the latest durable snapshot.
@@ -355,7 +356,7 @@ public final class CalendarCoordinator: ObservableObject {
         }
 
         func isRejected(by snapshot: CalendarSnapshot, resultingIn candidate: CalendarSnapshot) -> Bool {
-            guard case .upsert(let item) = self,
+            guard case .upsert(let item, _) = self,
                   let current = snapshot.items.first(where: { $0.id == item.id }),
                   current != item,
                   let committed = candidate.items.first(where: { $0.id == item.id }) else {
@@ -699,7 +700,37 @@ public final class CalendarCoordinator: ObservableObject {
 
     @discardableResult
     public func save(_ item: CalendarItem) async -> CalendarLocalSaveResult {
-        await persist(.upsert(item))
+        await persist(.upsert(item, expectedAnchor: nil))
+    }
+
+    /// Resolves and persists a visible recurring occurrence as one durable
+    /// anchor mutation. The captured anchor is checked again inside the
+    /// serialized store transaction so a concurrent edit becomes a truthful
+    /// conflict instead of silently rebasing the user's drag.
+    @discardableResult
+    public func updateSeries(
+        _ occurrence: CalendarItem,
+        using anchor: CalendarItem,
+        start: Date,
+        end: Date,
+        calendar: Calendar = .current,
+        at mutationDate: Date = .now
+    ) async -> CalendarLocalSaveResult {
+        do {
+            let updated = try CalendarSeriesMutation.resolveInterval(
+                displayedOccurrence: occurrence,
+                anchor: anchor,
+                start: start,
+                end: end,
+                calendar: calendar,
+                at: mutationDate
+            )
+            return await persist(.upsert(updated, expectedAnchor: anchor))
+        } catch {
+            let message = "Unable to update repeating calendar series: \(error.localizedDescription)"
+            errorMessage = message
+            return .failure(message)
+        }
     }
 
     @discardableResult
@@ -781,15 +812,25 @@ public final class CalendarCoordinator: ObservableObject {
     }
 
     private func performPersist(_ mutation: CalendarMutation, clearingFailureID: UUID?) async -> CalendarLocalSaveResult {
+        let mutationItem: CalendarItem
+        let expectedAnchor: CalendarItem?
+        switch mutation {
+        case .upsert(let item, let expected):
+            mutationItem = item
+            expectedAnchor = expected
+        }
+        guard mutationItem.occurrenceSourceID == nil else {
+            let message = "Unable to save calendar: derived occurrences are transient and cannot be persisted."
+            errorMessage = message
+            if let clearingFailureID, pendingFailedMutation?.id == clearingFailureID {
+                pendingFailedMutation = nil
+            }
+            return .failure(message)
+        }
         guard let committedRevision = nextRevisionCandidate() else {
             let message = "Unable to save calendar: the local revision limit has been reached."
             errorMessage = message
             return .failure(message)
-        }
-        let mutationItem: CalendarItem
-        switch mutation {
-        case .upsert(let item):
-            mutationItem = item
         }
         let publishedBefore = snapshot
         let loadedBeforeMutation = isLoaded
@@ -804,6 +845,18 @@ public final class CalendarCoordinator: ObservableObject {
                 let before = isFixtureMode || (!loadedBeforeMutation && current.items.isEmpty && !publishedBefore.items.isEmpty)
                     ? publishedBefore
                     : current
+                if let expectedAnchor {
+                    // A real series mutation must prove that its captured
+                    // anchor still exists in the durable store. The initial
+                    // published snapshot is allowed only for isolated visual
+                    // fixtures, where the store intentionally starts empty.
+                    let anchorSource = isFixtureMode ? before : current
+                    guard let currentAnchor = anchorSource.items.first(where: { $0.id == expectedAnchor.id }),
+                          currentAnchor.occurrenceSourceID == nil,
+                          Self.persistedItem(currentAnchor, matches: expectedAnchor) else {
+                        throw CalendarLocalMutationError.staleAnchor
+                    }
+                }
                 let candidate = mutation.applying(to: before)
                 guard !mutation.isRejected(by: before, resultingIn: candidate) else {
                     throw CalendarLocalMutationError.staleUpsert
@@ -846,6 +899,13 @@ public final class CalendarCoordinator: ObservableObject {
             let committedRevision = revision
             sendPeer(snapshot: committedSnapshot, revision: committedRevision)
             requestWidgetTimelineReloadIfNeeded()
+        } catch CalendarLocalMutationError.staleAnchor {
+            let message = "Unable to update calendar: the repeating series changed before it could be saved."
+            errorMessage = message
+            if let clearingFailureID, pendingFailedMutation?.id == clearingFailureID {
+                pendingFailedMutation = nil
+            }
+            return .failure(message)
         } catch CalendarLocalMutationError.staleUpsert {
             let message = "Unable to save calendar: a newer change already exists for this item."
             errorMessage = message
