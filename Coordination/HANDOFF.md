@@ -1,6 +1,6 @@
 # HANDOFF — LifeOS native app
 
-Updated 2026-09-14 Europe/Berlin.
+Updated 2026-09-15 Europe/Berlin.
 
 ## Release state
 
@@ -12,7 +12,7 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
 
 ## Current source checkpoint
 
-- Application source checkpoint: `2262c51 Checkpoint A1.2 native recovery capability`;
+- Application source checkpoint: `29bbbde Harden recovery replay and commit boundaries`;
   local `main` matches `origin/main` with zero divergence. PR #1 is merged and
   no open PRs are recorded. Reviewed source includes dashboard, calendar,
   usage, finance, backend-security, and installer; Windows recovery-
@@ -88,12 +88,12 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
   blocking recovery-boundary defects; no canonical Windows state was changed.
 - A1.4 is a scoped **GREEN** subpacket at `9539841`. A1.1 terminal-stage
   repair is pushed at `0f8fd8e` and Astra Medium source-reviewed **MERGE**;
-  focused source checks are 6/6. A1.2 checkpoint `2262c51` adds the retained
-  artifact capability, immutable phase tokens, and strict progress payload
-  parser; Astra Medium reviewed the parser **MERGE**, and fresh Windows
-  PowerShell 5.1 native/static suites pass. Authority-owned lease/cursor,
-  strict replay, artifact wiring, and A1.3 remain open; this does not
-  authorize recovery.
+  focused source checks are 6/6. A1.2 is checkpointed at `29bbbde`, adding
+  retained artifact capability, immutable phase tokens, strict payload parsing,
+  authority-owned lease/cursor, restart mirror reconciliation, exact commit
+  boundaries, and pre-publication record-limit rejection. Astra Medium reviewed
+  the exact three-file candidate **MERGE**; fresh Windows PowerShell 5.1 native
+  and static suites pass. A1.3 and canonical recovery evidence remain open; this does not authorize recovery.
 - Mac Tax accessibility repair is committed at `66953af`: macOS exposes one
   direct `import-tax-pdf` button, platform-specific empty-state actions
   compile, and the exact artifact passed direct AX inspection and native picker
@@ -143,9 +143,10 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
   disposable copy, and the canonical transaction was not resumed or installed.
 - Three bounded T1a/T1b Luna Max recovery-preparation attempts were stopped
   after producing no usable report and made no source or Windows mutation.
-  A1.1 is accepted at `0f8fd8e`; A1.2 parser is accepted only as a scoped
-  source checkpoint at `2262c51`. Its authority-owned lease/cursor and strict
-  replay review remains RED, so A1.2–A1.3 still block disposable measurement.
+  A1.1 is accepted at `0f8fd8e`; A1.2 is accepted as a source/disposable
+  validation checkpoint at `29bbbde` after Astra Medium **MERGE** and passing
+  native/static suites. A1.3, canonical recovery, and full-size measurement
+  remain blocked by the broader recovery gate.
 - Astra rejected an uncommitted runtime optimization for a mutating
   reconcile-only path and TOCTOU gap; it is preserved at
   `/private/tmp/lifeos-red-runtime-optimization-20260913.patch` and excluded.
@@ -187,11 +188,10 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. T0 is pushed at `e07a0a4`; current source is `2262c51`, with T11a
+  `070b7db`. T0 is pushed at `e07a0a4`; current source is `29bbbde`, with T11a
 visual foundation, T12a zoom, T12b viewport, T12c Mac pinch/settle, T13a widget
-I/O, T12d D1–D3, A1.1, and the A1.2 parser checkpoint integrated. Next is
-the authority-owned lease/cursor and strict-replay repair, then A1.3 and T12d
-D4/D5; conforming source remains subject to runtime
+  I/O, T12d D1–D3, A1.1, and the complete A1.2 authority checkpoint integrated.
+  Next is A1.3 Windows recovery source repair, then T12d D4/D5; conforming source remains subject to runtime
 verification. Usage is at `e8bbefa`; keep Calendar work in the smaller packets
 in `tasks/final-execution-plan.md`. The two broad security workers returned no
 report, so later reconciliation needs a completed bounded method. Keep the

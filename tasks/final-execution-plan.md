@@ -1,11 +1,11 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-14; source checkpoint `2262c51`; local `main`
+Planning baseline: 2026-09-15; source checkpoint `29bbbde`; local `main`
 matches `origin/main` with zero divergence. D2a/D2b/D3/A1.1 are Astra Medium
 **MERGE**. Approved documentation-only plan; Windows facts are read-only;
 release is NO-GO. Progress is **70–75% implemented** /
 **35–45% release-ready**, kept separate.
 ## 1. Current truth and explicit gates
-- **NO-GO.** The current checkpoint is `2262c51`, including the reviewed
+- **NO-GO.** The current checkpoint is `29bbbde`, including the reviewed
   dashboard refinement at `0d094ee`, calendar zoom safety, the T12b calendar
   viewport/midnight correction, T13a bounded widget snapshot I/O, visual
   foundation at `5b90539`, and the clean production dependency audit.
@@ -21,7 +21,7 @@ release is NO-GO. Progress is **70–75% implemented** /
 - HANDOFF records FROZEN registry validation: 258 scored leaves, seven aliases, zero accepted, failing --score. Historical scoped GREEN is neither whole-product acceptance nor an effort percentage.
 - Recorded receipts: Usage visuals3/3; Finance16/16 plus phone contracts; Fitness Recovery1/1 Mac and1/1 phone; Calendar107/107 simulator plus Mac build; installer13/13; backend148/148. Mac snapshots executed51/51 before archive failure; this is not a passing final archive. Tax has scoped AX/picker proof, not a successful whole Mac UI suite.
 - Windows recorded state: C: and D: fully encrypted/protection ON; **BitLocker is healthy**. No recovery/install process; API stopped; gateway absent; marker active with a manifest but no current stage, `recovery.json`, or `recovery.progress.jsonl` at the default backup root. The older 31,401-unit receipt is not current. Candidate `6baa1f3` and disposable diagnostics through `0a8d5b6` do not certify canonical recovery/install.
-- Rejected recovery optimization and Mac shell candidate remain excluded. Two security workers closed without reports. D3 and A1.1 have final Astra Medium **MERGE** reviews; the A1.2 strict parser subtranche at `2262c51` is also **MERGE** with fresh Windows native/static passes, while authority-owned lease/cursor, strict replay, A1.3, and D4/D5 remain open. Live banking, physical signing/widgets, whole-app visuals/runtime, Zepp fidelity, Canvas and final operational security remain unverified.
+- Rejected recovery optimization and Mac shell candidate remain excluded. Two security workers closed without reports. D3 and A1.1 have final Astra Medium **MERGE** reviews; complete A1.2 at `29bbbde` is also **MERGE** with fresh Windows PowerShell 5.1 native/static passes covering authority-owned lease/cursor, restart reconciliation, exact commit boundaries, and replay-limit fencing. A1.3 and D4/D5 remain open. Live banking, physical signing/widgets, whole-app visuals/runtime, Zepp fidelity, Canvas and final operational security remain unverified.
 - Review inputs: Coordination/HANDOFF.md, Coordination/DECISIONS.md, Coordination/PHASE_STATUS.md, tasks/ACTIVE.md, this file, tasks/design.md, docs/LIFEOS_ACCEPTANCE_REGISTRY.md and relevant referenced source filenames only. Issue#2 architecture below is inherited from these inputs; its current remote body/status was not fetched.
 - Current user instructions/DECISIONS govern authority/security; compatible tasks/design.md governs visuals. Both current documents already specify Calendar40/64/120. Keep SF Pro, green estimates, orange calories and native Home NavigationStack.
 - Shared visual foundation `5b90539` is Astra Medium GREEN after an exact
@@ -152,12 +152,12 @@ release is NO-GO. Progress is **70–75% implemented** /
 - Normal registry validation after evidence changes; final python3 -B scripts/validate_acceptance_registry.py --score. Every P0, aggregate≥95%, every workstream≥90% and geonq visual approval form the registry checkpoint. Full requested completion also resolves remaining ACTIVE/user/Canvas scope; unexplained5% omission is not completion.
 - Final future operator verifies local branch/index/base, origin, PR#1 head/base/diff/CI/comments and exact candidate/signed/deployed provenance. Documentation-only commits may follow code only with recorded source-tree equality. Draft/open/mergeable status remains historical until rechecked; no Windows/GitHub access here.
 - Release requires operational recovery/restart/backup/restore, live bank/import/health proof, permitted physical Mac+iPhone/widgets, every matrix, final security review, registry and geonq product acceptance. geonq has authorized merging this personal checkpoint; merge is an integration action and does not close G6 or convert NO-GO into release acceptance. Resolve review comments before merge when present, then retain NO-GO/blocked-external leaves until the release gates pass.
-**Immediate next dispatch:** A1.2 authority-owned lease/cursor and strict replay,
-then A1.3 Windows recovery source repair. A1.1 is accepted at `0f8fd8e`; the
-A1.2 parser checkpoint is `2262c51`; D3 is accepted at `b6bc465`; T12d D4/D5
-follow the remaining A1 repair. T10a remains a source-gap receipt, and A1.2–A1.3
-repair precedes canonical recovery mutation. Remaining blockers are live provider
-data, Personal Team capability/signing/devices, Zepp fidelity, vault/writer/plugin
+**Immediate next dispatch:** A1.3 Windows recovery source repair. A1.1 is
+accepted at `0f8fd8e`; complete A1.2 is checkpointed at `29bbbde`; D3 is
+accepted at `b6bc465`; T12d D4/D5 follow the remaining A1 repair. T10a remains
+a source-gap receipt, and A1.3 repair precedes canonical recovery mutation.
+Remaining blockers are live provider data, Personal Team capability/signing/devices,
+Zepp fidelity, vault/writer/plugin
 decisions, runtime/visual/security/registry, and final operator evidence.
 ## 10. Dispatch contract replacing broad one-worker tranches
 - Sections 3 paths are exclusive OWNER inventories, not permission to dispatch an entire row. Every invocation gets one packet below, exact expanded paths, current symbol/line anchors from `rg -n`, its own focused tests, and at most one behavior change. NEW paths are proposals; verify absence before creating. No line numbers are invented here.

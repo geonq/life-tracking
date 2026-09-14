@@ -1,9 +1,9 @@
 # PHASE STATUS — LifeOS
 
-Updated 2026-09-14 Europe/Berlin.
+Updated 2026-09-15 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Main source checkpoint: `2262c51` (`Checkpoint A1.2 native recovery capability`)
+- Main source checkpoint: `29bbbde` (`Harden recovery replay and commit boundaries`)
   on local `main` and `origin/main` with zero divergence. D2a/D2b, D3, and A1.1
   are Astra Medium source-reviewed **MERGE**. The deployable Windows
   candidate remains `6baa1f3`; PR #1 is already merged.
@@ -46,8 +46,9 @@ Updated 2026-09-14 Europe/Berlin.
   environment, and toolchain/Python injection regressions pass. Physical
   signing and install remain unverified.
 - Backend boundary security is Astra scoped GREEN at `87e7db6`: typecheck and
-  **148/148** API tests pass with loopback permission. Native Windows launch,
-  deployed ACL/reparse protection, and rename durability are unverified.
+  **148/148** API tests pass with loopback permission. Disposable native Windows
+  recovery/artifact handles and rename durability now pass; deployed launch,
+  ACL/reparse protection, and canonical service evidence remain unverified.
 - Mac Tax accessibility repair at `66953af` has a successful serialized
   `LifeOSMac` production build and direct AX proof for the `import-tax-pdf`
   button; the full Mac UI suite remains unverified because of XCTest
@@ -103,15 +104,18 @@ Updated 2026-09-14 Europe/Berlin.
   two-file patch **GREEN**, and the focused iPhone 17 simulator suite is
   **96/96 with 0 failures**. Peer transport identity remains open.
 - T1/A1 Windows recovery review is recorded at
-  `artifacts/final/T0/t1-a1-review.md` and is **RED**: four recovery-boundary
-  source defects block canonical recovery and full-size measurement.
+  `artifacts/final/T0/t1-a1-review.md` as the historical **RED** baseline. A1.2
+  repairs its native progress/artifact boundary and passes disposable Windows
+  suites at `29bbbde`; A1.3, canonical recovery, and full-size measurement
+  remain open.
 - The scoped A1.4 truthfulness repair is pushed at `9539841` and reviewed
   **GREEN**. A1.1 terminal-stage no-replay/strict-progress repair is pushed at
-  `0f8fd8e` and source-reviewed **MERGE**. A1.2 at `2262c51` adds native
-  retained artifact capability, immutable phase tokens, and strict payload
-  parsing; Astra Medium reviewed the parser **MERGE**, and fresh Windows
-  PowerShell 5.1 native/static suites pass. Its authority-owned lease/cursor,
-  strict replay, artifact wiring, and A1.3 remain open.
+  `0f8fd8e` and source-reviewed **MERGE**. A1.2 at `29bbbde` includes native
+  retained artifact capability, immutable phase tokens, strict payload parsing,
+  authority-owned lease/cursor, restart reconciliation, exact commit boundary,
+  and replay-limit fencing. Astra Medium reviewed the exact candidate **MERGE**;
+  fresh Windows PowerShell 5.1 native/static suites pass. A1.3 and canonical
+  recovery remain open.
 - The current 191-line visual contract is committed at `5ebc17e`. A prior Mac
   shell candidate passed compile and 6 selected tests but was Astra RED for
   missing shell-state evidence and a possible collapsed-header overflow; it was
@@ -144,9 +148,8 @@ Updated 2026-09-14 Europe/Berlin.
   diagnostics/strict-reader/phase-telemetry validation passed.
 - Three T1a/T1b Luna Max recovery-preparation workers were stopped without
   usable reports and without source or Windows mutation. A1.1 is source-fixed
-  at `0f8fd8e`; A1.2 parser is a scoped source checkpoint at `2262c51`, while
-  authority-owned lease/cursor and strict replay remain RED and block
-  disposable measurement or T2.
+  at `0f8fd8e`; A1.2 is source/disposable-validated at `29bbbde`, while A1.3,
+  canonical recovery, and full-size measurement still block T2.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 - T12d calendar reconciliation/security work remains open: D1 bounded local

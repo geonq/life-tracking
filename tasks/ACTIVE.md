@@ -1,7 +1,7 @@
 # Active LifeOS full-design execution
 
 Status: IN PROGRESS
-Updated: 2026-09-14
+Updated: 2026-09-15
 Mode: prospective implementation of the complete LifeOS design plan; one verified, publishable tranche at a time.
 
 ## Goal and measurement
@@ -35,7 +35,7 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint is `2262c51`, pushed on `main` with
+- Current application source checkpoint is `29bbbde`, pushed on `main` with
   zero local/remote divergence. A1.2 is the current checkpoint;
   PR #1 is merged and no open PR is recorded.
   The verified Windows candidate is `6baa1f3`; current read-only observation
@@ -98,11 +98,12 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 
 ## Current dispatch
 
-- A1.2 checkpoint `2262c51` now contains the retained artifact capability,
-  immutable phase tokens, and strict bounded progress payload parser. Astra
-  Medium reviewed the parser tranche **MERGE**; fresh Windows PowerShell 5.1
-  native and static suites pass. The authority-owned lease/cursor and replay
-  redesign remains the next RED gate, and the artifact loop is still unwired.
+- A1.2 checkpoint `29bbbde` contains the retained artifact capability,
+  immutable phase tokens, strict bounded progress payload parser,
+  authority-owned lease/cursor state, restart mirror reconciliation, exact
+  commit boundaries, and pre-publication replay-limit fencing. Astra Medium
+  reviewed the exact candidate **MERGE**; fresh Windows PowerShell 5.1 native
+  and static suites pass. A1.3 and canonical recovery evidence remain open.
 - A prior narrow Mac shell candidate was compiled and tested, then rejected by
   Astra Medium for missing actual shell evidence and collapsed-header geometry
   risk; its patch is preserved in `/private/tmp/lifeos-mac-shell-candidate-red.patch`.
@@ -120,10 +121,10 @@ name the concrete gate moved, the evidence produced, and the next dependency.
   reviewed and pushed; the bounded T12d D1 store-bound repair is now pushed at
   `16e0855`; D2 revision/undo reconciliation is pushed at `f0d59a5`, and D3
   is pushed at `b6bc465`. A1.1 terminal-stage repair is pushed at `0f8fd8e`;
-  A1.2 parser checkpoint `2262c51` is pushed and reviewed **MERGE** for that
-  slice. The next dispatch is authority-owned lease/cursor and strict replay,
-  then A1.3 and D4/D5. A1.4 truthfulness is pushed at `9539841`; recovery
-  remains blocked.
+  A1.2 complete authority checkpoint `29bbbde` is pushed and reviewed **MERGE**
+  with fresh native/static Windows evidence. The next dispatch is A1.3, then
+  D4/D5. A1.4 truthfulness is pushed at `9539841`; canonical recovery remains
+  blocked.
   The calendar reconciliation receipt is at
   `artifacts/final/T0/calendar-security-reconciliation.md`.
 

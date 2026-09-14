@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-14 Europe/Berlin. Release: **NO-GO**. Local `main` contains
-source checkpoint `2262c51`, pushed with zero divergence; coordination docs
+Updated 2026-09-15 Europe/Berlin. Release: **NO-GO**. Local `main` contains
+source checkpoint `29bbbde`, pushed with zero divergence; coordination docs
 still need their matching checkpoint. Track completion separately as
 approximately **70–75% implemented** and **35–45% release-ready**. T12c and
 D1/D2 have Astra Medium source **MERGE** reviews.
@@ -19,9 +19,9 @@ D1/D2 have Astra Medium source **MERGE** reviews.
    complete at `f0d59a5`; finish T12d D3–D5
    reconciliation,
    then continue the remaining Finance/live, motion, and widget evidence.
-3. Finish the A1.2 authority-owned lease/cursor and strict replay repair after
-  parser checkpoint `2262c51`, then use the bounded recovery diagnostics and
-  strict journal observation in a disposable validation, finish the
+3. Finish A1.3 Windows recovery source repair after the A1.2 authority
+   checkpoint `29bbbde`, then use the bounded recovery diagnostics and strict
+   journal observation in a disposable validation, finish the
    Windows recovery, install the verified `6baa1f3` candidate, and
    verify service listeners, health, ACLs, Tailscale Serve, and current native
    Enable Banking reads on the reachable PC. Enable Banking is historically
@@ -39,13 +39,15 @@ D1/D2 have Astra Medium source **MERGE** reviews.
 
 ## Verified checkpoint
 
-`2262c51` is pushed; its strict parser subtranche is Astra Medium **MERGE** and
-fresh Windows native/static suites pass. Its authority-owned lease/cursor and
-strict replay remain RED. The deployable Windows source checkpoint is `6baa1f3`.
+`29bbbde` is pushed; its complete A1.2 authority/artifact candidate is Astra
+Medium **MERGE** and fresh Windows PowerShell 5.1 native/static suites pass.
+The deployable Windows source checkpoint is `6baa1f3`; A1.3 and canonical
+recovery remain open.
 The strict journal observation mode is native-Windows-validated and Astra
 reviewed GREEN. Fresh SSH readback confirms the canonical marker is still
-active, the journal is artifacts-complete at 31,401 units/sequence 59,167,
-LifeOSAPI is stopped, and LifeOSGateway is absent.
+active, while the older 31,401-unit/sequence-59,167 receipt is not treated as
+current because the default backup root has no current stage, recovery journal,
+or progress file. LifeOSAPI is stopped and LifeOSGateway is absent.
 The Finance source change is `fd8ccfb`. Calendar hardening is pushed at `8942b8e`; its focused
 iPhone 17 suite is 107/107 with exit 0 and the macOS production build exits 0.
 Usage visual/source, macOS route, and personal installer security slices have
