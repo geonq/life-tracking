@@ -721,13 +721,46 @@ if ($jsonAtomicBody[0].IndexOf('Write-LifeOSDurableBytes', [StringComparison]::O
 Assert-Text 'Write-JsonAtomic \$Path \$Manifest -OperatorSid \$Manifest\.operatorSid' 'Install manifests retain the operator-bound ACL on every checkpoint.'
 Assert-Text 'Write-JsonAtomic \$path \$journal -OperatorSid \$Manifest\.operatorSid' 'Recovery journals retain the operator-bound ACL on every checkpoint.'
 Assert-Text 'Write-LifeOSDurableBytes \$snapshotPath' 'Leaf ACL snapshots are durably written after their restricted ACL is applied.'
+$phaseAwareProgressRead = 'Read-RecoveryProgress -Manifest $Manifest -Journal $journal -JournalUnits $journalUnits -Strict:($Strict -or [string]$journal.phase -eq ''completed'')'
+if (-not $recoveryReaderBody[0].Contains($phaseAwareProgressRead)) {
+    throw 'FAIL: Completed recovery journals must select strict progress validation while nonterminal reads retain caller strictness.'
+}
 $boundedTreeBody = ($commonText -split 'function Get-LifeOSBoundedTreeItem', 2)[1] -split 'function Get-TreeManifestIndex', 2
 if ($boundedTreeBody[0] -match '\$unsafeTarget|\$target\s*=') {
     throw 'FAIL: bounded tree reparse checks must use LinkType and never compare Target as a link type.'
 }
-$stageBody = ($commonText -split 'function Invoke-RecoveryStage', 2)[1] -split 'function Get-RecoveryJournalPath', 2
-if (-not $stageBody[0].Contains('Read-RecoveryJournal $Manifest') -or
-    $stageBody[0].IndexOf('Read-RecoveryJournal') -gt $stageBody[0].IndexOf('& $Action')) { throw 'FAIL: Recovery stages must authenticate the journal before acting.' }
+$stageStart = $commonText.IndexOf('function Invoke-RecoveryStage', [StringComparison]::Ordinal)
+$stageEnd = $commonText.IndexOf('function Restore-LifeOSServiceSnapshots', $stageStart, [StringComparison]::Ordinal)
+if ($stageStart -lt 0 -or $stageEnd -le $stageStart) { throw 'FAIL: Recovery stage source boundary is missing.' }
+$stageText = $commonText.Substring($stageStart, $stageEnd - $stageStart)
+$completedStart = $stageText.IndexOf('if ($journal.phase -eq ''completed'')', [StringComparison]::Ordinal)
+$artifactsGate = $stageText.IndexOf('if ($journal.phase -ne ''artifacts-complete'')', $completedStart, [StringComparison]::Ordinal)
+if ($completedStart -lt 0 -or $artifactsGate -le $completedStart) { throw 'FAIL: Completed recovery stage branch is missing.' }
+$completedBranch = $stageText.Substring($completedStart, $artifactsGate - $completedStart)
+if (-not $completedBranch.Contains('if ([string]$stageState -ne ''complete'')') -or
+    -not $completedBranch.Contains('$stageScopeSucceeded = $true') -or
+    -not $completedBranch.Contains('return')) {
+    throw 'FAIL: Completed recovery stages must validate, mark success, and return.'
+}
+foreach ($callbackInvocation in @('& $Action', '& $LiveAction', '& $Postcondition', 'Write-JsonAtomic')) {
+    if ($completedBranch.Contains($callbackInvocation)) {
+        throw "FAIL: Completed recovery stages must not invoke callbacks or checkpoint the stage: $callbackInvocation"
+    }
+}
+$artifactsCompleteStart = $stageText.IndexOf('if ([string]$stageState -eq ''complete'')', $artifactsGate, [StringComparison]::Ordinal)
+$restoringStart = $stageText.IndexOf('Set-JournalProperty $stages $Name ''restoring''', $artifactsCompleteStart, [StringComparison]::Ordinal)
+if ($artifactsCompleteStart -lt 0 -or $restoringStart -le $artifactsCompleteStart) { throw 'FAIL: Artifacts-complete stage branch is missing.' }
+$artifactsCompleteBranch = $stageText.Substring($artifactsCompleteStart, $restoringStart - $artifactsCompleteStart)
+if (-not $artifactsCompleteBranch.Contains('& $LiveAction') -or
+    -not $artifactsCompleteBranch.Contains('& $Postcondition') -or
+    $artifactsCompleteBranch.IndexOf('& $LiveAction', [StringComparison]::Ordinal) -ge
+    $artifactsCompleteBranch.IndexOf('& $Postcondition', [StringComparison]::Ordinal)) {
+    throw 'FAIL: An artifacts-complete stage must run LiveAction before Postcondition.'
+}
+if (-not $stageText.Contains('Read-RecoveryJournal $Manifest') -or
+    $stageText.IndexOf('Read-RecoveryJournal $Manifest', [StringComparison]::Ordinal) -gt $stageText.IndexOf('& $Action', [StringComparison]::Ordinal)) {
+    throw 'FAIL: Recovery stages must authenticate the journal before acting.'
+}
 Assert-InstallOrder 'Save-CollectorReceipt $manifest' '$manifest.codexCollectorVerification = ' 'Collector receipt is durable before replacing manifest observations.'
 if (-not $commonText.Contains('Executable = $false') -or -not $commonText.Contains("@('.exe', '.dll')")) { throw 'FAIL: Service image ACLs require execution rights.' }
 $frozenTreeBody = ($commonText -split 'function Get-LifeOSFrozenTreeInventory', 2)[1] -split 'function Add-LifeOSManagedAccessRule', 2

@@ -3713,8 +3713,6 @@ function Invoke-RecoveryStage {
     }
     if ($journal.phase -eq 'completed') {
         if ([string]$stageState -ne 'complete') { throw "Completed recovery stage is not durably complete: $Name" }
-        if ($null -ne $LiveAction) { & $LiveAction }
-        if ($null -ne $Postcondition) { & $Postcondition }
         $stageScopeSucceeded = $true
         return
     }
@@ -4618,7 +4616,7 @@ function Read-RecoveryJournal {
     } finally {
         [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $inventoryPhase -Succeeded:$inventoryPhaseSucceeded)
     }
-    Read-RecoveryProgress -Manifest $Manifest -Journal $journal -JournalUnits $journalUnits -Strict:$Strict
+    Read-RecoveryProgress -Manifest $Manifest -Journal $journal -JournalUnits $journalUnits -Strict:($Strict -or [string]$journal.phase -eq 'completed')
     $journalHasIncompleteUnit = $false
     foreach ($unit in $journalUnits) {
         if ([string](Get-JournalProperty $unit 'phase') -ne 'complete') {

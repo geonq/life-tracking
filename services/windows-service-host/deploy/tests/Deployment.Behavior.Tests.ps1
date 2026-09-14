@@ -1430,6 +1430,175 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
 }
 
 & {
+    # Use the real journal and progress readers against disposable serialized
+    # bytes. A completed journal must reject both a torn progress tail and a
+    # repairable progress ACL before either repair adapter can run.
+    $fixtureRoot = $null
+    $script:terminalProgressPath = ''
+    $script:terminalProgressAclFailureMode = $false
+    $script:terminalProgressAclAssertions = 0
+    $script:terminalSetAclCalls = 0
+    $script:terminalGetAclCalls = 0
+    function Assert-RestrictedAcl {
+        [CmdletBinding()]
+        param(
+            [string]$Path,
+            [string]$OperatorSid,
+            [string[]]$ReadSids,
+            [string[]]$ModifySids,
+            [string[]]$AllowedOwnerSids,
+            [switch]$AllowInherited,
+            [switch]$Recurse
+        )
+        if ($script:terminalProgressAclFailureMode -and
+            (Get-FullPath $Path) -ceq $script:terminalProgressPath) {
+            $script:terminalProgressAclAssertions++
+            if ($script:terminalProgressAclAssertions -eq 1) {
+                throw 'fixture terminal progress ACL rejection'
+            }
+        }
+    }
+    function Set-RestrictedAcl {
+        [CmdletBinding()]
+        param(
+            [string]$Path,
+            [string]$OperatorSid,
+            [string[]]$ReadSids,
+            [string[]]$ModifySids,
+            [switch]$File,
+            [switch]$SkipSnapshot,
+            [string[]]$AllowedOwnerSids,
+            [switch]$InheritableSystemFullControl,
+            [int]$MaxAttempts = 5,
+            [int]$RetryDelayMilliseconds = 500
+        )
+        $script:terminalSetAclCalls++
+    }
+    function Get-Acl {
+        [CmdletBinding()]
+        param([Parameter(Mandatory)][string]$LiteralPath)
+        $script:terminalGetAclCalls++
+        $acl = [pscustomobject]@{ Owner = 'fixture'; Access = @() }
+        [void](Add-Member -InputObject $acl -MemberType ScriptMethod -Name GetOwner -Value {
+            param($Type)
+            return [pscustomobject]@{ Value = $this.Owner }
+        } -PassThru)
+        return $acl
+    }
+    try {
+        $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('lifeos-terminal-reader-' + [Guid]::NewGuid().ToString('N'))
+        $data = Join-Path $fixtureRoot 'data'
+        $backup = Join-Path $fixtureRoot 'backup'
+        Ensure-Directory $data
+        Ensure-Directory $backup
+        $destination = Join-Path $data 'stable.json'
+        [IO.File]::WriteAllText($destination, 'stable')
+        $manifest = [pscustomobject]@{
+            transactionId = 'terminal-reader-fixture'
+            generation = 'generation'
+            operatorSid = 'fixture'
+            manifestPath = (Join-Path $backup 'manifest.json')
+            collectorTransition = $null
+            paths = [pscustomobject]@{
+                backupDirectory = $backup
+                gatewayData = $data
+                usageHistory = (Join-Path $fixtureRoot 'usage.jsonl')
+            }
+            backups = @()
+        }
+        $state = Get-RecoveryArtifactState $destination
+        $unit = [pscustomobject]@{
+            destination = $destination
+            backup = ''
+            pre = $state
+            post = $state
+            phase = 'pending'
+            stagingPath = (Join-Path $data '.rollback-restore-terminal-reader-fixture-0')
+        }
+        $stages = [pscustomobject]@{}
+        Set-JournalProperty $stages 'fixture-stage' 'complete'
+        $journal = [pscustomobject]@{
+            schemaVersion = 1
+            transactionId = $manifest.transactionId
+            generation = $manifest.generation
+            operatorSid = $manifest.operatorSid
+            manifestPath = $manifest.manifestPath
+            units = @($unit)
+            unitCount = 1
+            treeRoots = @($data)
+            phase = 'artifacts'
+            progressPath = (Get-RecoveryProgressPath $manifest)
+            progressSequence = 0
+            writersReleased = $false
+            stages = $stages
+        }
+        $record = New-RecoveryProgressRecord -Manifest $manifest -Journal $journal -UnitIndex 0 -Phase 'complete' -Sequence 0 -UnitCount 1
+        $frame = New-RecoveryProgressFrame $record
+        [void](Append-RecoveryProgress -Manifest $manifest -Journal $journal -UnitIndex 0 -Phase 'complete')
+        $archivePath = Join-Path $backup ('recovery.completed.' + $manifest.transactionId + '.json')
+        Set-JournalProperty $journal 'phase' 'completed'
+        Set-JournalProperty $journal 'writersReleased' $true
+        Set-JournalProperty $journal 'archivePath' (Get-FullPath $archivePath)
+        $journalBytes = [Text.UTF8Encoding]::new($false).GetBytes([string]($journal | ConvertTo-Json -Depth 20 -Compress))
+        [IO.File]::WriteAllBytes($archivePath, $journalBytes)
+        [IO.File]::WriteAllBytes((Get-RecoveryJournalPath $manifest), $journalBytes)
+
+        $progressPath = Get-RecoveryProgressPath $manifest
+        $script:terminalProgressPath = Get-FullPath $progressPath
+        $committedBytes = [IO.File]::ReadAllBytes($progressPath)
+        $cleanCompletedJournal = Read-RecoveryJournal $manifest
+        Assert-Behavior ($cleanCompletedJournal.phase -ceq 'completed' -and
+            [long]$cleanCompletedJournal.progressSequence -eq 1 -and
+            [string]$cleanCompletedJournal.units[0].phase -ceq 'complete') 'a clean completed journal remains readable through the strict progress path.'
+        $tail = New-Object byte[] 4
+        [Array]::Copy($frame.Header, 0, $tail, 0, $tail.Length)
+        $tornBytes = New-Object byte[] ($committedBytes.Length + $tail.Length)
+        [Array]::Copy($committedBytes, 0, $tornBytes, 0, $committedBytes.Length)
+        [Array]::Copy($tail, 0, $tornBytes, $committedBytes.Length, $tail.Length)
+        [IO.File]::WriteAllBytes($progressPath, $tornBytes)
+        $beforeTail = [IO.File]::ReadAllBytes($progressPath)
+        $action = { throw 'terminal recovery action must not run' }
+        $liveAction = { throw 'terminal recovery live action must not run' }
+        $postcondition = { throw 'terminal recovery postcondition must not run' }
+        $script:terminalProgressAclFailureMode = $false
+        $script:terminalProgressAclAssertions = 0
+        $script:terminalSetAclCalls = 0
+        $script:terminalGetAclCalls = 0
+        $terminalTailError = $null
+        try {
+            Invoke-RecoveryStage $manifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition
+        } catch { $terminalTailError = [string]$_.Exception.Message }
+        Assert-Behavior ($terminalTailError -ceq 'Recovery progress log contains an incomplete final frame.') 'completed recovery rejects a torn progress tail with the precise reader error.'
+        $afterTail = [IO.File]::ReadAllBytes($progressPath)
+        Assert-Behavior ([Convert]::ToBase64String($afterTail) -ceq [Convert]::ToBase64String($beforeTail) -and
+            [long]$afterTail.Length -eq [long]$beforeTail.Length) 'completed recovery leaves torn progress bytes and length unchanged.'
+        Assert-Behavior ($script:terminalSetAclCalls -eq 0 -and $script:terminalGetAclCalls -eq 0) 'completed torn-tail validation performs no ACL repair or inspection.'
+
+        [IO.File]::WriteAllBytes($progressPath, $committedBytes)
+        $beforeAcl = [IO.File]::ReadAllBytes($progressPath)
+        $script:terminalProgressAclFailureMode = $true
+        $script:terminalProgressAclAssertions = 0
+        $script:terminalSetAclCalls = 0
+        $script:terminalGetAclCalls = 0
+        Assert-BehaviorThrows {
+            Invoke-RecoveryStage $manifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition
+        } 'completed recovery rejects a repairable progress ACL before repair'
+        $afterAcl = [IO.File]::ReadAllBytes($progressPath)
+        Assert-Behavior ([Convert]::ToBase64String($afterAcl) -ceq [Convert]::ToBase64String($beforeAcl) -and
+            [long]$afterAcl.Length -eq [long]$beforeAcl.Length) 'completed ACL validation leaves progress bytes and length unchanged.'
+        Assert-Behavior ($script:terminalProgressAclAssertions -eq 1 -and
+            $script:terminalSetAclCalls -eq 0 -and $script:terminalGetAclCalls -eq 0) 'completed ACL validation rejects before Get-Acl or Set-RestrictedAcl repair.'
+    } finally {
+        if ($null -ne $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        Remove-Variable -Name terminalProgressPath -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name terminalProgressAclFailureMode -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name terminalProgressAclAssertions -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name terminalSetAclCalls -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name terminalGetAclCalls -Scope Script -ErrorAction SilentlyContinue
+    }
+}
+
+& {
     $oldMaxRecords = $script:LifeOSRecoveryProgressMaxRecords
     $oldMaxBytes = $script:LifeOSRecoveryProgressMaxBytes
     $realFramePart = ${function:Write-RecoveryProgressFramePart}
@@ -2004,6 +2173,169 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
         Assert-BehaviorThrows { Invoke-RecoveryStage $persisted 'fixture-stage' { $script:unexpectedRecoveryAction = $true } } 'writer release never bypasses restored code integrity'
         Assert-Behavior (-not $script:unexpectedRecoveryAction) 'rejected recovery stages perform no action'
     } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
+}
+
+& {
+    $script:stageFixtureJournalJson = $null
+    $script:stageFixtureWriteCalls = 0
+    $script:stageFixtureCallbackCalls = [ordered]@{ Action = 0; LiveAction = 0; Postcondition = 0 }
+    $script:stageFixtureMutationCalls = [ordered]@{ Service = 0; Task = 0 }
+    $script:stageFixtureEvents = New-Object System.Collections.ArrayList
+    $script:stageFixtureState = [ordered]@{ Service = 'stable-service'; Task = 'stable-task' }
+    $script:stageFixtureRetryAttempts = 0
+    $fixtureManifest = [pscustomobject]@{
+        transactionId = 'stage-boundary-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = 'fixture-manifest'
+        paths = [pscustomobject]@{ backupDirectory = 'fixture-backup' }
+    }
+
+    function Get-RecoveryJournalPath { param($Manifest) return 'fixture-recovery.json' }
+    function Save-StageFixtureJournal {
+        param($Journal)
+        if ($null -eq $Journal) { $script:stageFixtureJournalJson = $null; return }
+        $script:stageFixtureJournalJson = [string]($Journal | ConvertTo-Json -Depth 20 -Compress)
+    }
+    function Read-RecoveryJournal {
+        param($Manifest)
+        if ($null -eq $script:stageFixtureJournalJson) { return $null }
+        return $script:stageFixtureJournalJson | ConvertFrom-Json
+    }
+    function Write-JsonAtomic {
+        param([string]$Path, [object]$Value, [string]$OperatorSid, [long]$MaxBytes = 0)
+        $script:stageFixtureWriteCalls++
+        $script:stageFixtureJournalJson = [string]($Value | ConvertTo-Json -Depth 20 -Compress)
+    }
+    function Set-StageFixtureServiceState {
+        param([string]$Value)
+        $script:stageFixtureMutationCalls['Service']++
+        $script:stageFixtureState['Service'] = $Value
+    }
+    function Set-StageFixtureTaskState {
+        param([string]$Value)
+        $script:stageFixtureMutationCalls['Task']++
+        $script:stageFixtureState['Task'] = $Value
+    }
+    function Reset-StageFixtureObservations {
+        param([string]$Service = 'stable-service', [string]$Task = 'stable-task')
+        foreach ($name in @('Action', 'LiveAction', 'Postcondition')) { $script:stageFixtureCallbackCalls[$name] = 0 }
+        foreach ($name in @('Service', 'Task')) { $script:stageFixtureMutationCalls[$name] = 0 }
+        $script:stageFixtureWriteCalls = 0
+        $script:stageFixtureEvents = New-Object System.Collections.ArrayList
+        $script:stageFixtureState['Service'] = $Service
+        $script:stageFixtureState['Task'] = $Task
+    }
+    function New-StageFixtureJournal {
+        param(
+            [Parameter(Mandatory)][string]$Phase,
+            [AllowNull()][string]$StageState,
+            [bool]$IncludeStage = $true,
+            [bool]$WritersReleased = $false
+        )
+        $stages = [pscustomobject]@{}
+        if ($IncludeStage) { Set-JournalProperty $stages 'fixture-stage' $StageState }
+        return [pscustomobject]@{
+            schemaVersion = 1; transactionId = $fixtureManifest.transactionId; generation = $fixtureManifest.generation; operatorSid = $fixtureManifest.operatorSid; manifestPath = $fixtureManifest.manifestPath
+            units = @(); unitCount = 0; treeRoots = @(); phase = $Phase; writersReleased = $WritersReleased; stages = $stages
+        }
+    }
+
+    $action = {
+        $script:stageFixtureCallbackCalls['Action']++
+        [void]$script:stageFixtureEvents.Add('action')
+        Set-StageFixtureServiceState 'action'
+    }
+    $liveAction = {
+        $script:stageFixtureCallbackCalls['LiveAction']++
+        [void]$script:stageFixtureEvents.Add('live-action')
+        Set-StageFixtureTaskState 'live-action'
+    }
+    $postcondition = {
+        $script:stageFixtureCallbackCalls['Postcondition']++
+        [void]$script:stageFixtureEvents.Add('postcondition')
+        Set-StageFixtureServiceState 'postcondition'
+    }
+
+    try {
+        $terminalJournal = New-StageFixtureJournal -Phase 'completed' -StageState 'complete'
+        Save-StageFixtureJournal $terminalJournal
+        Reset-StageFixtureObservations
+        $terminalSavedBefore = [string]$script:stageFixtureJournalJson
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition
+        Assert-Behavior ($script:stageFixtureCallbackCalls['Action'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['LiveAction'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['Postcondition'] -eq 0 -and
+            $script:stageFixtureMutationCalls['Service'] -eq 0 -and
+            $script:stageFixtureMutationCalls['Task'] -eq 0 -and
+            $script:stageFixtureWriteCalls -eq 0) 'terminal completed recovery stages invoke no callbacks, mutations, or checkpoints.'
+        Assert-Behavior ($script:stageFixtureState['Service'] -ceq 'stable-service' -and $script:stageFixtureState['Task'] -ceq 'stable-task' -and
+            [string]$script:stageFixtureJournalJson -ceq $terminalSavedBefore) 'terminal completed recovery stages preserve live state and their serialized journal.'
+
+        foreach ($case in @(
+            [pscustomobject]@{ Label = 'terminal missing stage is rejected'; StageState = $null; IncludeStage = $false }
+            [pscustomobject]@{ Label = 'terminal restoring stage is rejected'; StageState = 'restoring'; IncludeStage = $true }
+            [pscustomobject]@{ Label = 'terminal invalid stage is rejected'; StageState = 'invalid'; IncludeStage = $true }
+        )) {
+            Save-StageFixtureJournal (New-StageFixtureJournal -Phase 'completed' -StageState $case.StageState -IncludeStage $case.IncludeStage)
+            Reset-StageFixtureObservations
+            $savedBefore = [string]$script:stageFixtureJournalJson
+            Assert-BehaviorThrows { Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition } $case.Label
+            Assert-Behavior ($script:stageFixtureCallbackCalls['Action'] -eq 0 -and
+                $script:stageFixtureCallbackCalls['LiveAction'] -eq 0 -and
+                $script:stageFixtureCallbackCalls['Postcondition'] -eq 0 -and
+                $script:stageFixtureMutationCalls['Service'] -eq 0 -and
+                $script:stageFixtureMutationCalls['Task'] -eq 0 -and
+                $script:stageFixtureWriteCalls -eq 0 -and
+                $script:stageFixtureState['Service'] -ceq 'stable-service' -and
+                $script:stageFixtureState['Task'] -ceq 'stable-task' -and
+                [string]$script:stageFixtureJournalJson -ceq $savedBefore) "$($case.Label) performs no mutation or write."
+        }
+
+        Save-StageFixtureJournal (New-StageFixtureJournal -Phase 'artifacts-complete' -StageState 'complete' -WritersReleased $true)
+        Reset-StageFixtureObservations
+        $artifactsSavedBefore = [string]$script:stageFixtureJournalJson
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition
+        Assert-Behavior ($script:stageFixtureCallbackCalls['Action'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['LiveAction'] -eq 1 -and
+            $script:stageFixtureCallbackCalls['Postcondition'] -eq 1 -and
+            (($script:stageFixtureEvents -join ',') -ceq 'live-action,postcondition') -and
+            $script:stageFixtureWriteCalls -eq 0) 'an artifacts-complete complete stage runs LiveAction then Postcondition without a checkpoint.'
+        Assert-Behavior ($script:stageFixtureMutationCalls['Service'] -eq 1 -and $script:stageFixtureMutationCalls['Task'] -eq 1 -and
+            $script:stageFixtureState['Service'] -ceq 'postcondition' -and $script:stageFixtureState['Task'] -ceq 'live-action' -and
+            [string]$script:stageFixtureJournalJson -ceq $artifactsSavedBefore) 'an artifacts-complete stage reconciles live state while preserving the saved journal.'
+
+        $script:stageFixtureRetryAttempts = 0
+        $retryAction = {
+            $script:stageFixtureCallbackCalls['Action']++
+            $script:stageFixtureRetryAttempts++
+            [void]$script:stageFixtureEvents.Add(('action-' + $script:stageFixtureRetryAttempts))
+            Set-StageFixtureServiceState ('action-' + $script:stageFixtureRetryAttempts)
+            if ($script:stageFixtureRetryAttempts -eq 1) { throw 'fixture action failure' }
+        }
+        Save-StageFixtureJournal (New-StageFixtureJournal -Phase 'artifacts-complete' -StageState $null -IncludeStage $false)
+        Reset-StageFixtureObservations
+        Assert-BehaviorThrows { Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $retryAction -LiveAction $liveAction -Postcondition $postcondition } 'failed artifacts-complete action stays retryable'
+        $failedRetryJournal = Read-RecoveryJournal $fixtureManifest
+        Assert-Behavior ([string]$failedRetryJournal.stages.'fixture-stage' -ceq 'restoring' -and
+            $script:stageFixtureCallbackCalls['Action'] -eq 1 -and
+            $script:stageFixtureCallbackCalls['LiveAction'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['Postcondition'] -eq 0 -and
+            $script:stageFixtureWriteCalls -eq 1) 'a failed artifacts-complete action saves restoring and does not run live reconciliation.'
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $retryAction -LiveAction $liveAction -Postcondition $postcondition
+        $successfulRetryJournal = Read-RecoveryJournal $fixtureManifest
+        Assert-Behavior ([string]$successfulRetryJournal.stages.'fixture-stage' -ceq 'complete' -and
+            $script:stageFixtureCallbackCalls['Action'] -eq 2 -and
+            $script:stageFixtureCallbackCalls['LiveAction'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['Postcondition'] -eq 1 -and
+            $script:stageFixtureWriteCalls -eq 3) 'a successful retry completes the stage after Action and Postcondition, without LiveAction.'
+    } finally {
+        Remove-Variable -Name stageFixtureJournalJson -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name stageFixtureWriteCalls -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name stageFixtureCallbackCalls -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name stageFixtureMutationCalls -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name stageFixtureEvents -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name stageFixtureState -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name stageFixtureRetryAttempts -Scope Script -ErrorAction SilentlyContinue
+    }
 }
 
 & {

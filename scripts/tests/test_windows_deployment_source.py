@@ -1975,6 +1975,49 @@ def test_recovery_state_transitions_are_idempotent_and_early_recovery_is_not_a_b
     assert 'early recovered transaction has no usable authority baseline' in behavior
 
 
+def test_completed_recovery_stage_never_replays_callbacks() -> None:
+    common = read('Deployment.Common.ps1')
+    stage_start = common.index('function Invoke-RecoveryStage')
+    stage_end = common.index('function Restore-LifeOSServiceSnapshots', stage_start)
+    stage = common[stage_start:stage_end]
+
+    completed_start = stage.index("if ($journal.phase -eq 'completed')")
+    artifacts_gate = stage.index("if ($journal.phase -ne 'artifacts-complete')", completed_start)
+    completed_branch = stage[completed_start:artifacts_gate]
+    assert "if ([string]$stageState -ne 'complete')" in completed_branch
+    assert '$stageScopeSucceeded = $true' in completed_branch
+    assert 'return' in completed_branch
+    for invocation in ('& $Action', '& $LiveAction', '& $Postcondition', 'Write-JsonAtomic'):
+        assert invocation not in completed_branch
+
+    artifacts_complete_start = stage.index("if ([string]$stageState -eq 'complete')", artifacts_gate)
+    restoring_start = stage.index("Set-JournalProperty $stages $Name 'restoring'", artifacts_complete_start)
+    artifacts_complete_branch = stage[artifacts_complete_start:restoring_start]
+    assert '& $LiveAction' in artifacts_complete_branch
+    assert '& $Postcondition' in artifacts_complete_branch
+    assert artifacts_complete_branch.index('& $LiveAction') < artifacts_complete_branch.index(
+        '& $Postcondition'
+    )
+
+
+def test_completed_recovery_journal_uses_strict_progress_validation() -> None:
+    common = read('Deployment.Common.ps1')
+    reader_start = common.index('function Read-RecoveryJournal')
+    reader_end = common.index('function Save-CollectorReceipt', reader_start)
+    reader = common[reader_start:reader_end]
+
+    assert (
+        "Read-RecoveryProgress -Manifest $Manifest -Journal $journal -JournalUnits $journalUnits "
+        "-Strict:($Strict -or [string]$journal.phase -eq 'completed')"
+    ) in reader
+    assert "journal.phase -notin @('artifacts', 'artifacts-complete', 'completed')" in reader
+
+    stage_start = common.index('function Invoke-RecoveryStage')
+    stage_end = common.index('function Restore-LifeOSServiceSnapshots', stage_start)
+    stage = common[stage_start:stage_end]
+    assert "if ($journal.phase -ne 'artifacts-complete')" in stage
+
+
 def test_fresh_marker_and_generation_reference_contracts_are_exercised() -> None:
     common = read('Deployment.Common.ps1')
     install = read('install.ps1')
