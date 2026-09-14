@@ -16,8 +16,9 @@ public struct LifeOSResponsiveMetrics: Equatable, Sendable {
     /// The Mac window width at which the page gutter grows from 24pt to 32pt.
     public static let wideMacGutterBreakpoint: CGFloat = 1_512
 
-    /// The maximum width for a standard page frame. Keeping this in the
-    /// shared metrics makes width decisions measurable without rendering a
+    /// The maximum width for a standard page frame (1040pt on desktop).
+    /// Keeping this in the shared metrics makes width decisions measurable
+    /// without rendering a
     /// SwiftUI view.
     public static var standardPageMaxWidth: CGFloat { LifeOSTokens.contentMaxWidth }
 

@@ -12,30 +12,29 @@ import UIKit
 /// place prevents a light/dark token from drifting away from the palette.
 enum LifeOSPalette {
     static let brandBlueHex: UInt32 = 0x0253C4
-    static let observedBlueHex: UInt32 = 0x3085FD
+    // Focus and observed data intentionally share the readable blue-300 role.
+    static let observedBlueHex: UInt32 = 0x5DA0FD
     static let focusBlueHex: UInt32 = 0x5DA0FD
     static let primaryTextDarkHex: UInt32 = 0xF5F5F7
-    static let primaryTextLightHex: UInt32 = 0x111113
+    static let primaryTextLightHex: UInt32 = 0x18181B
     static let targetGreenHex: UInt32 = 0x60D386
     static let targetGreenLightHex: UInt32 = 0x01773B
     static let estimateGreenHex: UInt32 = targetGreenHex
     static let calorieOrangeHex: UInt32 = 0xFFB06E
     static let calorieOrangeLightHex: UInt32 = 0xA25A03
     static let proteinTealHex: UInt32 = 0x63D2D2
-    static let warningAmberHex: UInt32 = 0xFBDD68
-    static let warningAmberLightHex: UInt32 = 0x9E8405
-    // Amber remains the warning mark. Normal-size light warning text falls
-    // back to the documented primary-text role when the amber hue is not
-    // readable on a light surface.
-    static let warningTextLightHex: UInt32 = primaryTextLightHex
-    static let dangerRedHex: UInt32 = 0xFC584F
-    static let dangerRedLightHex: UInt32 = 0xB70112
+    // Warning shares the authored calorie orange semantic in both modes.
+    static let warningOrangeHex: UInt32 = 0xFFB06E
+    static let warningOrangeLightHex: UInt32 = 0xA25A03
+    static let warningTextLightHex: UInt32 = warningOrangeLightHex
+    static let dangerRedHex: UInt32 = 0xFF8585
+    static let dangerRedLightHex: UInt32 = 0xB42335
     static let infoTealHex: UInt32 = 0x63D2D2
     static let infoTealLightHex: UInt32 = 0x067878
-    static let metadataTextDarkHex: UInt32 = 0x84848C
-    static let metadataTextLightHex: UInt32 = 0x6D6D74
-    static let fitnessVioletDarkHex: UInt32 = 0x8D74FE
-    static let fitnessVioletLightHex: UInt32 = 0x4502A5
+    static let metadataTextDarkHex: UInt32 = 0xA1A1AA
+    static let metadataTextLightHex: UInt32 = 0x52525B
+    static let fitnessVioletDarkHex: UInt32 = 0xB59AFF
+    static let fitnessVioletLightHex: UInt32 = 0x7040B8
     static let taxPurpleDarkHex: UInt32 = 0xC853E2
     static let taxPurpleLightHex: UInt32 = 0x650177
     static let canvasDarkHex: UInt32 = 0x000000
@@ -46,6 +45,8 @@ enum LifeOSPalette {
     static let raisedLightHex: UInt32 = 0xF4F4F5
     static let borderDarkHex: UInt32 = 0x232329
     static let borderLightHex: UInt32 = 0xE4E4E7
+    static let essentialBorderDarkHex: UInt32 = 0x73737D
+    static let essentialBorderLightHex: UInt32 = 0x767680
     static let transparentWidgetBackingOpacity: Double = 0.60
     static let transparentWidgetSupportingHex: UInt32 = 0xE6E6E6
 }
@@ -188,22 +189,22 @@ enum LifeOSModuleColorPairs {
 /// lockstep with the adaptive Color roles below.
 enum LifeOSSemanticColorPairs {
     static let primaryAction = LifeOSColorPair(
-        darkForegroundHex: LifeOSPalette.canvasDarkHex,
-        darkBackgroundHex: LifeOSPalette.primaryTextDarkHex,
-        lightForegroundHex: LifeOSPalette.canvasLightHex,
-        lightBackgroundHex: LifeOSPalette.primaryTextLightHex
+        darkForegroundHex: 0xFFFFFF,
+        darkBackgroundHex: LifeOSPalette.brandBlueHex,
+        lightForegroundHex: 0xFFFFFF,
+        lightBackgroundHex: LifeOSPalette.brandBlueHex
     )
     static let primaryActionHover = LifeOSColorPair(
-        darkForegroundHex: LifeOSPalette.canvasDarkHex,
-        darkBackgroundHex: 0xD9D9DD,
-        lightForegroundHex: LifeOSPalette.canvasLightHex,
-        lightBackgroundHex: 0x303036
+        darkForegroundHex: 0xFFFFFF,
+        darkBackgroundHex: 0x0244A2,
+        lightForegroundHex: 0xFFFFFF,
+        lightBackgroundHex: 0x0244A2
     )
     static let primaryActionPressed = LifeOSColorPair(
-        darkForegroundHex: LifeOSPalette.canvasDarkHex,
-        darkBackgroundHex: 0xC2C2C7,
-        lightForegroundHex: LifeOSPalette.canvasLightHex,
-        lightBackgroundHex: 0x50505A
+        darkForegroundHex: 0xFFFFFF,
+        darkBackgroundHex: 0x013174,
+        lightForegroundHex: 0xFFFFFF,
+        lightBackgroundHex: 0x013174
     )
     static let selectedNavigation = LifeOSColorPair(
         darkForegroundHex: LifeOSSelectedNavigationPalette.darkForegroundHex,
@@ -217,10 +218,18 @@ enum LifeOSSemanticColorPairs {
         lightForegroundHex: LifeOSPalette.brandBlueHex,
         lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
-    static let neutralTarget = LifeOSColorPair(
-        darkForegroundHex: LifeOSPalette.targetGreenHex,
+    /// The edge of an unfilled control is evaluated against the surface it
+    /// sits on, rather than against the canvas or an assumed wallpaper.
+    static let essentialControlEdge = LifeOSColorPair(
+        darkForegroundHex: LifeOSPalette.essentialBorderDarkHex,
         darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
-        lightForegroundHex: LifeOSPalette.targetGreenLightHex,
+        lightForegroundHex: LifeOSPalette.essentialBorderLightHex,
+        lightBackgroundHex: LifeOSPalette.surfaceLightHex
+    )
+    static let neutralTarget = LifeOSColorPair(
+        darkForegroundHex: LifeOSPalette.metadataTextDarkHex,
+        darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
+        lightForegroundHex: LifeOSPalette.metadataTextLightHex,
         lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     static let target = neutralTarget
@@ -232,13 +241,13 @@ enum LifeOSSemanticColorPairs {
     )
     static let success = estimate
     static let warning = LifeOSColorPair(
-        darkForegroundHex: LifeOSPalette.warningAmberHex,
+        darkForegroundHex: LifeOSPalette.warningOrangeHex,
         darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
-        lightForegroundHex: LifeOSPalette.warningAmberLightHex,
+        lightForegroundHex: LifeOSPalette.warningOrangeLightHex,
         lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     static let warningText = LifeOSColorPair(
-        darkForegroundHex: LifeOSPalette.warningAmberHex,
+        darkForegroundHex: LifeOSPalette.warningOrangeHex,
         darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
         lightForegroundHex: LifeOSPalette.warningTextLightHex,
         lightBackgroundHex: LifeOSPalette.surfaceLightHex
@@ -419,12 +428,15 @@ public extension Color {
     static let lifeOSTeal700 = Color(hex: 0x067878)
 
     // MARK: Module identity
-    // Calendar identity accent. The light-mode value uses the deeper ramp so
-    // small labels and icons remain readable on a light surface; the dark
-    // value keeps the vivid red visible without turning the whole surface red.
+    // Calendar identity reuses the reviewed error red ramp so the shared
+    // semantic palette cannot drift between calendar and finance surfaces.
     static let lifeOSCalendarRed = lifeOSAdaptiveColor(
-        darkRed: 0xFC/255, darkGreen: 0x58/255, darkBlue: 0x4F/255,
-        lightRed: 0xB7/255, lightGreen: 0x01/255, lightBlue: 0x12/255
+        darkRed: Double((LifeOSPalette.dangerRedHex >> 16) & 0xFF) / 255,
+        darkGreen: Double((LifeOSPalette.dangerRedHex >> 8) & 0xFF) / 255,
+        darkBlue: Double(LifeOSPalette.dangerRedHex & 0xFF) / 255,
+        lightRed: Double((LifeOSPalette.dangerRedLightHex >> 16) & 0xFF) / 255,
+        lightGreen: Double((LifeOSPalette.dangerRedLightHex >> 8) & 0xFF) / 255,
+        lightBlue: Double(LifeOSPalette.dangerRedLightHex & 0xFF) / 255
     )
 
     // Brand canvases
@@ -441,14 +453,22 @@ public extension Color {
     static let lifeOSDarkFloatingOverlay = lifeOSDarkRaised
     static let lifeOSLightFloatingOverlay = lifeOSLightRaised
 
+    /// Neutral darkening reserved for secondary-control feedback. It keeps
+    /// the essential edge readable on raised dark surfaces without borrowing
+    /// the light-on-dark primary-text selection treatment.
+    static let lifeOSSecondaryInteractionFill = lifeOSAdaptiveHex(
+        dark: LifeOSPalette.canvasDarkHex,
+        light: LifeOSPalette.primaryTextLightHex
+    )
+
     static let lifeOSPrimaryText = lifeOSAdaptiveColor(
         darkRed: 0xF5/255, darkGreen: 0xF5/255, darkBlue: 0xF7/255,
-        lightRed: 0x11/255, lightGreen: 0x11/255, lightBlue: 0x13/255
+        lightRed: 0x18/255, lightGreen: 0x18/255, lightBlue: 0x1B/255
     )
 
     static let lifeOSSecondaryText = lifeOSAdaptiveColor(
-        darkRed: 0xAD/255, darkGreen: 0xAD/255, darkBlue: 0xB4/255,
-        lightRed: 0x5C/255, lightGreen: 0x5C/255, lightBlue: 0x63/255
+        darkRed: 0xA1/255, darkGreen: 0xA1/255, darkBlue: 0xAA/255,
+        lightRed: 0x52/255, lightGreen: 0x52/255, lightBlue: 0x5B/255
     )
 
     /// Adaptive metadata/tertiary text for normal-size supporting copy. These
@@ -465,8 +485,8 @@ public extension Color {
 
     /// Disabled text only.
     static let lifeOSQuaternaryText = lifeOSAdaptiveColor(
-        darkRed: 0x52/255, darkGreen: 0x52/255, darkBlue: 0x5B/255,
-        lightRed: 0xA1/255, lightGreen: 0xA1/255, lightBlue: 0xAA/255
+        darkRed: 0xA1/255, darkGreen: 0xA1/255, darkBlue: 0xAA/255,
+        lightRed: 0x52/255, lightGreen: 0x52/255, lightBlue: 0x5B/255
     )
 
     /// THE structural border (#232329 / #E4E4E7), solid, drawn at one hairline.
@@ -485,14 +505,14 @@ public extension Color {
         lightRed: 0xD4/255, lightGreen: 0xD4/255, lightBlue: 0xD8/255
     )
 
-    /// Observed chart blue: #3085FD in dark mode and #0253C4 in light mode.
+    /// Observed chart blue: #5DA0FD in dark mode and #0253C4 in light mode.
     static let lifeOSObservedBlue = lifeOSAdaptiveHex(
         dark: LifeOSPalette.observedBlueHex,
         light: LifeOSPalette.brandBlueHex
     )
 
-    /// Focus uses the lighter blue 300 dark-mode pair while observed data uses
-    /// blue 400; both resolve to the deeper brand blue in light mode.
+    /// Focus and observed data share the readable blue-300 dark-mode pair;
+    /// both resolve to the deeper brand blue in light mode.
     static let lifeOSFocusBlue = lifeOSAdaptiveHex(
         dark: LifeOSPalette.focusBlueHex,
         light: LifeOSPalette.brandBlueHex
@@ -543,7 +563,10 @@ public extension Color {
         dark: LifeOSSemanticColorPairs.protein.darkForegroundHex,
         light: LifeOSSemanticColorPairs.protein.lightForegroundHex
     )
-    static let lifeOSEssentialBorder = lifeOSAdaptiveHex(dark: 0x73737D, light: 0x767680)
+    static let lifeOSEssentialBorder = lifeOSAdaptiveHex(
+        dark: LifeOSPalette.essentialBorderDarkHex,
+        light: LifeOSPalette.essentialBorderLightHex
+    )
     static let lifeOSDisabledFill = lifeOSAdaptiveHex(
         dark: LifeOSSemanticColorPairs.disabled.darkBackgroundHex,
         light: LifeOSSemanticColorPairs.disabled.lightBackgroundHex
@@ -637,8 +660,8 @@ public extension Color {
     )
     /// Text-safe semantic green. Indicators may keep the more vivid `success`.
     static let lifeOSSuccessText = lifeOSSuccess
-    /// Amber indicator role and a darker light-mode text role both come from
-    /// the same authored sibling ramp.
+    /// Warning indicators and normal-size warning labels share one authored
+    /// orange pair in both appearances.
     static let lifeOSWarning = lifeOSAdaptiveHex(
         dark: LifeOSSemanticColorPairs.warning.darkForegroundHex,
         light: LifeOSSemanticColorPairs.warning.lightForegroundHex
@@ -682,7 +705,7 @@ public enum LifeOSTokens {
 
     /// Allowed corner radii. Capsules are used for status/selectors.
     public enum Radius {
-        public static let control: CGFloat = 8
+        public static let control: CGFloat = 10
         public static let card: CGFloat = 12
         public static let hero: CGFloat = 16
         public static let tooltip: CGFloat = 8
@@ -720,8 +743,8 @@ public enum LifeOSTokens {
 
     /// Standard page-frame content width. Viewport surfaces such as Calendar
     /// intentionally bypass the shared content container when they need the
-    /// full available canvas.
-    public static let contentMaxWidth: CGFloat = 1120
+    /// full available canvas. The current readable page cap is 1040pt.
+    public static let contentMaxWidth: CGFloat = 1040
     public static let chartMaxWidth: CGFloat = 1440
 
     // MARK: Named layout relationships and compatibility aliases
@@ -752,6 +775,8 @@ public enum LifeOSTokens {
     public static let surface = Color.lifeOSNeutralSurface
     public static let raised = Color.lifeOSNeutralRaised
     public static let floatingOverlay = Color.lifeOSNeutralFloatingOverlay
+    /// Neutral darkening used only for secondary-control interaction fill.
+    public static let secondaryInteractionFill = Color.lifeOSSecondaryInteractionFill
 
     public static let darkCanvas = Color.lifeOSDarkCanvas
     public static let lightCanvas = Color.lifeOSLightCanvas
@@ -1015,29 +1040,28 @@ public enum LifeOSMotion {
 
     public enum Timing {
         public static let press = Curve.easeOut(0.08)
-        public static let release = Curve.easeOut(0.18)
+        public static let release = Curve.easeOut(0.14)
         public static let hover = Curve.easeOut(0.12)
         public static let feedback = Curve.easeOut(0.10)
-        public static let reducedNavigation = Curve.easeOut(0.12)
-        public static let primary = Curve.spring(response: 0.42, damping: 0.82)
-        public static let snappy = Curve.spring(response: 0.30, damping: 0.86)
-        public static let hero = Curve.spring(response: 0.50, damping: 0.85)
+        public static let reducedNavigation = Curve.easeOut(0.10)
+        public static let primary = Curve.easeOut(0.18)
+        /// Selector/reorder motion follows the authored 0.24s/0.90 spring;
+        /// the damping keeps it bounded without a visible bounce.
+        public static let snappy = Curve.spring(response: 0.24, damping: 0.90)
+        /// Compatibility name for route owners; its presentation is a short
+        /// ease-out so the shared foundation never launches a card flight.
+        public static let hero = Curve.easeOut(0.18)
         /// Direct manipulation has no interpolation. The compatibility name
         /// remains so existing callers cannot accidentally add spring lag.
         public static let tracking = Curve.direct
-        /// The calendar contract is expressed in the original physical
-        /// parameters so it cannot drift through a response/damping alias.
-        public static let calendarSettle = Curve.interpolatingSpring(
-            mass: 1,
-            stiffness: 340,
-            damping: 37,
-            initialVelocity: 0
-        )
+        /// Calendar pager settling follows the authored response/damping
+        /// boundary without overshoot.
+        public static let calendarSettle = Curve.spring(response: 0.28, damping: 0.92)
         public static let tooltip = Curve.easeOut(0.08)
         public static let sheet = Curve.easeOut(0.18)
         public static let refresh = Curve.easeOut(0.10)
         public static let chart = Curve.easeOut(0.72)
-        public static let ring = Curve.spring(response: 0.70, damping: 0.90)
+        public static let ring = Curve.easeOut(0.18)
     }
 
     /// Feedback is opacity/fill only under Reduce Motion; geometry stays direct.
@@ -1118,14 +1142,15 @@ public enum LifeOSMotion {
     public static let springSnappy = snappy
 
     /// Smooth ease for opacity and offset transitions.
-    public static let ease = Animation.easeInOut(duration: 0.24)
+    public static let ease = Timing.hover.animation
 
     /// Top-level tab changes use a short cross-fade; the tab bar itself remains
     /// mounted so navigation never produces duplicate or jumping chrome.
-    public static let tabCrossfade = Animation.easeInOut(duration: 0.16)
+    public static let tabCrossfade = Animation.easeInOut(duration: 0.12)
 
-    /// Slightly longer ease for push/navigation.
-    public static let easeNavigate = Animation.easeInOut(duration: 0.34)
+    /// Short detail transition; route owners keep the shell mounted and own
+    /// any directional offset separately.
+    public static let easeNavigate = Timing.hero.animation
 
     /// Alias of `chartDraw`. Was: `.easeOut(duration: 0.62)`.
     public static let chartReveal = chartDraw
@@ -1169,8 +1194,8 @@ extension View {
 
 /// The four sanctioned button variants.
 ///
-/// Primary   — primary-text fill with a canvas-colored label in both appearances.
-/// Secondary — raised neutral fill with a 1pt hairline border, primaryText label.
+/// Primary   — branded blue fill with a white label in both appearances.
+/// Secondary — clear fill with a 1pt essential border, primaryText label.
 /// Destructive — clear fill, no border, danger label.
 ///
 /// Pressed state keeps the semantic role and changes luminance only.
@@ -1226,8 +1251,12 @@ private struct LifeOSButtonBody: View {
                     style: .continuous
                 )
                 shape.fill(fillColor(pressed: pressed, highlighted: isEnabled && hovered))
-                if isEnabled && variant != .primary && appearance.fillOpacity > 0 {
-                    shape.fill(LifeOSTokens.primaryText.opacity(appearance.fillOpacity))
+                if isEnabled && appearance.fillOpacity > 0 {
+                    if variant == .secondary {
+                        shape.fill(LifeOSTokens.secondaryInteractionFill.opacity(appearance.fillOpacity))
+                    } else if variant != .primary {
+                        shape.fill(LifeOSTokens.primaryText.opacity(appearance.fillOpacity))
+                    }
                 }
             }
             .overlay {
@@ -1267,7 +1296,7 @@ private struct LifeOSButtonBody: View {
             if highlighted { return LifeOSTokens.primaryActionHover }
             return LifeOSTokens.primaryActionFill
         case .secondary:
-            return LifeOSTokens.raised
+            return .clear
         case .tertiary:
             return .clear
         case .destructive:

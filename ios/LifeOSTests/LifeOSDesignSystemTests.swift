@@ -132,34 +132,34 @@ final class LifeOSDesignSystemTests: XCTestCase {
 
     func testCanonicalPaletteValuesStayDistinctAndSourcedFromOneContract() {
         XCTAssertEqual(LifeOSPalette.brandBlueHex, 0x0253C4)
-        XCTAssertEqual(LifeOSPalette.observedBlueHex, 0x3085FD)
+        XCTAssertEqual(LifeOSPalette.observedBlueHex, 0x5DA0FD)
         XCTAssertEqual(LifeOSPalette.focusBlueHex, 0x5DA0FD)
         XCTAssertEqual(LifeOSPalette.estimateGreenHex, 0x60D386)
         XCTAssertEqual(LifeOSPalette.calorieOrangeHex, 0xFFB06E)
         XCTAssertEqual(LifeOSPalette.calorieOrangeLightHex, 0xA25A03)
         XCTAssertEqual(LifeOSPalette.proteinTealHex, 0x63D2D2)
-        XCTAssertEqual(LifeOSPalette.warningAmberHex, 0xFBDD68)
-        XCTAssertEqual(LifeOSPalette.warningAmberLightHex, 0x9E8405)
-        XCTAssertEqual(LifeOSPalette.warningTextLightHex, LifeOSPalette.primaryTextLightHex)
-        XCTAssertEqual(LifeOSPalette.fitnessVioletDarkHex, 0x8D74FE)
-        XCTAssertEqual(LifeOSPalette.fitnessVioletLightHex, 0x4502A5)
+        XCTAssertEqual(LifeOSPalette.warningOrangeHex, 0xFFB06E)
+        XCTAssertEqual(LifeOSPalette.warningOrangeLightHex, 0xA25A03)
+        XCTAssertEqual(LifeOSPalette.warningTextLightHex, LifeOSPalette.warningOrangeLightHex)
+        XCTAssertEqual(LifeOSPalette.fitnessVioletDarkHex, 0xB59AFF)
+        XCTAssertEqual(LifeOSPalette.fitnessVioletLightHex, 0x7040B8)
         XCTAssertEqual(LifeOSPalette.taxPurpleDarkHex, 0xC853E2)
         XCTAssertEqual(LifeOSPalette.taxPurpleLightHex, 0x650177)
         XCTAssertEqual(LifeOSPalette.canvasDarkHex, 0x000000)
-        XCTAssertEqual(LifeOSPalette.canvasLightHex, 0xF7F7F8)
-        XCTAssertEqual(LifeOSPalette.surfaceDarkHex, 0x08080A)
+        XCTAssertEqual(LifeOSPalette.canvasLightHex, 0xFAFAFA)
+        XCTAssertEqual(LifeOSPalette.surfaceDarkHex, 0x131315)
         XCTAssertEqual(LifeOSPalette.surfaceLightHex, 0xFFFFFF)
-        XCTAssertEqual(LifeOSPalette.borderDarkHex, 0x29292F)
-        XCTAssertEqual(LifeOSPalette.borderLightHex, 0xD0D0D6)
+        XCTAssertEqual(LifeOSPalette.borderDarkHex, 0x232329)
+        XCTAssertEqual(LifeOSPalette.borderLightHex, 0xE4E4E7)
         XCTAssertEqual(LifeOSPalette.transparentWidgetSupportingHex, 0xE6E6E6)
 
         XCTAssertEqual(
             LifeOSSemanticColorPairs.primaryAction.darkBackgroundHex,
-            LifeOSPalette.primaryTextDarkHex
+            LifeOSPalette.brandBlueHex
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.primaryAction.darkForegroundHex,
-            LifeOSPalette.canvasDarkHex
+            0xFFFFFF
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.focus.darkForegroundHex,
@@ -171,7 +171,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.target.darkForegroundHex,
-            LifeOSPalette.targetGreenHex
+            LifeOSPalette.metadataTextDarkHex
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.calories.darkForegroundHex,
@@ -210,13 +210,13 @@ final class LifeOSDesignSystemTests: XCTestCase {
 #endif
         let contracts: [(LifeOSTypography.Role, CGFloat, Font.TextStyle, Font.Weight, CGFloat, CGFloat, Bool)] = [
             (.pageTitle, pageTitleSize, .title, .semibold, -0.3, 0, false),
-            (.sectionTitle, sectionTitleSize, .title2, .semibold, -0.2, 0, false),
+            (.sectionTitle, sectionTitleSize, .title2, .semibold, 0, 0, false),
             (.cardTitle, cardTitleSize, .headline, .semibold, 0, 0, false),
             (.body, bodySize, .body, .regular, 0, 0, false),
             (.label, labelSize, .subheadline, .medium, 0, 0, false),
             (.metadata, metadataSize, .footnote, .regular, 0, 0, false),
-            (.metric, metricSize, .largeTitle, .semibold, -0.4, 0, true),
-            (.metricCompact, metricCompactSize, .title2, .semibold, -0.3, 0, true),
+            (.metric, metricSize, .largeTitle, .semibold, 0, 0, true),
+            (.metricCompact, metricCompactSize, .title2, .semibold, 0, 0, true),
             (.inlineMonitoringValue, inlineMonitoringValueSize, .title2, .semibold, 0, 0, true),
             (.button, buttonSize, .headline, .semibold, 0, 0, false),
         ]
@@ -294,6 +294,177 @@ final class LifeOSDesignSystemTests: XCTestCase {
         }
     }
 
+    func testSharedFoundationTypographyUsesOnlyNativeSystemFonts() throws {
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sharedFiles = [
+            "Shared/DesignTokens.swift",
+            "Shared/Typography.swift",
+            "Shared/LifeOSIcon.swift",
+            "Shared/LifeOSMotionKit.swift",
+            "Shared/LifeOSComponents.swift",
+            "Shared/LifeOSResponsiveContainer.swift",
+            "Shared/LifeOSInteractionKit.swift",
+            "Shared/LifeOSChartKit.swift",
+        ]
+        let forbiddenFontMarkers = [
+            ".font(.custom(",
+            "Font.custom(",
+            "design: .rounded",
+            "Manrope",
+            "Space Grotesk",
+        ]
+
+        for relativePath in sharedFiles {
+            let source = try String(
+                contentsOf: iosRoot.appendingPathComponent(relativePath),
+                encoding: .utf8
+            )
+            for marker in forbiddenFontMarkers {
+                XCTAssertFalse(source.contains(marker), "\(marker) remains in \(relativePath)")
+            }
+        }
+
+        let typography = try String(
+            contentsOf: iosRoot.appendingPathComponent("Shared/Typography.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(typography.contains(".font(.system(size: scaledSize, weight: weight, design: .default))"))
+        XCTAssertTrue(typography.contains(".monospacedDigit()"))
+    }
+
+    func testSharedCardAndStatusRecipesKeepFlatRestingSurfaces() throws {
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let components = try String(
+            contentsOf: iosRoot.appendingPathComponent("Shared/LifeOSComponents.swift"),
+            encoding: .utf8
+        )
+        let cardStart = try XCTUnwrap(components.range(of: "public struct LifeOSCard"))
+        let cardEnd = try XCTUnwrap(components.range(of: "// MARK: - Icon button"))
+        let card = String(components[cardStart.lowerBound..<cardEnd.lowerBound])
+        XCTAssertTrue(card.contains(".background(level.fill, in: shape)"))
+        XCTAssertTrue(card.contains(".overlay(shape.stroke(LifeOSTokens.hairlineBorder"))
+        XCTAssertTrue(card.contains("if level.usesShadow"))
+        XCTAssertEqual(card.components(separatedBy: ".shadow(").count - 1, 1)
+        XCTAssertFalse(card.contains("LinearGradient("))
+        XCTAssertFalse(card.contains("ultraThinMaterial"))
+
+        let pillStart = try XCTUnwrap(components.range(of: "public struct LifeOSStatusPill"))
+        let pillEnd = try XCTUnwrap(components.range(of: "public struct LifeOSMetadataItem"))
+        let pill = String(components[pillStart.lowerBound..<pillEnd.lowerBound])
+        XCTAssertTrue(pill.contains(".frame(width: 6, height: 6)"))
+        XCTAssertTrue(pill.contains(".lifeOSTypography(.metadata)"))
+        XCTAssertFalse(pill.contains(".tracking("))
+        XCTAssertFalse(pill.contains(".textCase(.uppercase)"))
+        XCTAssertFalse(pill.contains(".background("))
+        XCTAssertFalse(pill.contains(".stroke("))
+
+        let tokens = try String(
+            contentsOf: iosRoot.appendingPathComponent("Shared/DesignTokens.swift"),
+            encoding: .utf8
+        )
+        let buttonStart = try XCTUnwrap(tokens.range(of: "private struct LifeOSButtonBody"))
+        let buttonEnd = try XCTUnwrap(
+            tokens.range(
+                of: "    private var labelColor",
+                range: buttonStart.upperBound..<tokens.endIndex
+            )
+        )
+        let button = String(tokens[buttonStart.lowerBound..<buttonEnd.lowerBound])
+        XCTAssertTrue(button.contains(".stroke(LifeOSTokens.essentialBorder, lineWidth: 1)"))
+        XCTAssertFalse(button.contains(".stroke(LifeOSTokens.hairlineBorder, lineWidth: 1)"))
+        XCTAssertTrue(button.contains("case .secondary:\n            return .clear"))
+        XCTAssertFalse(button.contains("LifeOSTokens.strongBorder"))
+        XCTAssertTrue(LifeOSSemanticColorPairs.essentialControlEdge.meetsGraphicContrast)
+
+        let interactionStart = try XCTUnwrap(
+            button.range(of: "if isEnabled && appearance.fillOpacity > 0")
+        )
+        let interactionEnd = try XCTUnwrap(
+            button.range(
+                of: "            .overlay {",
+                range: interactionStart.upperBound..<button.endIndex
+            )
+        )
+        let interaction = String(button[interactionStart.lowerBound..<interactionEnd.lowerBound])
+        XCTAssertTrue(interaction.contains("if variant == .secondary"))
+        XCTAssertTrue(
+            interaction.contains(
+                "LifeOSTokens.secondaryInteractionFill.opacity(appearance.fillOpacity)"
+            )
+        )
+        XCTAssertTrue(interaction.contains("else if variant != .primary"))
+        XCTAssertTrue(
+            interaction.contains(
+                "LifeOSTokens.primaryText.opacity(appearance.fillOpacity)"
+            )
+        )
+
+        let surfaces: [(name: String, background: UInt32, border: UInt32, overlay: UInt32)] = [
+            (
+                "dark canvas",
+                LifeOSPalette.canvasDarkHex,
+                LifeOSPalette.essentialBorderDarkHex,
+                LifeOSPalette.canvasDarkHex
+            ),
+            (
+                "dark surface",
+                LifeOSPalette.surfaceDarkHex,
+                LifeOSPalette.essentialBorderDarkHex,
+                LifeOSPalette.canvasDarkHex
+            ),
+            (
+                "dark raised",
+                LifeOSPalette.raisedDarkHex,
+                LifeOSPalette.essentialBorderDarkHex,
+                LifeOSPalette.canvasDarkHex
+            ),
+            (
+                "light canvas",
+                LifeOSPalette.canvasLightHex,
+                LifeOSPalette.essentialBorderLightHex,
+                LifeOSPalette.primaryTextLightHex
+            ),
+            (
+                "light surface",
+                LifeOSPalette.surfaceLightHex,
+                LifeOSPalette.essentialBorderLightHex,
+                LifeOSPalette.primaryTextLightHex
+            ),
+            (
+                "light raised",
+                LifeOSPalette.raisedLightHex,
+                LifeOSPalette.essentialBorderLightHex,
+                LifeOSPalette.primaryTextLightHex
+            ),
+        ]
+        let interactionStates: [(name: String, opacity: Double)] = [
+            ("hover", LifeOSInteractionAppearance.hoverFillOpacity),
+            ("pressed", LifeOSInteractionAppearance.pressedFillOpacity),
+        ]
+        for surface in surfaces {
+            for state in interactionStates {
+                let composedBackground = Self.composite(
+                    surface.overlay,
+                    over: surface.background,
+                    opacity: state.opacity
+                )
+                let contrast = LifeOSContrast.contrastRatio(
+                    foreground: surface.border,
+                    background: composedBackground
+                )
+                XCTAssertGreaterThanOrEqual(
+                    contrast,
+                    3,
+                    "\(surface.name) \(state.name) secondary edge contrast was \(contrast)"
+                )
+            }
+        }
+    }
+
     func testSelectedNavigationColorsMatchBothAppearancePairs() {
         XCTAssertEqual(LifeOSSelectedNavigationPalette.overlayOpacity, 0.06, accuracy: 0.0001)
         XCTAssertEqual(
@@ -340,7 +511,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
             ],
             [4, 8, 12, 16, 24, 24, 32, 48, 64]
         )
-        XCTAssertEqual([LifeOSTokens.Radius.control, LifeOSTokens.Radius.card, LifeOSTokens.Radius.hero], [8, 12, 16])
+        XCTAssertEqual([LifeOSTokens.Radius.control, LifeOSTokens.Radius.card, LifeOSTokens.Radius.hero], [10, 12, 16])
         XCTAssertEqual(LifeOSTokens.Control.minimumTarget, 44)
         XCTAssertEqual(LifeOSTokens.pagePadding, 16)
         XCTAssertEqual(LifeOSTokens.sectionGap, LifeOSTokens.Space.xl)
@@ -361,8 +532,8 @@ final class LifeOSDesignSystemTests: XCTestCase {
 
         // The border aliases share the authored neutral contract. Avoid
         // comparing independently constructed adaptive Color providers.
-        XCTAssertEqual(LifeOSPalette.borderDarkHex, 0x29292F)
-        XCTAssertEqual(LifeOSPalette.borderLightHex, 0xD0D0D6)
+        XCTAssertEqual(LifeOSPalette.borderDarkHex, 0x232329)
+        XCTAssertEqual(LifeOSPalette.borderLightHex, 0xE4E4E7)
 
         // Information is a teal semantic distinct from blue focus/data roles.
         XCTAssertNotEqual(
@@ -371,9 +542,9 @@ final class LifeOSDesignSystemTests: XCTestCase {
         )
 
         // Chart series semantics per §2.4.
-        // Target and estimate share the green semantic, while their line
-        // patterns and labels remain distinct in the chart renderer.
-        XCTAssertEqual(
+        // Estimate carries the green semantic; target stays neutral and is
+        // separated further by its dotted line and explicit label.
+        XCTAssertNotEqual(
             LifeOSSemanticColorPairs.estimate,
             LifeOSSemanticColorPairs.target
         )
@@ -382,8 +553,8 @@ final class LifeOSDesignSystemTests: XCTestCase {
             LifeOSSemanticColorPairs.warning.darkForegroundHex
         )
         XCTAssertEqual(LifeOSSemanticColorPairs.target, LifeOSSemanticColorPairs.neutralTarget)
-        XCTAssertEqual(LifeOSPalette.metadataTextDarkHex, 0x84848C)
-        XCTAssertEqual(LifeOSPalette.metadataTextLightHex, 0x6D6D74)
+        XCTAssertEqual(LifeOSPalette.metadataTextDarkHex, 0xA1A1AA)
+        XCTAssertEqual(LifeOSPalette.metadataTextLightHex, 0x52525B)
     }
 
     func testSemanticColorPairsMeetContrastAndPreserveDistinctRoles() {
@@ -408,7 +579,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
 
         XCTAssertTrue(LifeOSSemanticColorPairs.warning.meetsGraphicContrast)
 
-        XCTAssertEqual(
+        XCTAssertNotEqual(
             LifeOSSemanticColorPairs.neutralTarget.darkForegroundHex,
             LifeOSSemanticColorPairs.estimate.darkForegroundHex
         )
@@ -418,23 +589,23 @@ final class LifeOSDesignSystemTests: XCTestCase {
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.primaryAction.darkForegroundHex,
-            LifeOSPalette.canvasDarkHex
+            0xFFFFFF
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.primaryAction.lightForegroundHex,
-            LifeOSPalette.canvasLightHex
+            0xFFFFFF
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.primaryAction.lightBackgroundHex,
-            LifeOSPalette.primaryTextLightHex
+            LifeOSPalette.brandBlueHex
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.primaryActionHover.darkBackgroundHex,
-            0xD9D9DD
+            0x0244A2
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.primaryActionPressed.lightBackgroundHex,
-            0x50505A
+            0x013174
         )
         XCTAssertGreaterThanOrEqual(
             LifeOSSemanticColorPairs.warningText.lightContrastRatio,
@@ -442,11 +613,11 @@ final class LifeOSDesignSystemTests: XCTestCase {
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.warning.lightForegroundHex,
-            LifeOSPalette.warningAmberLightHex
+            LifeOSPalette.warningOrangeLightHex
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.warningText.lightForegroundHex,
-            LifeOSPalette.primaryTextLightHex
+            LifeOSPalette.warningTextLightHex
         )
         XCTAssertEqual(
             LifeOSModuleColorPairs.fitness.darkForegroundHex,
@@ -499,7 +670,9 @@ final class LifeOSDesignSystemTests: XCTestCase {
     }
 
     func testIconCatalogUsesContractMappingsAndMonochromeRendering() throws {
-        XCTAssertEqual(LifeOSIconName.home.systemImageName, "house")
+        XCTAssertEqual(LifeOSIconName.home.systemImageName, "square.grid.2x2")
+        XCTAssertEqual(LifeOSIconName.usage.systemImageName, "chart.xyaxis.line")
+        XCTAssertEqual(LifeOSIconName.clipper.systemImageName, "rectangle.stack")
         XCTAssertEqual(LifeOSIconName.finance.systemImageName, "creditcard")
         XCTAssertEqual(LifeOSIconName.fitness.systemImageName, "waveform.path.ecg")
         XCTAssertEqual(LifeOSIconName.reports.systemImageName, "chart.bar.doc")
@@ -514,17 +687,17 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSIconContext.navigation.box, 20)
         XCTAssertEqual(LifeOSIconContext.card.box, 20)
         XCTAssertEqual(LifeOSIconContext.toolbar.box, 20)
-        XCTAssertEqual(LifeOSIconContext.navigation.glyph, 16)
-        XCTAssertEqual(LifeOSIconContext.card.glyph, 16)
-        XCTAssertEqual(LifeOSIconContext.toolbar.glyph, 16)
+        XCTAssertEqual(LifeOSIconContext.navigation.glyph, 15)
+        XCTAssertEqual(LifeOSIconContext.card.glyph, 14)
+        XCTAssertEqual(LifeOSIconContext.toolbar.glyph, 14)
         XCTAssertEqual(LifeOSIconContext.disclosure.box, 16)
 #else
         XCTAssertEqual(LifeOSIconContext.navigation.box, 24)
         XCTAssertEqual(LifeOSIconContext.card.box, 24)
         XCTAssertEqual(LifeOSIconContext.toolbar.box, 24)
-        XCTAssertEqual(LifeOSIconContext.navigation.glyph, 20)
-        XCTAssertEqual(LifeOSIconContext.card.glyph, 18)
-        XCTAssertEqual(LifeOSIconContext.toolbar.glyph, 20)
+        XCTAssertEqual(LifeOSIconContext.navigation.glyph, 18)
+        XCTAssertEqual(LifeOSIconContext.card.glyph, 17)
+        XCTAssertEqual(LifeOSIconContext.toolbar.glyph, 17)
         XCTAssertEqual(LifeOSIconContext.disclosure.box, 20)
 #endif
 #if os(macOS)
@@ -608,14 +781,14 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(wideWindow.horizontalGutter, 16)
 #endif
         XCTAssertEqual(wideWindow.sectionSpacing, 24)
-        XCTAssertEqual(wideWindow.maxContentWidth, 1_120)
+        XCTAssertEqual(wideWindow.maxContentWidth, 1_040)
         XCTAssertEqual(wideWindow.maxChartWidth, 1_440)
     }
 
     func testResponsiveMetricsClampStandardPageWidthAtEveryWidthClass() {
         XCTAssertEqual(LifeOSResponsiveMetrics.compactBreakpoint, 600)
         XCTAssertEqual(LifeOSResponsiveMetrics.twoColumnBreakpoint, 720)
-        XCTAssertEqual(LifeOSTokens.contentMaxWidth, 1_120)
+        XCTAssertEqual(LifeOSTokens.contentMaxWidth, 1_040)
         XCTAssertEqual(
             LifeOSResponsiveMetrics(width: 320).maxContentWidth,
             320 - (LifeOSTokens.pageGutter * 2)
@@ -630,23 +803,23 @@ final class LifeOSDesignSystemTests: XCTestCase {
         )
         XCTAssertEqual(
             LifeOSResponsiveMetrics(width: 1_119).maxContentWidth,
-            1_119 - (LifeOSTokens.pageGutter * 2)
+            1_040
         )
         XCTAssertEqual(
             LifeOSResponsiveMetrics(width: 1_120).maxContentWidth,
-            1_120 - (LifeOSTokens.pageGutter * 2)
+            1_040
         )
-        XCTAssertEqual(LifeOSResponsiveMetrics(width: 1_600).maxContentWidth, 1_120)
+        XCTAssertEqual(LifeOSResponsiveMetrics(width: 1_600).maxContentWidth, 1_040)
         XCTAssertEqual(LifeOSResponsiveMetrics(width: -.infinity).maxContentWidth, 0)
         XCTAssertEqual(
             LifeOSResponsiveMetrics(width: .infinity).maxContentWidth,
-            1_120
+            1_040
         )
         XCTAssertEqual(LifeOSResponsiveMetrics(width: .nan).maxContentWidth, 0)
 
         let withSidebar = LifeOSResponsiveMetrics(width: 1_600, sidebarWidth: 232)
         XCTAssertEqual(withSidebar.availableWidth, 1_368)
-        XCTAssertEqual(withSidebar.maxContentWidth, 1_120)
+        XCTAssertEqual(withSidebar.maxContentWidth, 1_040)
         XCTAssertTrue(withSidebar.fitsWithinViewport)
         XCTAssertLessThanOrEqual(withSidebar.renderedContentMaxX, withSidebar.width)
 
@@ -1078,6 +1251,91 @@ final class LifeOSDesignSystemTests: XCTestCase {
         )
     }
 
+    func testChartMotionUsesFinalGeometryAndScopedPrimitivesStayQuiet() throws {
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let motion = try String(
+            contentsOf: iosRoot.appendingPathComponent("Shared/LifeOSMotionKit.swift"),
+            encoding: .utf8
+        )
+
+        for hasPresented in [false, true] {
+            for interacting in [false, true] {
+                for reduceMotion in [false, true] {
+                    XCTAssertFalse(
+                        LifeOSChartMotionPolicy.shouldReveal(
+                            hasPresented: hasPresented,
+                            interacting: interacting,
+                            reduceMotion: reduceMotion
+                        ),
+                        "Chart geometry must be settled for every presentation state."
+                    )
+                }
+            }
+        }
+        XCTAssertEqual(LifeOSChartMotionPolicy.progress(-1), 0)
+        XCTAssertEqual(LifeOSChartMotionPolicy.progress(0.5), 0.5)
+        XCTAssertEqual(LifeOSChartMotionPolicy.progress(2), 1)
+        XCTAssertEqual(LifeOSChartMotionPolicy.progress(.nan), 1)
+        XCTAssertEqual(LifeOSChartMotionPolicy.progress(.infinity), 1)
+
+        let chartRevealStart = try XCTUnwrap(motion.range(of: "public struct LifeOSChartDrawReveal"))
+        let chartRevealEnd = try XCTUnwrap(
+            motion.range(
+                of: "extension EnvironmentValues",
+                range: chartRevealStart.upperBound..<motion.endIndex
+            )
+        )
+        let chartReveal = String(motion[chartRevealStart.lowerBound..<chartRevealEnd.lowerBound])
+        XCTAssertTrue(chartReveal.contains(".mask(alignment: .leading)"))
+        XCTAssertTrue(chartReveal.contains("LifeOSChartMotionPolicy.progress(drawn)"))
+        for marker in [".scaleEffect(", ".offset(", ".shadow(", ".blur("] {
+            XCTAssertFalse(chartReveal.contains(marker), "Chart reveal primitive contains \(marker)")
+        }
+
+        let ownerStart = try XCTUnwrap(motion.range(of: "public struct LifeOSChartRevealOwner"))
+        let ringStart = try XCTUnwrap(motion.range(of: "public struct GlowRing"))
+        let owner = String(motion[ownerStart.lowerBound..<ringStart.lowerBound])
+        XCTAssertTrue(owner.contains("@State private var progress: CGFloat = 1"))
+        XCTAssertFalse(owner.contains("withAnimation("))
+
+        let ringEnd = try XCTUnwrap(motion.range(of: "// MARK: - B. Spring Pill Selector"))
+        let ring = String(motion[ringStart.lowerBound..<ringEnd.lowerBound])
+        XCTAssertTrue(ring.contains(".trim(from: 0, to: clampedTarget)"))
+        XCTAssertFalse(ring.contains("animatedProgress"))
+        XCTAssertFalse(ring.contains("@State private var presentation"))
+        XCTAssertFalse(ring.contains(".task("))
+        XCTAssertFalse(ring.contains("withAnimation("))
+        XCTAssertTrue(ring.contains("transaction.animation = nil"))
+        for marker in [".scaleEffect(", ".offset(", ".shadow(", ".blur("] {
+            XCTAssertFalse(ring.contains(marker), "Ring primitive contains \(marker)")
+        }
+
+        let ringRevisions: [(Double, Double)] = [
+            (-0.25, 0),
+            (0.35, 0.35),
+            (1.4, 1),
+        ]
+        for reduceMotion in [false, true] {
+            for (input, expected) in ringRevisions {
+                XCTAssertEqual(
+                    Double(LifeOSChartMotionPolicy.progress(CGFloat(input))),
+                    expected,
+                    accuracy: 0.0001,
+                    "GlowRing must resolve same-identity progress revisions directly when reduceMotion=\(reduceMotion)."
+                )
+            }
+        }
+
+        let drawStart = try XCTUnwrap(motion.range(of: "public struct DrawOnProgress"))
+        let drawEnd = try XCTUnwrap(motion.range(of: "private struct LifeOSChartDrawnKey"))
+        let draw = String(motion[drawStart.lowerBound..<drawEnd.lowerBound])
+        XCTAssertTrue(draw.contains("@State private var drawn: CGFloat = 1"))
+        XCTAssertFalse(draw.contains("withAnimation("))
+        XCTAssertFalse(draw.contains("drawn = 0"))
+    }
+
     func testDirectionalClassifierWaitsForDistanceAndDominance() {
         XCTAssertEqual(LifeOSDirectionalClassifier.classify(CGSize(width: 7, height: 0)), .undecided)
         XCTAssertEqual(LifeOSDirectionalClassifier.classify(CGSize(width: 8, height: 0)), .horizontal)
@@ -1100,20 +1358,20 @@ final class LifeOSDesignSystemTests: XCTestCase {
     }
     func testCanonicalMotionTimingsAndCompatibilityAliases() {
         XCTAssertEqual(LifeOSMotion.Timing.press, .easeOut(0.08))
-        XCTAssertEqual(LifeOSMotion.Timing.release, .easeOut(0.18))
+        XCTAssertEqual(LifeOSMotion.Timing.release, .easeOut(0.14))
         XCTAssertEqual(LifeOSMotion.Timing.hover, .easeOut(0.12))
-        XCTAssertEqual(LifeOSMotion.Timing.reducedNavigation, .easeOut(0.12))
-        XCTAssertEqual(LifeOSMotion.Timing.primary, .spring(response: 0.42, damping: 0.82))
-        XCTAssertEqual(LifeOSMotion.Timing.snappy, .spring(response: 0.30, damping: 0.86))
-        XCTAssertEqual(LifeOSMotion.Timing.hero, .spring(response: 0.50, damping: 0.85))
+        XCTAssertEqual(LifeOSMotion.Timing.reducedNavigation, .easeOut(0.10))
+        XCTAssertEqual(LifeOSMotion.Timing.primary, .easeOut(0.18))
+        XCTAssertEqual(LifeOSMotion.Timing.snappy, .spring(response: 0.24, damping: 0.90))
+        XCTAssertEqual(LifeOSMotion.Timing.hero, .easeOut(0.18))
         XCTAssertEqual(
             LifeOSMotion.Timing.calendarSettle,
-            .interpolatingSpring(mass: 1, stiffness: 340, damping: 37, initialVelocity: 0)
+            .spring(response: 0.28, damping: 0.92)
         )
         XCTAssertEqual(LifeOSMotion.Timing.tooltip, .easeOut(0.08))
         XCTAssertEqual(LifeOSMotion.Timing.sheet, .easeOut(0.18))
         XCTAssertEqual(LifeOSMotion.Timing.refresh, .easeOut(0.10))
-        XCTAssertEqual(LifeOSMotion.Timing.ring, .spring(response: 0.70, damping: 0.90))
+        XCTAssertEqual(LifeOSMotion.Timing.ring, .easeOut(0.18))
         XCTAssertEqual(LifeOSMotion.Timing.tracking, .direct)
         XCTAssertEqual(LifeOSMotion.Timing.chart, .easeOut(0.72))
         XCTAssertEqual(LifeOSMotion.spring, LifeOSMotion.primary)
@@ -1139,7 +1397,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertNil(LifeOSMotion.curve(for: .reveal, reduceMotion: true))
         XCTAssertNil(LifeOSMotion.curve(for: .cancel, reduceMotion: true))
         XCTAssertNil(LifeOSMotion.curve(for: .selection, reduceMotion: true))
-        XCTAssertEqual(LifeOSMotion.curve(for: .navigation, reduceMotion: true), .easeOut(0.12))
+        XCTAssertEqual(LifeOSMotion.curve(for: .navigation, reduceMotion: true), .easeOut(0.10))
         XCTAssertNil(LifeOSMotion.curve(for: .release, reduceMotion: true))
         XCTAssertEqual(LifeOSMotion.curve(for: .selection, reduceMotion: false), LifeOSMotion.Timing.snappy)
         XCTAssertEqual(LifeOSMotion.curve(for: .navigation, reduceMotion: false), LifeOSMotion.Timing.hero)
@@ -1232,7 +1490,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
                 for reduced in [false, true] {
                     XCTAssertEqual(LifeOSChartMotionPolicy.shouldReveal(
                         hasPresented: presented, interacting: interacting, reduceMotion: reduced),
-                        !presented && !interacting && !reduced)
+                        false)
                 }
             }
         }
@@ -1305,7 +1563,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
 
         for reduced in [false, true] {
             var presentation = LifeOSChartPresentationState()
-            XCTAssertEqual(presentation.reveal(interacting: false, reduceMotion: reduced), !reduced)
+            XCTAssertFalse(presentation.reveal(interacting: false, reduceMotion: reduced))
             presentation.recordHeight(280, isEmpty: false)
             // Empty, loading, failure, then a real populated observation again.
             for empty in [true, true, true, false] {
@@ -1326,12 +1584,31 @@ final class LifeOSDesignSystemTests: XCTestCase {
 
     func testChartPresentationSettlesInterruptedRevealWithoutReplay() {
         var presentation = LifeOSChartPresentationState()
-        XCTAssertTrue(presentation.reveal(interacting: false, reduceMotion: false))
+        XCTAssertFalse(presentation.reveal(interacting: false, reduceMotion: false))
 
         presentation.settle()
 
         XCTAssertFalse(presentation.reveal(interacting: false, reduceMotion: false))
         XCTAssertTrue(presentation.hasPresented)
+    }
+
+    private static func composite(
+        _ foreground: UInt32,
+        over background: UInt32,
+        opacity: Double
+    ) -> UInt32 {
+        let clampedOpacity = min(max(opacity, 0), 1)
+
+        func channel(_ shift: Int) -> UInt32 {
+            let foregroundChannel = Double((foreground >> shift) & 0xFF)
+            let backgroundChannel = Double((background >> shift) & 0xFF)
+            return UInt32(
+                (foregroundChannel * clampedOpacity
+                    + backgroundChannel * (1 - clampedOpacity)).rounded()
+            )
+        }
+
+        return (channel(16) << 16) | (channel(8) << 8) | channel(0)
     }
 
 }

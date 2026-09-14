@@ -12,7 +12,7 @@ public enum LifeOSChartLineStyle: String, CaseIterable, Codable, Sendable {
         switch self {
         case .solid: []
         case .dashed: [6, 4]
-        case .dotted: [1, 3]
+        case .dotted: [2, 4]
         }
     }
 }
@@ -30,9 +30,12 @@ public struct LifeOSChartSeriesStyle: Equatable, Sendable {
         dashPattern: [CGFloat]? = nil
     ) {
         self.lineStyle = lineStyle
-        self.lineWidth = lineWidth
-        self.areaOpacity = areaOpacity
-        self.dashPattern = dashPattern ?? lineStyle.dashPattern
+        self.lineWidth = lineWidth.isFinite ? max(0, lineWidth) : 0
+        self.areaOpacity = areaOpacity.isFinite ? min(max(0, areaOpacity), 1) : 0
+        let requestedPattern = dashPattern ?? lineStyle.dashPattern
+        self.dashPattern = requestedPattern.map { value in
+            value.isFinite ? max(0, value) : 0
+        }
     }
 }
 
@@ -54,14 +57,15 @@ public enum LifeOSChartSeriesKind: String, CaseIterable, Codable, Sendable {
     public var style: LifeOSChartSeriesStyle {
         switch self {
         case .observed:
-            // §5.4: 2.25pt solid; the restrained 0.14 area is optional when points exist.
-            LifeOSChartSeriesStyle(lineStyle: .solid, lineWidth: 2.25, areaOpacity: 0.14)
+            // The observed series is the sole solid 2pt line. A low-opacity
+            // area supports trend reading without turning the plot into a glow.
+            LifeOSChartSeriesStyle(lineStyle: .solid, lineWidth: 2, areaOpacity: 0.08)
         case .target:
-            LifeOSChartSeriesStyle(lineStyle: .dashed, lineWidth: 1.25)
+            LifeOSChartSeriesStyle(lineStyle: .dotted, lineWidth: 1.25, dashPattern: [2, 4])
         case .estimate:
-            LifeOSChartSeriesStyle(lineStyle: .dashed, lineWidth: 1.75, dashPattern: [3, 3])
+            LifeOSChartSeriesStyle(lineStyle: .dashed, lineWidth: 1.5, dashPattern: [6, 4])
         case .history:
-            LifeOSChartSeriesStyle(lineStyle: .dotted, lineWidth: 1.25)
+            LifeOSChartSeriesStyle(lineStyle: .dotted, lineWidth: 1.25, dashPattern: [1, 3])
         }
     }
 
