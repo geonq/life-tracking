@@ -11,12 +11,13 @@ evidence is still incomplete.
 
 ## Current source checkpoint
 
-- Application source checkpoint: `e8bbefa Refine compact usage presentation and
-  chart contract`; Windows recovery-instrumentation checkpoint: `0a8d5b6`;
-  historical deployable code candidate: `6baa1f3`. The current mainline
-  checkpoint is `c09c3b7` (`Merge LifeOS implementation checkpoint`); later
+- Application source checkpoint: `e07a0a4 Harden calendar remote merge boundary`
+  layered over `e8bbefa Refine compact usage presentation and chart contract`;
+  Windows recovery-instrumentation checkpoint: `0a8d5b6`;
+  historical deployable code candidate: `6baa1f3`. Mainline contains
+  implementation merge `c09c3b7` plus subsequent documentation syncs; later
   documentation-only commits may advance main without changing the application
-  source checkpoint. GitHub CLI reports PR #1 merged into `main` at that commit.
+  source. GitHub CLI reports PR #1 merged into `main` at `c09c3b7`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
@@ -71,6 +72,18 @@ evidence is still incomplete.
   allowlisting, bounded history/atomic writes, and Windows Codex path/quoting
   checks are covered. Native Windows execution, deployed ACL/reparse behavior,
   and Windows rename durability remain unverified.
+- T0 requirements mapping is generated at
+  `artifacts/final/T0/requirements-map.md`: 258 leaves, seven aliases, and
+  zero accepted, with statuses unchanged. T10a capability preflight is
+  recorded at `artifacts/final/T0/t10a-capability-preflight.md` and is
+  **SOURCE GAP**: source declares the required surfaces, but the configured
+  Team ID differs from the installed identity and the physical iPhone
+  developer tunnel is not currently usable.
+- T0 calendar reconciliation is recorded at
+  `artifacts/final/T0/calendar-security-reconciliation.md`. The public
+  CalendarStore merge bypass is fixed and pushed at `e07a0a4`; Astra Medium
+  reviewed the two-file patch **GREEN**. The focused iPhone 17 simulator
+  receipt is **96/96 with 0 failures**. Peer transport identity remains open.
 - Mac Tax accessibility repair is committed at `66953af`: macOS exposes one
   direct `import-tax-pdf` button, platform-specific empty-state actions
   compile, and the exact artifact passed direct AX inspection and native picker
@@ -105,15 +118,12 @@ evidence is still incomplete.
 - Windows is reachable and BitLocker was freshly read fully encrypted with
   protection on for C: and D:. No LifeOS recovery/install process is running;
   `LifeOSAPI` is stopped and `LifeOSGateway` is absent.
-  The `6baa1f3` rollback was actually run through unit `31,400`; memory stayed
-  near **674 MB** versus the earlier **985 MB** peak, but no final stage
-  checkpoint appeared after 45 minutes, so it was safely stopped. The durable
-  marker remains `active`, the journal remains `artifacts-complete`, and
-  `LifeOSAPI` remains stopped. Install and live Enable Banking readback remain
-  uncertified; diagnostics and phase telemetry were tested only in a disposable copy, and the
-  canonical transaction was not resumed or installed. The current marker is
-  still `active`; its journal is `artifacts-complete` with 31,401 units and
-  progress sequence 59,167.
+  A fresh read-only probe found the durable deployment marker `active` with a
+  manifest, but no stage, `recovery.json`, or `recovery.progress.jsonl` at the
+  default backup root; the older 31,401-unit journal receipt is therefore not
+  treated as current. Install and live Enable Banking readback remain
+  uncertified; diagnostics and phase telemetry were tested only in a
+  disposable copy, and the canonical transaction was not resumed or installed.
 - Astra rejected an uncommitted runtime optimization for a mutating
   reconcile-only path and TOCTOU gap; it is preserved at
   `/private/tmp/lifeos-red-runtime-optimization-20260913.patch` and excluded.
@@ -144,8 +154,8 @@ evidence is still incomplete.
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. Current next step: execute the T0 contract/security reconciliation,
-T10a capability preflight, and T1a measured disposable recovery preparation;
+`070b7db`. The bounded T0 CalendarStore security reconciliation is pushed at
+`e07a0a4`; current next step is T1a measured disposable recovery preparation;
 conforming T11 source remains subject to runtime verification. The latest
 committed Usage tranche is `e8bbefa`. Calendar gesture work is not accepted and
 must use the smaller T12 packets in `tasks/final-execution-plan.md`. The two

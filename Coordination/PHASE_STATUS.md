@@ -4,8 +4,10 @@ Updated 2026-09-14 Europe/Berlin.
 
 - Release: **NO-GO**.
 - Deployable source checkpoint: `6baa1f3`; current application source checkpoint
-  is `e8bbefa`, merged into mainline at `c09c3b7`. Later documentation-only
-  commits may advance main HEAD without changing the application source.
+  is `e07a0a4` (calendar merge hardening layered over `e8bbefa`), merged into
+  mainline at `c09c3b7`; mainline also contains subsequent documentation syncs.
+  Later documentation-only commits may advance main HEAD without changing the
+  application source.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -76,6 +78,15 @@ Updated 2026-09-14 Europe/Berlin.
 - The frozen acceptance registry validates with 258 scored leaves and 7
   aliases, but records 0 accepted leaves; its `--score` gate fails as designed.
   Tranche GREEN reviews therefore do not represent a completion percentage.
+- T0 requirements mapping is generated at
+  `artifacts/final/T0/requirements-map.md`. T10a capability preflight is
+  **SOURCE GAP**: checked-in capabilities exist, but Team ID, physical
+  developer services, signed entitlements, and install proof remain unresolved.
+- T0 calendar reconciliation is recorded at
+  `artifacts/final/T0/calendar-security-reconciliation.md`. The public
+  CalendarStore merge boundary is fixed at `e07a0a4`, Astra Medium reviewed the
+  two-file patch **GREEN**, and the focused iPhone 17 simulator suite is
+  **96/96 with 0 failures**. Peer transport identity remains open.
 - The current 191-line visual contract is committed at `5ebc17e`. A prior Mac
   shell candidate passed compile and 6 selected tests but was Astra RED for
   missing shell-state evidence and a possible collapsed-header overflow; it was
@@ -99,13 +110,12 @@ Updated 2026-09-14 Europe/Berlin.
   Fitness hero have focused evidence; this is not whole-app acceptance.
 - Fresh SSH observation confirms GEONQSERVER is reachable, C: and D: are
   BitLocker-protected, no LifeOS recovery/install process is running,
-  `LifeOSAPI` is stopped, and `LifeOSGateway` is absent. The marker remains
-  active with an `artifacts-complete` journal, 31,401 units, and sequence
-  59,167. The earlier resume stopped after 45 minutes without a stage
-  checkpoint; reinstall, listener/health, Tailscale Serve, and live banking
-  remain open. The follow-up runtime patch is rejected and is not in the
-  branch; disposable diagnostics/strict-reader/phase-telemetry validation
-  passed.
+  `LifeOSAPI` is stopped, and `LifeOSGateway` is absent. The current marker is
+  active with a manifest but no stage, `recovery.json`, or
+  `recovery.progress.jsonl` at the default backup root. The older 31,401-unit
+  journal receipt is not treated as current. Reinstall, listener/health,
+  Tailscale Serve, and live banking remain open; disposable
+  diagnostics/strict-reader/phase-telemetry validation passed.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 - T12 Calendar gesture work is not accepted: two Luna Max attempts left

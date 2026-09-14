@@ -24,9 +24,11 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint: `e8bbefa`; current mainline checkpoint
-  is `c09c3b7` (`Merge LifeOS implementation checkpoint`). The feature branch
-  push and merge succeeded; GitHub CLI reports PR #1 merged into `main`. The
+- Current application source checkpoint: `e07a0a4` (calendar merge hardening
+  layered over `e8bbefa`); mainline contains implementation merge `c09c3b7`
+  plus subsequent documentation syncs, with
+  implementation merge `c09c3b7`. The feature branch push and merge succeeded;
+  GitHub CLI reports PR #1 merged into `main`. The
   deployable Windows candidate is the verified `6baa1f3` source checkpoint;
   recovery reached journal unit 31,400 and was stopped before its final stage.
   The marker remains active and `LifeOSAPI` remains stopped before install.
@@ -64,7 +66,10 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   behavior, failure-parity, and legacy Serve suites passed with exit 0 for the
   latest slice, and Astra Medium reviewed all four slices GREEN. The digest
   callers use a mutable holder because named `[ref]` arguments are rebound by
-  Windows PowerShell 5.1. The canonical transaction remains untouched.
+  Windows PowerShell 5.1. The canonical transaction remains untouched. The
+  public CalendarStore merge boundary is hardened at `e07a0a4`, with an Astra
+  Medium **GREEN** review and a focused iPhone 17 receipt of 96/96 tests with
+  0 failures.
 
 ## Current dispatch
 
@@ -82,6 +87,12 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   closed after returning no report. No security patch is authorized until a
   completed audit identifies concrete OPEN/PARTIAL findings; do not dispatch a
   third broad audit without changing the execution method.
+- T0 requirements mapping is generated from the validated frozen registry.
+  T10a capability preflight completed as **SOURCE GAP** and is retained at
+  `artifacts/final/T0/t10a-capability-preflight.md`; the next dispatch is the
+  bounded T1a recovery preparation after the pushed CalendarStore boundary
+  fix. The calendar reconciliation receipt is at
+  `artifacts/final/T0/calendar-security-reconciliation.md`.
 
 ## Execution phases
 
