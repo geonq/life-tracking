@@ -35,7 +35,7 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint is `b6bc465`, pushed on `main` with
+- Current application source checkpoint is `0f8fd8e`, pushed on `main` with
   zero local/remote divergence. PR #1 is merged and no open PR is recorded.
   The verified Windows candidate is `6baa1f3`; current read-only observation
   has BitLocker protection, stopped `LifeOSAPI`, absent `LifeOSGateway`, and an
@@ -117,12 +117,10 @@ name the concrete gate moved, the evidence produced, and the next dependency.
   attempts produced no usable report and made no mutation. T12c is now source
   reviewed and pushed; the bounded T12d D1 store-bound repair is now pushed at
   `16e0855`; D2 revision/undo reconciliation is pushed at `f0d59a5`, and D3
-  is pushed at `b6bc465`; the next calendar dispatch is D4/D5 reconciliation
-  after the Windows A1 owner repair.
-  The T1 owner
-  repair for A1 RED findings remains required before
-  canonical recovery. A1.4 truthfulness is pushed at `9539841`; A1.1–A1.3
-  still block recovery. The calendar reconciliation receipt is at
+  is pushed at `b6bc465`. A1.1 terminal-stage repair is pushed at `0f8fd8e`;
+  the next calendar dispatch is D4/D5 after the Windows A1.2–A1.3 repair.
+  A1.4 truthfulness is pushed at `9539841`; A1.2–A1.3 still block recovery.
+  The calendar reconciliation receipt is at
   `artifacts/final/T0/calendar-security-reconciliation.md`.
 
 ## Execution phases

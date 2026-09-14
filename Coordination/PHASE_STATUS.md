@@ -3,9 +3,9 @@
 Updated 2026-09-14 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Main source checkpoint: `b6bc465` (`Harden recurring calendar mutations`)
-  on local `main` and `origin/main` with zero divergence. D2a/D2b and D3 are
-  Astra Medium source-reviewed **MERGE**. The deployable Windows
+- Main source checkpoint: `0f8fd8e` (`Harden terminal Windows recovery stages`)
+  on local `main` and `origin/main` with zero divergence. D2a/D2b, D3, and A1.1
+  are Astra Medium source-reviewed **MERGE**. The deployable Windows
   candidate remains `6baa1f3`; PR #1 is already merged.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
@@ -106,8 +106,9 @@ Updated 2026-09-14 Europe/Berlin.
   `artifacts/final/T0/t1-a1-review.md` and is **RED**: four recovery-boundary
   source defects block canonical recovery and full-size measurement.
 - The scoped A1.4 truthfulness repair is pushed at `9539841` and reviewed
-  **GREEN**: every affected failure branch reports `recovery_required` without
-  claiming an unverified writer state. A1.1–A1.3 remain open.
+  **GREEN**. A1.1 terminal-stage no-replay/strict-progress repair is pushed at
+  `0f8fd8e` and source-reviewed **MERGE**; Windows PowerShell 5.1 execution is
+  unverified. A1.2–A1.3 remain open.
 - The current 191-line visual contract is committed at `5ebc17e`. A prior Mac
   shell candidate passed compile and 6 selected tests but was Astra RED for
   missing shell-state evidence and a possible collapsed-header overflow; it was
@@ -139,8 +140,8 @@ Updated 2026-09-14 Europe/Berlin.
   provider path is historically live-proven; disposable
   diagnostics/strict-reader/phase-telemetry validation passed.
 - Three T1a/T1b Luna Max recovery-preparation workers were stopped without
-  usable reports and without source or Windows mutation. A1 is RED; the T1
-  owner repair must land before disposable measurement or T2.
+  usable reports and without source or Windows mutation. A1.1 is source-fixed
+  at `0f8fd8e`; A1.2–A1.3 remain RED and block disposable measurement or T2.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 - T12d calendar reconciliation/security work remains open: D1 bounded local

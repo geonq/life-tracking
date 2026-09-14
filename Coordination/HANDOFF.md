@@ -12,7 +12,7 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
 
 ## Current source checkpoint
 
-- Application source checkpoint: `b6bc465 Harden recurring calendar mutations`;
+- Application source checkpoint: `0f8fd8e Harden terminal Windows recovery stages`;
   local `main` matches `origin/main` with zero divergence. PR #1 is merged and
   no open PRs are recorded. Reviewed source includes dashboard, calendar,
   usage, finance, backend-security, and installer; Windows recovery-
@@ -86,10 +86,10 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
 - T1/A1 Windows recovery review is recorded at
   `artifacts/final/T0/t1-a1-review.md` and is **RED**. Astra found four
   blocking recovery-boundary defects; no canonical Windows state was changed.
-- A1.4 is now a scoped **GREEN** subpacket at `9539841`: install/rollback
-  failure messages no longer claim an unverified stopped/disabled writer
-  state, and exact branch assertions cover the changed messages. A1.1–A1.3
-  remain RED; this does not authorize canonical recovery.
+- A1.4 is a scoped **GREEN** subpacket at `9539841`. A1.1 terminal-stage
+  repair is pushed at `0f8fd8e` and Astra Medium source-reviewed **MERGE**;
+  focused source checks are 6/6, while Windows PowerShell 5.1 execution is
+  unverified. A1.2–A1.3 remain open; this does not authorize recovery.
 - Mac Tax accessibility repair is committed at `66953af`: macOS exposes one
   direct `import-tax-pdf` button, platform-specific empty-state actions
   compile, and the exact artifact passed direct AX inspection and native picker
@@ -138,9 +138,9 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
   re-certification. Diagnostics and phase telemetry were tested only in a
   disposable copy, and the canonical transaction was not resumed or installed.
 - Three bounded T1a/T1b Luna Max recovery-preparation attempts were stopped
-  after producing no usable report. They made no source or Windows mutation.
-  The T1/A1 review is RED with four source blockers; the current source-owner
-  packet must repair those boundaries before any disposable measurement.
+  after producing no usable report and made no source or Windows mutation. The
+  recorded T1/A1 review remains RED for unclosed boundaries; A1.1 is accepted
+  at `0f8fd8e`, while A1.2–A1.3 still block disposable measurement.
 - Astra rejected an uncommitted runtime optimization for a mutating
   reconcile-only path and TOCTOU gap; it is preserved at
   `/private/tmp/lifeos-red-runtime-optimization-20260913.patch` and excluded.
@@ -182,10 +182,10 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. T0 is pushed at `e07a0a4`; current source is `b6bc465`, with T11a
+`070b7db`. T0 is pushed at `e07a0a4`; current source is `0f8fd8e`, with T11a
 visual foundation, T12a zoom, T12b viewport, T12c Mac pinch/settle, T13a widget
-I/O, and T12d D1–D3 integrated. Next is bounded T1/A1.1 Windows recovery
-source repair, then T12d D4/D5; conforming source remains subject to runtime
+I/O, T12d D1–D3, and A1.1 integrated. Next is bounded T1/A1.2–A1.3 Windows
+recovery source repair, then T12d D4/D5; conforming source remains subject to runtime
 verification. Usage is at `e8bbefa`; keep Calendar work in the smaller packets
 in `tasks/final-execution-plan.md`. The two broad security workers returned no
 report, so later reconciliation needs a completed bounded method. Keep the
