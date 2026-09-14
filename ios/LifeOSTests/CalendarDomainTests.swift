@@ -2475,13 +2475,17 @@ final class CalendarDomainTests: XCTestCase {
     func testOverlappingSameIDSavesUseUpdatedAtAsDefinedOrdering() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let gate = CalendarMutationGate()
+        let revisions = CalendarRevisionRecorder()
+        let defaults = CalendarCoordinator.makeVisualFixtureDefaults()
         let id = UUID()
         let older = try CalendarItem(id: id, title: "older", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base.addingTimeInterval(1))
         let newer = try CalendarItem(id: id, title: "newer", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base.addingTimeInterval(2))
         let coordinator = CalendarCoordinator(
             initialSnapshot: CalendarSnapshot(),
             storeURL: directory.appendingPathComponent("calendar.json"),
-            storeMutationHook: { await gate.pause() }
+            peerSend: { _, _, revision in revisions.append(revision) },
+            storeMutationHook: { await gate.pause() },
+            defaults: defaults
         )
 
         let firstSave = Task { await coordinator.save(newer) }
@@ -2494,9 +2498,17 @@ final class CalendarDomainTests: XCTestCase {
         let firstResult = await firstSave.value
         let secondResult = await secondSave.value
         XCTAssertEqual(firstResult, .success)
-        XCTAssertEqual(secondResult, .success)
+        guard case .failure(let message) = secondResult else {
+            XCTFail("A stale same-ID save must report a conflict")
+            return
+        }
+        XCTAssertEqual(message, "Unable to save calendar: a newer change already exists for this item.")
         let loaded = try await coordinator.store.load()
         XCTAssertEqual(loaded.items, [newer])
+        XCTAssertEqual(coordinator.snapshot, CalendarSnapshot(items: [newer]))
+        XCTAssertTrue(coordinator.canUndo, "A rejected stale save must not consume the prior undo token")
+        XCTAssertEqual(revisions.values, [1], "A rejected stale save must not broadcast or advance revision")
+        XCTAssertEqual(defaults.integer(forKey: "LifeOS.Calendar.revision"), 1)
         try? FileManager.default.removeItem(at: directory)
     }
 

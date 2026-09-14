@@ -54,6 +54,10 @@ private enum CalendarRemoteMutationError: Error {
     case adoptionFailed
 }
 
+private enum CalendarLocalMutationError: Error, Equatable, Sendable {
+    case staleUpsert
+}
+
 /// The coordinator owns Calendar behavior, but the concrete peer service is
 /// deliberately hidden behind this small transport boundary. Fixture hosts
 /// receive a no-op implementation and therefore cannot create a
@@ -342,6 +346,16 @@ public final class CalendarCoordinator: ObservableObject {
                 // independent IDs from the latest durable snapshot.
                 return snapshot.merged(with: CalendarSnapshot(items: [item]))
             }
+        }
+
+        func isRejected(by snapshot: CalendarSnapshot, resultingIn candidate: CalendarSnapshot) -> Bool {
+            guard case .upsert(let item) = self,
+                  let current = snapshot.items.first(where: { $0.id == item.id }),
+                  current != item,
+                  let committed = candidate.items.first(where: { $0.id == item.id }) else {
+                return false
+            }
+            return committed == current
         }
     }
 
@@ -780,8 +794,12 @@ public final class CalendarCoordinator: ObservableObject {
                 let before = isFixtureMode || (!loadedBeforeMutation && current.items.isEmpty && !publishedBefore.items.isEmpty)
                     ? publishedBefore
                     : current
+                let candidate = mutation.applying(to: before)
+                guard !mutation.isRejected(by: before, resultingIn: candidate) else {
+                    throw CalendarLocalMutationError.staleUpsert
+                }
                 capture.value = before
-                return mutation.applying(to: before)
+                return candidate
             }
             guard let previousSnapshot = capture.value else {
                 let message = "Unable to save calendar: missing pre-mutation snapshot."
@@ -811,6 +829,13 @@ public final class CalendarCoordinator: ObservableObject {
             let committedRevision = revision
             sendPeer(snapshot: committedSnapshot, revision: committedRevision)
             requestWidgetTimelineReloadIfNeeded()
+        } catch CalendarLocalMutationError.staleUpsert {
+            let message = "Unable to save calendar: a newer change already exists for this item."
+            errorMessage = message
+            if let clearingFailureID, pendingFailedMutation?.id == clearingFailureID {
+                pendingFailedMutation = nil
+            }
+            return .failure(message)
         } catch {
             let message = "Unable to save calendar: \(error.localizedDescription)"
             errorMessage = message
