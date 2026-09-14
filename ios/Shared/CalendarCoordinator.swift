@@ -58,6 +58,10 @@ private enum CalendarLocalMutationError: Error, Equatable, Sendable {
     case staleUpsert
 }
 
+private enum CalendarUndoError: Error, Equatable, Sendable {
+    case targetChanged
+}
+
 /// The coordinator owns Calendar behavior, but the concrete peer service is
 /// deliberately hidden behind this small transport boundary. Fixture hosts
 /// receive a no-op implementation and therefore cannot create a
@@ -310,7 +314,9 @@ public final class CalendarCoordinator: ObservableObject {
     private var remoteSyncInFlight = false
     private struct UndoToken: Sendable {
         let id: UUID
-        let snapshot: CalendarSnapshot
+        let targetID: UUID
+        let before: CalendarItem?
+        let after: CalendarItem
     }
 
     /// `CalendarStore.mutate` gives us the only atomic read/modify/write
@@ -712,11 +718,10 @@ public final class CalendarCoordinator: ObservableObject {
         return await persist(pendingFailedMutation.mutation, clearingFailureID: pendingFailedMutation.id)
     }
 
-    /// Restores the exact durable snapshot immediately before the most recent
-    /// successful local mutation. The operation is queued with saves and
-    /// merges, so it cannot overwrite a newer durable result. A successful
-    /// undo consumes its token; a persistence failure leaves it available for
-    /// another attempt.
+    /// Compensates the affected item from the most recent successful local
+    /// mutation. The operation is queued with saves and merges, so it cannot
+    /// overwrite a newer durable result. A successful undo consumes its token;
+    /// a persistence failure leaves it available for another attempt.
     @discardableResult
     public func undoLastMutation() async -> CalendarLocalSaveResult {
         await enqueueDurableOperation { [weak self] in
@@ -781,6 +786,11 @@ public final class CalendarCoordinator: ObservableObject {
             errorMessage = message
             return .failure(message)
         }
+        let mutationItem: CalendarItem
+        switch mutation {
+        case .upsert(let item):
+            mutationItem = item
+        }
         let publishedBefore = snapshot
         let loadedBeforeMutation = isLoaded
         let isFixtureMode = usesVisualFixtures
@@ -819,10 +829,17 @@ public final class CalendarCoordinator: ObservableObject {
             defaults.set(revision, forKey: Self.revisionKey)
             if pendingFailedMutation == nil { errorMessage = nil }
 
+            let committedItem = committedSnapshot.items.first(where: { $0.id == mutationItem.id }) ?? mutationItem
+
             // Every successful local mutation supersedes the previous one-shot
-            // undo. The value is the exact snapshot read inside the atomic
-            // store transaction, including tombstones and icon metadata.
-            setUndoToken(UndoToken(id: UUID(), snapshot: previousSnapshot))
+            // undo. Keep only the affected record so a later undo cannot erase
+            // unrelated local or peer changes.
+            setUndoToken(UndoToken(
+                id: UUID(),
+                targetID: mutationItem.id,
+                before: previousSnapshot.items.first(where: { $0.id == mutationItem.id }),
+                after: committedItem
+            ))
 
             // Keep the exact durable value associated with this queued
             // commit. A later MainActor task cannot alter what is delivered.
@@ -857,14 +874,44 @@ public final class CalendarCoordinator: ObservableObject {
             return .failure(message)
         }
 
+        let currentCapture = SnapshotCapture()
         do {
-            // CalendarStore.save uses the same temporary-file + replace
-            // sequence as every other local persistence operation. Exact
-            // undo is deliberately local-only: sending this older snapshot
-            // to a peer would lose to that peer's newer LWW mutation.
-            let restoredSnapshot = try await store.save(token.snapshot)
-            guard undoToken?.id == token.id else {
-                return .failure("Undo is no longer available.")
+            let restoredSnapshot = try await store.mutate { current in
+                currentCapture.value = current
+                guard let currentItem = current.items.first(where: { $0.id == token.targetID }),
+                      Self.persistedItem(currentItem, matches: token.after) else {
+                    throw CalendarUndoError.targetChanged
+                }
+
+                // An undo is a new mutation. Its timestamp must be newer than
+                // the item being undone so paired devices accept the
+                // compensating state under the calendar's LWW policy.
+                let currentClock = currentItem.deletedAt ?? currentItem.updatedAt
+                let compensationDate = max(
+                    Date.now,
+                    currentClock.addingTimeInterval(0.001)
+                )
+                let compensatingItem: CalendarItem
+                if var before = token.before {
+                    before.updatedAt = max(compensationDate, before.createdAt)
+                    if before.isDeleted {
+                        before.deletedAt = before.updatedAt
+                    } else {
+                        before.deletedAt = nil
+                    }
+                    compensatingItem = before
+                } else {
+                    // Keep a tombstone for a locally-created item. Removing it
+                    // from the local snapshot would make a peer retain the
+                    // created record forever because there would be no delete
+                    // mutation to transmit.
+                    compensatingItem = token.after.deleting(at: compensationDate)
+                }
+
+                let replaced = current.items.map { item in
+                    item.id == token.targetID ? compensatingItem : item
+                }
+                return CalendarSnapshot(items: replaced)
             }
             durableGeneration &+= 1
             snapshot = restoredSnapshot
@@ -874,8 +921,24 @@ public final class CalendarCoordinator: ObservableObject {
             revision = committedRevision
             defaults.set(revision, forKey: Self.revisionKey)
             if pendingFailedMutation == nil { errorMessage = nil }
+            sendPeer(snapshot: restoredSnapshot, revision: revision)
             requestWidgetTimelineReloadIfNeeded()
             return .success
+        } catch CalendarUndoError.targetChanged {
+            // The durable item changed outside this token's mutation. Publish
+            // that latest value before invalidating the stale undo action so
+            // the UI cannot offer an operation that would overwrite it.
+            if let latest = currentCapture.value {
+                durableGeneration &+= 1
+                snapshot = latest
+                isLoaded = true
+                requestWidgetTimelineReloadIfNeeded()
+            }
+            let message = "Unable to undo calendar: this item changed after the last save."
+            errorMessage = message
+            setUndoToken(nil)
+            pendingFailedUndo = false
+            return .failure(message)
         } catch {
             let message = "Unable to undo calendar mutation: \(error.localizedDescription)"
             errorMessage = message
@@ -884,6 +947,14 @@ public final class CalendarCoordinator: ObservableObject {
             // published or durable snapshot, so the user can retry Undo.
             return .failure(message)
         }
+    }
+
+    nonisolated private static func persistedItem(_ lhs: CalendarItem, matches rhs: CalendarItem) -> Bool {
+        guard let lhsData = try? JSONEncoder.calendar.encode(lhs),
+              let rhsData = try? JSONEncoder.calendar.encode(rhs) else {
+            return lhs == rhs
+        }
+        return lhsData == rhsData
     }
 
     private func performRemoteMerge(
