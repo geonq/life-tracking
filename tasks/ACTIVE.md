@@ -35,8 +35,9 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint is `0f8fd8e`, pushed on `main` with
-  zero local/remote divergence. PR #1 is merged and no open PR is recorded.
+- Current application source checkpoint is `2262c51`, pushed on `main` with
+  zero local/remote divergence. A1.2 is the current checkpoint;
+  PR #1 is merged and no open PR is recorded.
   The verified Windows candidate is `6baa1f3`; current read-only observation
   has BitLocker protection, stopped `LifeOSAPI`, absent `LifeOSGateway`, and an
   active marker without current stage/recovery/progress at the default backup
@@ -97,10 +98,11 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 
 ## Current dispatch
 
-- The prior Averroes streaming candidate was stopped, quarantined, and discarded
-  after it returned no handoff; no recovery source changes are present. Astra
-  had already marked the proposal RED for byte binding, untouched-unit semantics,
-  strict boundaries, invalidation, and Windows PowerShell 5.1 safety.
+- A1.2 checkpoint `2262c51` now contains the retained artifact capability,
+  immutable phase tokens, and strict bounded progress payload parser. Astra
+  Medium reviewed the parser tranche **MERGE**; fresh Windows PowerShell 5.1
+  native and static suites pass. The authority-owned lease/cursor and replay
+  redesign remains the next RED gate, and the artifact loop is still unwired.
 - A prior narrow Mac shell candidate was compiled and tested, then rejected by
   Astra Medium for missing actual shell evidence and collapsed-header geometry
   risk; its patch is preserved in `/private/tmp/lifeos-mac-shell-candidate-red.patch`.
@@ -118,8 +120,10 @@ name the concrete gate moved, the evidence produced, and the next dependency.
   reviewed and pushed; the bounded T12d D1 store-bound repair is now pushed at
   `16e0855`; D2 revision/undo reconciliation is pushed at `f0d59a5`, and D3
   is pushed at `b6bc465`. A1.1 terminal-stage repair is pushed at `0f8fd8e`;
-  the next calendar dispatch is D4/D5 after the Windows A1.2–A1.3 repair.
-  A1.4 truthfulness is pushed at `9539841`; A1.2–A1.3 still block recovery.
+  A1.2 parser checkpoint `2262c51` is pushed and reviewed **MERGE** for that
+  slice. The next dispatch is authority-owned lease/cursor and strict replay,
+  then A1.3 and D4/D5. A1.4 truthfulness is pushed at `9539841`; recovery
+  remains blocked.
   The calendar reconciliation receipt is at
   `artifacts/final/T0/calendar-security-reconciliation.md`.
 

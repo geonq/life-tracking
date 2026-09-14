@@ -3,7 +3,7 @@
 Updated 2026-09-14 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Main source checkpoint: `0f8fd8e` (`Harden terminal Windows recovery stages`)
+- Main source checkpoint: `2262c51` (`Checkpoint A1.2 native recovery capability`)
   on local `main` and `origin/main` with zero divergence. D2a/D2b, D3, and A1.1
   are Astra Medium source-reviewed **MERGE**. The deployable Windows
   candidate remains `6baa1f3`; PR #1 is already merged.
@@ -107,8 +107,11 @@ Updated 2026-09-14 Europe/Berlin.
   source defects block canonical recovery and full-size measurement.
 - The scoped A1.4 truthfulness repair is pushed at `9539841` and reviewed
   **GREEN**. A1.1 terminal-stage no-replay/strict-progress repair is pushed at
-  `0f8fd8e` and source-reviewed **MERGE**; Windows PowerShell 5.1 execution is
-  unverified. A1.2–A1.3 remain open.
+  `0f8fd8e` and source-reviewed **MERGE**. A1.2 at `2262c51` adds native
+  retained artifact capability, immutable phase tokens, and strict payload
+  parsing; Astra Medium reviewed the parser **MERGE**, and fresh Windows
+  PowerShell 5.1 native/static suites pass. Its authority-owned lease/cursor,
+  strict replay, artifact wiring, and A1.3 remain open.
 - The current 191-line visual contract is committed at `5ebc17e`. A prior Mac
   shell candidate passed compile and 6 selected tests but was Astra RED for
   missing shell-state evidence and a possible collapsed-header overflow; it was
@@ -141,7 +144,9 @@ Updated 2026-09-14 Europe/Berlin.
   diagnostics/strict-reader/phase-telemetry validation passed.
 - Three T1a/T1b Luna Max recovery-preparation workers were stopped without
   usable reports and without source or Windows mutation. A1.1 is source-fixed
-  at `0f8fd8e`; A1.2–A1.3 remain RED and block disposable measurement or T2.
+  at `0f8fd8e`; A1.2 parser is a scoped source checkpoint at `2262c51`, while
+  authority-owned lease/cursor and strict replay remain RED and block
+  disposable measurement or T2.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 - T12d calendar reconciliation/security work remains open: D1 bounded local

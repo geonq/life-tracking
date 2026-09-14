@@ -1,8 +1,8 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-14 Europe/Berlin. Release: **NO-GO**. Local `main` contains
-source checkpoint `f0d59a5` plus coordination checkpoint `5d28735`; it is five
-commits ahead of `origin/main` at `16e0855`. Track completion separately as
+source checkpoint `2262c51`, pushed with zero divergence; coordination docs
+still need their matching checkpoint. Track completion separately as
 approximately **70–75% implemented** and **35–45% release-ready**. T12c and
 D1/D2 have Astra Medium source **MERGE** reviews.
 
@@ -19,8 +19,9 @@ D1/D2 have Astra Medium source **MERGE** reviews.
    complete at `f0d59a5`; finish T12d D3–D5
    reconciliation,
    then continue the remaining Finance/live, motion, and widget evidence.
-3. Use the bounded recovery diagnostics and strict journal observation in a
-  disposable validation, finish the
+3. Finish the A1.2 authority-owned lease/cursor and strict replay repair after
+  parser checkpoint `2262c51`, then use the bounded recovery diagnostics and
+  strict journal observation in a disposable validation, finish the
    Windows recovery, install the verified `6baa1f3` candidate, and
    verify service listeners, health, ACLs, Tailscale Serve, and current native
    Enable Banking reads on the reachable PC. Enable Banking is historically
@@ -38,7 +39,9 @@ D1/D2 have Astra Medium source **MERGE** reviews.
 
 ## Verified checkpoint
 
-`0a8d5b6` is pushed; the deployable Windows source checkpoint is `6baa1f3`.
+`2262c51` is pushed; its strict parser subtranche is Astra Medium **MERGE** and
+fresh Windows native/static suites pass. Its authority-owned lease/cursor and
+strict replay remain RED. The deployable Windows source checkpoint is `6baa1f3`.
 The strict journal observation mode is native-Windows-validated and Astra
 reviewed GREEN. Fresh SSH readback confirms the canonical marker is still
 active, the journal is artifacts-complete at 31,401 units/sequence 59,167,
