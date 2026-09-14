@@ -90,8 +90,8 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - T0 requirements mapping is generated from the validated frozen registry.
   T10a capability preflight completed as **SOURCE GAP** and is retained at
   `artifacts/final/T0/t10a-capability-preflight.md`; the next dispatch is the
-  bounded T1a recovery preparation after the pushed CalendarStore boundary
-  fix. The calendar reconciliation receipt is at
+  smaller source-only T1a recovery review after the pushed CalendarStore
+  boundary fix. The calendar reconciliation receipt is at
   `artifacts/final/T0/calendar-security-reconciliation.md`.
 
 ## Execution phases

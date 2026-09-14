@@ -124,6 +124,10 @@ evidence is still incomplete.
   treated as current. Install and live Enable Banking readback remain
   uncertified; diagnostics and phase telemetry were tested only in a
   disposable copy, and the canonical transaction was not resumed or installed.
+- The first bounded T1a Luna Max recovery-preparation attempt stalled before
+  producing a report and was closed. It made no source or Windows mutation.
+  A smaller source-only T1a review is running; measured recovery remains a
+  SOURCE GAP until a bounded disposable receipt exists.
 - Astra rejected an uncommitted runtime optimization for a mutating
   reconcile-only path and TOCTOU gap; it is preserved at
   `/private/tmp/lifeos-red-runtime-optimization-20260913.patch` and excluded.
@@ -155,7 +159,8 @@ Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
 `070b7db`. The bounded T0 CalendarStore security reconciliation is pushed at
-`e07a0a4`; current next step is T1a measured disposable recovery preparation;
+`e07a0a4`; current next step is the smaller T1a source review, followed by a
+  separately bounded disposable recovery measurement;
 conforming T11 source remains subject to runtime verification. The latest
 committed Usage tranche is `e8bbefa`. Calendar gesture work is not accepted and
 must use the smaller T12 packets in `tasks/final-execution-plan.md`. The two
