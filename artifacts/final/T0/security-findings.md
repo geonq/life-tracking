@@ -33,13 +33,13 @@ runtime/deployed evidence is missing.
 | L3 history race | PARTIAL | A per-path in-process mutation queue serializes API writers. | Cross-process locking is not implemented or proven. |
 | L4 duplicate calendar IDs | FIXED-SOURCE | Snapshot decoding rejects duplicates; merge uses explicit uniquing logic and no fatal unique-key initializer. | No remaining source action identified. |
 | L5 icon decode order | FIXED-SOURCE | Version, byte-size, hash, and format checks precede ImageIO decoding. | No remaining source action identified. |
-| L6 dependency audit | UNVERIFIED | CI pins checkout and XcodeGen artifact/version/digest; current dependency advisories still need a fresh audit receipt. | Run the dependency audit and update only if it identifies a real fix. |
+| L6 dependency audit | FIXED-SOURCE | `npm audit --omit=dev` passed with 0 production vulnerabilities on 2026-09-14. | Dev dependency audit and hosted workflow evidence remain separate release checks. |
 | L7 CI supply chain | FIXED-SOURCE | Workflow permissions are read-only; actions and XcodeGen are pinned and the XcodeGen archive digest is checked. | Hosted workflow execution remains a release gate. |
 | L8 dashboard CSP | FIXED-SOURCE | Dashboard index and Vite served headers define a restrictive CSP; no unsafe HTML sink was found. | Served production header proof remains open. |
 
 ## Current security conclusion
 
 The checked-in source is materially hardened, but the security gate is not
-green. H1, M6, L1, L3, L6, and every deployed/Windows/physical proof item
+green. H1, M6, L1, L3, and every deployed/Windows/physical proof item
 remain open or partial. No canonical Windows recovery or installation was
 performed during this reconciliation.
