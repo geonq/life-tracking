@@ -74,7 +74,7 @@ $behaviorOperatorSid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User
                 units = $journalUnits; unitCount = $unitCount; treeRoots = @('D:\checkpoint-fixture'); phase = 'artifacts'; progressSequence = 0
             }
             $before = $journal | ConvertTo-Json -Depth 20 -Compress
-            $expectedBoundaries = 4 + (2 * @($script:LifeOSRecoveryStageNames).Count)
+            $expectedBoundaries = 4 + (4 * @($script:LifeOSRecoveryStageNames).Count)
             $script:checkpointSizerFailure = -1
             $script:checkpointSizerCalls = 0
             [void](Assert-RecoveryJournalCheckpointCapacity -Manifest ([pscustomobject]@{}) -Journal $journal -FinalProgressSequence 0)
@@ -92,6 +92,19 @@ $behaviorOperatorSid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User
                 Assert-Behavior ($script:checkpointSizerCalls -eq ($failure + 1)) "checkpoint serializer failure $failure occurs at the expected boundary for $unitCount unit(s)."
                 Assert-Behavior (($journal | ConvertTo-Json -Depth 20 -Compress) -ceq $before) "checkpoint serializer failure $failure restores the $unitCount-unit journal."
             }
+        }
+        $oldJournalMaxBytes = $script:LifeOSRecoveryJournalMaxBytes
+        try {
+            $script:LifeOSRecoveryJournalMaxBytes = [long]::MaxValue
+            $script:checkpointSizerFailure = -1
+            $script:checkpointSizerCalls = 0
+            $requiredBytes = [long](Assert-RecoveryJournalCheckpointCapacity -Manifest ([pscustomobject]@{}) -Journal $journal -FinalProgressSequence 0)
+            $nearLimitBefore = $journal | ConvertTo-Json -Depth 20 -Compress
+            $script:LifeOSRecoveryJournalMaxBytes = $requiredBytes - 1
+            Assert-BehaviorThrows { Assert-RecoveryJournalCheckpointCapacity -Manifest ([pscustomobject]@{}) -Journal $journal -FinalProgressSequence 0 } 'recovery checkpoint capacity includes companion stages before mutation.'
+            Assert-Behavior (($journal | ConvertTo-Json -Depth 20 -Compress) -ceq $nearLimitBefore) 'near-limit companion capacity rejection leaves the live journal unchanged.'
+        } finally {
+            $script:LifeOSRecoveryJournalMaxBytes = $oldJournalMaxBytes
         }
     } finally {
         Remove-Variable -Name checkpointSizerImplementation -Scope Script -ErrorAction SilentlyContinue
@@ -1007,6 +1020,12 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         param([uri]$Uri, [int]$TimeoutSeconds)
         return $true
     }
+    $serviceReconcileAction = {
+        Reconcile-LifeOSServiceSnapshotState -Snapshots $retrySnapshotMap -VerifyHealth -BeforeGatewayStart { $script:serviceTransitionEvents += 'before-gateway' }
+    }
+    $servicePostcondition = {
+        Assert-LifeOSServiceSnapshotState -Snapshots $retrySnapshotMap -VerifyHealth
+    }
     try {
         $manifest = [pscustomobject]@{
             transactionId = 'service-state-retry'; generation = 'generation'; operatorSid = $behaviorOperatorSid; manifestPath = (Join-Path $backup 'manifest.json')
@@ -1022,22 +1041,132 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         [void](Append-RecoveryProgress -Manifest $manifest -Journal $journal -UnitIndex 0 -Phase 'complete')
         Set-JournalProperty $journal 'phase' 'artifacts-complete'
         Write-JsonAtomic (Get-RecoveryJournalPath $manifest) $journal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
-        Assert-BehaviorThrows { Invoke-RecoveryStage $manifest 'service-state-reconcile' { Reconcile-LifeOSServiceSnapshotState -Snapshots $retrySnapshotMap -VerifyHealth -BeforeGatewayStart { $script:serviceTransitionEvents += 'before-gateway' } } -Postcondition { } } 'service state transition failure remains retryable'
+        Assert-BehaviorThrows { Invoke-RecoveryStage $manifest 'service-state-reconcile' $serviceReconcileAction -ReconcileAction $serviceReconcileAction -Postcondition $servicePostcondition } 'service state transition failure remains retryable'
         $afterTransitionFailure = Read-RecoveryJournal $manifest
         Assert-Behavior ([string]$afterTransitionFailure.stages.'service-state-reconcile' -ceq 'restoring') 'failed service state transition stays durably in restoring state.'
         Assert-Behavior ([string]$script:serviceTransitionStates['LifeOSAPI'] -eq 'Running' -and [string]$script:serviceTransitionStates['LifeOSGateway'] -eq 'Stopped') 'a failed service wait leaves the actual transition state observable for retry.'
-        Assert-BehaviorThrows { Invoke-RecoveryStage $manifest 'service-state-reconcile' { Reconcile-LifeOSServiceSnapshotState -Snapshots $retrySnapshotMap -VerifyHealth -BeforeGatewayStart { $script:serviceTransitionEvents += 'before-gateway' } } -Postcondition { } } 'service health failure remains retryable'
+        Assert-BehaviorThrows { Invoke-RecoveryStage $manifest 'service-state-reconcile' $serviceReconcileAction -ReconcileAction $serviceReconcileAction -Postcondition $servicePostcondition } 'service health failure remains retryable'
         Assert-Behavior ([string](Read-RecoveryJournal $manifest).stages.'service-state-reconcile' -ceq 'restoring') 'failed service health verification stays durably in restoring state.'
-        Invoke-RecoveryStage $manifest 'service-state-reconcile' { Reconcile-LifeOSServiceSnapshotState -Snapshots $retrySnapshotMap -VerifyHealth -BeforeGatewayStart { $script:serviceTransitionEvents += 'before-gateway' } } -Postcondition { }
+        Invoke-RecoveryStage $manifest 'service-state-reconcile' $serviceReconcileAction -ReconcileAction $serviceReconcileAction -Postcondition $servicePostcondition
         $completed = Read-RecoveryJournal $manifest
         Assert-Behavior ([string]$completed.stages.'service-state-reconcile' -ceq 'complete') 'service state recovery commits only after a verified retry succeeds.'
         Assert-Behavior ((($script:serviceTransitionEvents -join ',') -ceq 'start:LifeOSAPI,before-gateway,start:LifeOSGateway')) 'service recovery publishes the gateway pre-start evidence immediately before its one actual start across retries.'
+        $eventsBeforeSecondPass = ($script:serviceTransitionEvents -join ',')
+        Invoke-RecoveryStage $manifest 'service-state-reconcile' $serviceReconcileAction -ReconcileAction $serviceReconcileAction -Postcondition $servicePostcondition
+        $secondPass = Read-RecoveryJournal $manifest
+        Assert-Behavior ([string]$secondPass.stages.'service-state-reconcile' -ceq 'complete' -and
+            [string]$secondPass.stages.'service-state-reconcile-reconcile' -ceq 'complete' -and
+            ($script:serviceTransitionEvents -join ',') -ceq $eventsBeforeSecondPass) 'a second service recovery pass reconciles through a compatible companion stage without replaying service starts.'
     } finally {
         Remove-Variable -Name serviceTransitionStates -Scope Script
         Remove-Variable -Name serviceTransitionEvents -Scope Script
         Remove-Variable -Name serviceTransitionWaitFailures -Scope Script
         Remove-Variable -Name serviceTransitionHealthFailures -Scope Script
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+& {
+    # A completed legacy task stage must repair and re-verify its listener on a
+    # later recovery pass. Task state alone is not proof that the listener
+    # process survived the interruption.
+    $script:legacyListenerPresent = $false
+    $script:legacyListenerOriginalActionCount = 0
+    $script:legacyListenerRepairCount = 0
+    $script:legacyListenerJournalJson = $null
+    $script:legacyTaskPrincipalTampered = $false
+    $legacyTaskXml = '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Principals><Principal><UserId>S-1-5-18</UserId>`n<LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Actions><Exec><Command>C:\LifeOS\python.exe</Command><Arguments>C:\LifeOS\run_server.ps1</Arguments><WorkingDirectory>C:\LifeOS</WorkingDirectory></Exec></Actions></Task>'
+    $legacyTaskSnapshot = [pscustomobject]@{ Exists = $true; Enabled = $true; State = 'Running'; TaskPath = '\'; Xml = $legacyTaskXml }
+    $legacyListenerSnapshot = [pscustomobject]@{
+        Exists = $true; ExecutablePath = 'C:\LifeOS\python.exe'; ExecutableSha256 = 'exe-hash'
+        MainPath = 'C:\LifeOS\main.py'; MainSha256 = 'main-hash'
+        LauncherPath = 'C:\LifeOS\run_server.ps1'; LauncherSha256 = 'launcher-hash'
+    }
+    $legacyManifest = [pscustomobject]@{
+        transactionId = 'legacy-listener-retry'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = 'fixture-manifest'
+        paths = [pscustomobject]@{ backupDirectory = 'fixture-backup' }
+    }
+    function Get-RecoveryJournalPath { param($Manifest) return 'legacy-listener-retry.json' }
+    function Read-RecoveryJournal {
+        param($Manifest)
+        if ($null -eq $script:legacyListenerJournalJson) { return $null }
+        return $script:legacyListenerJournalJson | ConvertFrom-Json
+    }
+    function Write-JsonAtomic {
+        param([string]$Path, [object]$Value, [string]$OperatorSid, [long]$MaxBytes = 0)
+        $script:legacyListenerJournalJson = [string]($Value | ConvertTo-Json -Depth 20 -Compress)
+    }
+    function Get-LegacyGatewayListenerSnapshot {
+        param($TaskSnapshot, $TaskName, $TaskPath, [int]$Port = 8421)
+        if (-not $script:legacyListenerPresent) { return [pscustomobject]@{ Exists = $false } }
+        return [pscustomobject]@{
+            Exists = $true; ExecutablePath = 'C:\LifeOS\python.exe'; ExecutableSha256 = 'exe-hash'
+            MainPath = 'C:\LifeOS\main.py'; MainSha256 = 'main-hash'
+            LauncherPath = 'C:\LifeOS\run_server.ps1'; LauncherSha256 = 'launcher-hash'
+        }
+    }
+    $script:legacyTaskState = 'Running'
+    function Get-ScheduledTask {
+        [CmdletBinding()]
+        param([string]$TaskName, [string]$TaskPath)
+        return [pscustomobject]@{ TaskName = $TaskName; TaskPath = $TaskPath; State = $script:legacyTaskState }
+    }
+    function Export-ScheduledTask {
+        [CmdletBinding()]
+        param([string]$TaskName, [string]$TaskPath)
+        if ($script:legacyTaskPrincipalTampered) { return $legacyTaskXml.Replace('S-1-5-18', 'S-1-5-19') }
+        return $legacyTaskXml
+    }
+    function Stop-ScheduledTask {
+        [CmdletBinding()]
+        param([string]$TaskName, [string]$TaskPath)
+        $script:legacyTaskState = 'Ready'
+    }
+    function Start-ScheduledTask {
+        [CmdletBinding()]
+        param([string]$TaskName, [string]$TaskPath)
+        $script:legacyListenerRepairCount++
+        $script:legacyTaskState = 'Running'
+        $script:legacyListenerPresent = $true
+    }
+    function Reconcile-LifeOSScheduledTaskSnapshotState { param($Snapshot, $TaskName) }
+    function Assert-LifeOSScheduledTaskSnapshotState { param($Snapshot, $TaskName) }
+    $legacyAction = {
+        $script:legacyListenerOriginalActionCount++
+        Restore-LegacyGatewayListener $legacyTaskSnapshot $legacyListenerSnapshot 'LifeOSSyncServer' '\' 8421
+    }
+    $legacyReconcileAction = {
+        if ([bool]$legacyListenerSnapshot.Exists) {
+            Restore-LegacyGatewayListener $legacyTaskSnapshot $legacyListenerSnapshot 'LifeOSSyncServer' '\' 8421
+        }
+        Reconcile-LifeOSScheduledTaskSnapshotState $legacyTaskSnapshot 'LifeOSSyncServer'
+    }
+    $legacyPostcondition = {
+        Assert-LifeOSScheduledTaskSnapshotState $legacyTaskSnapshot 'LifeOSSyncServer'
+        Assert-LifeOSLegacyGatewayListenerSnapshotState -TaskSnapshot $legacyTaskSnapshot -ListenerSnapshot $legacyListenerSnapshot -TaskName 'LifeOSSyncServer' -TaskPath '\' -Port 8421
+    }
+    try {
+        $script:legacyTaskPrincipalTampered = $true
+        Assert-BehaviorThrows { Assert-LegacyTaskUnchanged $legacyTaskSnapshot 'LifeOSSyncServer' '\' } 'legacy listener restart rejects a principal-only task identity change.'
+        $script:legacyTaskPrincipalTampered = $false
+        $journal = [pscustomobject]@{
+            schemaVersion = 1; transactionId = $legacyManifest.transactionId; generation = $legacyManifest.generation; operatorSid = $legacyManifest.operatorSid; manifestPath = $legacyManifest.manifestPath
+            units = @(); unitCount = 0; treeRoots = @(); phase = 'artifacts-complete'; writersReleased = $true; stages = [pscustomobject]@{}
+        }
+        $script:legacyListenerJournalJson = [string]($journal | ConvertTo-Json -Depth 20 -Compress)
+        Invoke-RecoveryStage $legacyManifest 'Restore-LegacyTask' $legacyAction -ReconcileAction $legacyReconcileAction -Postcondition $legacyPostcondition
+        $script:legacyListenerPresent = $false
+        Invoke-RecoveryStage $legacyManifest 'Restore-LegacyTask' $legacyAction -ReconcileAction $legacyReconcileAction -Postcondition $legacyPostcondition
+        $recovered = Read-RecoveryJournal $legacyManifest
+        Assert-Behavior ($script:legacyListenerOriginalActionCount -eq 1 -and $script:legacyListenerRepairCount -eq 2) 'legacy listener recovery repairs the missing listener without replaying the original task stage.'
+        Assert-Behavior ([string]$recovered.stages.'Restore-LegacyTask' -ceq 'complete' -and [string]$recovered.stages.'Restore-LegacyTask-reconcile' -ceq 'complete') 'legacy listener repair and verification are durably complete after a retry.'
+    } finally {
+        Remove-Variable -Name legacyListenerPresent -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name legacyListenerOriginalActionCount -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name legacyListenerRepairCount -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name legacyListenerJournalJson -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name legacyTaskPrincipalTampered -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name legacyTaskState -Scope Script -ErrorAction SilentlyContinue
     }
 }
 
@@ -1719,7 +1848,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         [IO.File]::WriteAllBytes($progressPath, $tornBytes)
         $beforeTail = [IO.File]::ReadAllBytes($progressPath)
         $action = { throw 'terminal recovery action must not run' }
-        $liveAction = { throw 'terminal recovery live action must not run' }
+        $reconcileAction = { throw 'terminal recovery reconciliation must not run' }
         $postcondition = { throw 'terminal recovery postcondition must not run' }
         $script:terminalProgressAclFailureMode = $false
         $script:terminalProgressAclAssertions = 0
@@ -1727,7 +1856,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         $script:terminalGetAclCalls = 0
         $terminalTailError = $null
         try {
-            Invoke-RecoveryStage $manifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition
+            Invoke-RecoveryStage $manifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition
         } catch { $terminalTailError = [string]$_.Exception.Message }
         Assert-Behavior ($terminalTailError -ceq 'Recovery progress log contains an incomplete final frame.') 'completed recovery rejects a torn progress tail with the precise reader error.'
         $afterTail = [IO.File]::ReadAllBytes($progressPath)
@@ -1742,7 +1871,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         $script:terminalSetAclCalls = 0
         $script:terminalGetAclCalls = 0
         Assert-BehaviorThrows {
-            Invoke-RecoveryStage $manifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition
+            Invoke-RecoveryStage $manifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition
         } 'completed recovery rejects a repairable progress ACL before repair'
         $afterAcl = [IO.File]::ReadAllBytes($progressPath)
         Assert-Behavior ([Convert]::ToBase64String($afterAcl) -ceq [Convert]::ToBase64String($beforeAcl) -and
@@ -1833,6 +1962,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     [IO.File]::WriteAllText($codexBackup, $xml)
     [IO.File]::WriteAllText($snapshotBackup, $xml)
     $script:taskRetryStates = [ordered]@{ LifeOSCodexCollector = 'Running'; LifeOSTailscaleSnapshot = 'Running' }
+    $script:taskRetryReadCounts = @{}
     $script:taskRetrySnapshotFailure = $true
     $script:taskRetryJournal = [pscustomobject]@{
         schemaVersion = 1; transactionId = 'task-retry-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = 'fixture'
@@ -1852,6 +1982,12 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         $names = if ([string]::IsNullOrWhiteSpace($TaskName)) { @($script:taskRetryStates.Keys) } else { @($TaskName) }
         foreach ($name in $names) {
             if ($script:taskRetryStates.Contains($name)) {
+                if ([string]$script:taskRetryStates[$name] -eq 'Queued') {
+                    $reads = if ($script:taskRetryReadCounts.ContainsKey($name)) { [int]$script:taskRetryReadCounts[$name] } else { 0 }
+                    $reads++
+                    $script:taskRetryReadCounts[$name] = $reads
+                    if ($reads -ge 2) { $script:taskRetryStates[$name] = 'Running' }
+                }
                 [pscustomobject]@{ TaskName = $name; TaskPath = '\'; State = [string]$script:taskRetryStates[$name] }
             }
         }
@@ -1861,21 +1997,27 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     function Disable-ScheduledTask { [CmdletBinding()] param($TaskName, $TaskPath) $script:taskRetryStates[$TaskName] = 'Disabled' }
     function Stop-ScheduledTask { [CmdletBinding()] param($TaskName, $TaskPath) $script:taskRetryStates[$TaskName] = 'Disabled' }
     function Enable-ScheduledTask { [CmdletBinding()] param($TaskName, $TaskPath) $script:taskRetryStates[$TaskName] = 'Ready' }
-    function Start-ScheduledTask { [CmdletBinding()] param($TaskName, $TaskPath) $script:taskRetryStates[$TaskName] = 'Running' }
+    function Start-ScheduledTask { [CmdletBinding()] param($TaskName, $TaskPath) $script:taskRetryReadCounts[$TaskName] = 0; $script:taskRetryStates[$TaskName] = 'Queued' }
     function Register-ScheduledTask {
         [CmdletBinding()]
         param($TaskName, $TaskPath, $Xml, [switch]$Force)
         if ($TaskName -eq 'LifeOSTailscaleSnapshot' -and $script:taskRetrySnapshotFailure) { throw 'fixture snapshot restoration failure' }
         $script:taskRetryStates[$TaskName] = 'Ready'
     }
+    $taskReconcileAction = {
+        Reconcile-LifeOSScheduledTaskSnapshotState $codexRecord 'LifeOSCodexCollector'
+    }
+    $snapshotReconcileAction = {
+        Reconcile-LifeOSScheduledTaskSnapshotState $snapshotRecord 'LifeOSTailscaleSnapshot'
+    }
     function Invoke-TaskRollbackRetryFixture {
         $success = $false
         try {
             Stop-DeploymentTaskBarrier $manifest 'fixture'
-            Invoke-RecoveryStage $manifest 'Restore-CodexCollectorTask' { Restore-CodexCollectorTask $codexRecord 'LifeOSCodexCollector' } -Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState $codexRecord 'LifeOSCodexCollector' }
-            Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' { Restore-TailscaleSnapshotTask $snapshotRecord 'LifeOSTailscaleSnapshot' } -Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState $snapshotRecord 'LifeOSTailscaleSnapshot' }
-            Reconcile-LifeOSScheduledTaskSnapshotState $codexRecord 'LifeOSCodexCollector'
-            Reconcile-LifeOSScheduledTaskSnapshotState $snapshotRecord 'LifeOSTailscaleSnapshot'
+            Invoke-RecoveryStage $manifest 'Restore-CodexCollectorTask' { Restore-CodexCollectorTask $codexRecord 'LifeOSCodexCollector' } -ReconcileAction $taskReconcileAction -Postcondition { Assert-LifeOSScheduledTaskSnapshotState $codexRecord 'LifeOSCodexCollector' }
+            Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' { Restore-TailscaleSnapshotTask $snapshotRecord 'LifeOSTailscaleSnapshot' } -ReconcileAction $snapshotReconcileAction -Postcondition { Assert-LifeOSScheduledTaskSnapshotState $snapshotRecord 'LifeOSTailscaleSnapshot' }
+            Assert-LifeOSScheduledTaskSnapshotState $codexRecord 'LifeOSCodexCollector'
+            Assert-LifeOSScheduledTaskSnapshotState $snapshotRecord 'LifeOSTailscaleSnapshot'
             $success = $true
         } catch { }
         return $success
@@ -1886,12 +2028,17 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         $script:taskRetrySnapshotFailure = $false
         Assert-Behavior (Invoke-TaskRollbackRetryFixture) 'outer rollback retry succeeds only after both task restorations.'
         Assert-Behavior ($script:taskRetryStates['LifeOSCodexCollector'] -eq 'Running' -and $script:taskRetryStates['LifeOSTailscaleSnapshot'] -eq 'Running') 'successful recovery leaves previously running writers running and enabled.'
-    } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
+        Assert-Behavior ([int]$script:taskRetryReadCounts['LifeOSCodexCollector'] -ge 2 -and [int]$script:taskRetryReadCounts['LifeOSTailscaleSnapshot'] -ge 2) 'task recovery waits for delayed Task Scheduler convergence before observation.'
+    } finally {
+        Remove-Variable -Name taskRetryReadCounts -Scope Script -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $temp -Recurse -Force
+    }
 }
 
 & {
     $script:scheduledTaskLookupMode = 'not-found'
     $script:scheduledTaskEnumerationCount = 0
+    $script:scheduledTaskMutationCount = 0
     function Get-ScheduledTask {
         [CmdletBinding()]
         param([string]$TaskName, [string]$TaskPath)
@@ -1903,6 +2050,15 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
                     [pscustomobject]@{ TaskName = 'UnrelatedFixture'; TaskPath = '\'; State = 'Ready' }
                     [pscustomobject]@{ TaskName = 'LifeOSAbsentFixture'; TaskPath = '\'; State = 'Ready' }
                 )
+            }
+            'ambiguous' {
+                return @(
+                    [pscustomobject]@{ TaskName = 'LifeOSAbsentFixture'; TaskPath = '\'; State = 'Ready' }
+                    [pscustomobject]@{ TaskName = 'LifeOSAbsentFixture'; TaskPath = '\'; State = 'Ready' }
+                )
+            }
+            'invalid-state' {
+                return [pscustomobject]@{ TaskName = 'LifeOSAbsentFixture'; TaskPath = '\'; State = 'Bogus' }
             }
             'over-limit' {
                 for ($index = 0; $index -lt 9000; $index++) {
@@ -1941,6 +2097,12 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
             default { throw 'unknown scheduled task fixture mode' }
         }
     }
+    function Register-ScheduledTask { $script:scheduledTaskMutationCount++ }
+    function Unregister-ScheduledTask { $script:scheduledTaskMutationCount++ }
+    function Enable-ScheduledTask { $script:scheduledTaskMutationCount++ }
+    function Disable-ScheduledTask { $script:scheduledTaskMutationCount++ }
+    function Start-ScheduledTask { $script:scheduledTaskMutationCount++ }
+    function Stop-ScheduledTask { $script:scheduledTaskMutationCount++ }
     $absentSnapshot = [pscustomobject]@{ Exists = $false; Enabled = $false; State = 'Stopped'; TaskPath = '\' }
     try {
         $script:scheduledTaskLookupMode = 'empty'
@@ -1951,6 +2113,17 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         $script:scheduledTaskLookupMode = 'matching'
         Reconcile-LifeOSScheduledTaskSnapshotState $presentSnapshot 'LifeOSAbsentFixture' -TimeoutSeconds 1
         Assert-Behavior $true 'successful enumeration exact-filters the requested task name and path.'
+        $script:scheduledTaskLookupMode = 'empty'
+        Assert-LifeOSScheduledTaskSnapshotState $absentSnapshot 'LifeOSAbsentFixture'
+        $script:scheduledTaskLookupMode = 'matching'
+        Assert-LifeOSScheduledTaskSnapshotState $presentSnapshot 'LifeOSAbsentFixture'
+        $runningSnapshot = [pscustomobject]@{ Exists = $true; Enabled = $true; State = 'Running'; TaskPath = '\' }
+        Assert-BehaviorThrows { Assert-LifeOSScheduledTaskSnapshotState $runningSnapshot 'LifeOSAbsentFixture' } 'observation-only task assertion rejects a state mismatch.'
+        Assert-Behavior ($script:scheduledTaskMutationCount -eq 0) 'observation-only task assertion performs no task mutation on mismatch.'
+        $script:scheduledTaskLookupMode = 'ambiguous'
+        Assert-BehaviorThrows { Assert-LifeOSScheduledTaskSnapshotState $presentSnapshot 'LifeOSAbsentFixture' } 'observation-only task assertion rejects ambiguity.'
+        $script:scheduledTaskLookupMode = 'invalid-state'
+        Assert-BehaviorThrows { Assert-LifeOSScheduledTaskSnapshotState $presentSnapshot 'LifeOSAbsentFixture' } 'observation-only task assertion rejects an invalid provider state.'
         $script:scheduledTaskLookupMode = 'not-found'
         Assert-BehaviorThrows { Reconcile-LifeOSScheduledTaskSnapshotState $absentSnapshot 'LifeOSAbsentFixture' -TimeoutSeconds 1 } 'scheduled task enumeration ObjectNotFound is not treated as absent.'
         $script:scheduledTaskLookupMode = 'access-denied'
@@ -1962,9 +2135,15 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         $script:scheduledTaskLookupMode = 'over-limit'
         Assert-BehaviorThrows { Reconcile-LifeOSScheduledTaskSnapshotState $absentSnapshot 'LifeOSAbsentFixture' -TimeoutSeconds 1 } 'scheduled task inventory cap fails closed.'
         Assert-Behavior ($script:scheduledTaskEnumerationCount -eq 8193) 'scheduled task enumeration stops at the first record beyond its cap.'
+        foreach ($mode in @('not-found', 'access-denied', 'provider-failure', 'unrelated-not-found')) {
+            $script:scheduledTaskLookupMode = $mode
+            Assert-BehaviorThrows { Assert-LifeOSScheduledTaskSnapshotState $absentSnapshot 'LifeOSAbsentFixture' } "observation-only task assertion fails closed for $mode."
+        }
+        Assert-Behavior ($script:scheduledTaskMutationCount -eq 0) 'observation-only task assertion never invokes a task mutation command.'
     } finally {
         Remove-Variable -Name scheduledTaskLookupMode -Scope Script
         Remove-Variable -Name scheduledTaskEnumerationCount -Scope Script
+        Remove-Variable -Name scheduledTaskMutationCount -Scope Script
     }
 }
 
@@ -2339,11 +2518,14 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
 & {
     $script:stageFixtureJournalJson = $null
     $script:stageFixtureWriteCalls = 0
-    $script:stageFixtureCallbackCalls = [ordered]@{ Action = 0; LiveAction = 0; Postcondition = 0 }
+    $script:stageFixtureCallbackCalls = [ordered]@{ Action = 0; ReconcileAction = 0; Postcondition = 0 }
     $script:stageFixtureMutationCalls = [ordered]@{ Service = 0; Task = 0 }
     $script:stageFixtureEvents = New-Object System.Collections.ArrayList
     $script:stageFixtureState = [ordered]@{ Service = 'stable-service'; Task = 'stable-task' }
     $script:stageFixtureRetryAttempts = 0
+    $script:stageFixtureWriteFailure = $false
+    $script:stageFixtureReconcileFailure = $false
+    $script:stageFixturePostconditionFailure = $false
     $fixtureManifest = [pscustomobject]@{
         transactionId = 'stage-boundary-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = 'fixture-manifest'
         paths = [pscustomobject]@{ backupDirectory = 'fixture-backup' }
@@ -2362,6 +2544,9 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
     }
     function Write-JsonAtomic {
         param([string]$Path, [object]$Value, [string]$OperatorSid, [long]$MaxBytes = 0)
+        $reconcileState = Get-JournalProperty (Get-JournalProperty $Value 'stages') 'fixture-stage-reconcile'
+        if ($null -ne $reconcileState) { [void]$script:stageFixtureEvents.Add(('checkpoint-' + [string]$reconcileState)) }
+        if ($script:stageFixtureWriteFailure) { throw 'fixture checkpoint failure' }
         $script:stageFixtureWriteCalls++
         $script:stageFixtureJournalJson = [string]($Value | ConvertTo-Json -Depth 20 -Compress)
     }
@@ -2377,12 +2562,15 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
     }
     function Reset-StageFixtureObservations {
         param([string]$Service = 'stable-service', [string]$Task = 'stable-task')
-        foreach ($name in @('Action', 'LiveAction', 'Postcondition')) { $script:stageFixtureCallbackCalls[$name] = 0 }
+        foreach ($name in @('Action', 'ReconcileAction', 'Postcondition')) { $script:stageFixtureCallbackCalls[$name] = 0 }
         foreach ($name in @('Service', 'Task')) { $script:stageFixtureMutationCalls[$name] = 0 }
         $script:stageFixtureWriteCalls = 0
         $script:stageFixtureEvents = New-Object System.Collections.ArrayList
         $script:stageFixtureState['Service'] = $Service
         $script:stageFixtureState['Task'] = $Task
+        $script:stageFixtureWriteFailure = $false
+        $script:stageFixtureReconcileFailure = $false
+        $script:stageFixturePostconditionFailure = $false
     }
     function New-StageFixtureJournal {
         param(
@@ -2404,15 +2592,16 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
         [void]$script:stageFixtureEvents.Add('action')
         Set-StageFixtureServiceState 'action'
     }
-    $liveAction = {
-        $script:stageFixtureCallbackCalls['LiveAction']++
-        [void]$script:stageFixtureEvents.Add('live-action')
-        Set-StageFixtureTaskState 'live-action'
+    $reconcileAction = {
+        $script:stageFixtureCallbackCalls['ReconcileAction']++
+        [void]$script:stageFixtureEvents.Add('reconcile-action')
+        Set-StageFixtureTaskState 'reconcile-action'
+        if ($script:stageFixtureReconcileFailure) { throw 'fixture reconciliation failure' }
     }
     $postcondition = {
         $script:stageFixtureCallbackCalls['Postcondition']++
         [void]$script:stageFixtureEvents.Add('postcondition')
-        Set-StageFixtureServiceState 'postcondition'
+        if ($script:stageFixturePostconditionFailure) { throw 'fixture postcondition failure' }
     }
 
     try {
@@ -2420,10 +2609,10 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
         Save-StageFixtureJournal $terminalJournal
         Reset-StageFixtureObservations
         $terminalSavedBefore = [string]$script:stageFixtureJournalJson
-        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition
-        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition
         Assert-Behavior ($script:stageFixtureCallbackCalls['Action'] -eq 0 -and
-            $script:stageFixtureCallbackCalls['LiveAction'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['ReconcileAction'] -eq 0 -and
             $script:stageFixtureCallbackCalls['Postcondition'] -eq 0 -and
             $script:stageFixtureMutationCalls['Service'] -eq 0 -and
             $script:stageFixtureMutationCalls['Task'] -eq 0 -and
@@ -2439,9 +2628,9 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
             Save-StageFixtureJournal (New-StageFixtureJournal -Phase 'completed' -StageState $case.StageState -IncludeStage $case.IncludeStage)
             Reset-StageFixtureObservations
             $savedBefore = [string]$script:stageFixtureJournalJson
-            Assert-BehaviorThrows { Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition } $case.Label
+            Assert-BehaviorThrows { Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition } $case.Label
             Assert-Behavior ($script:stageFixtureCallbackCalls['Action'] -eq 0 -and
-                $script:stageFixtureCallbackCalls['LiveAction'] -eq 0 -and
+                $script:stageFixtureCallbackCalls['ReconcileAction'] -eq 0 -and
                 $script:stageFixtureCallbackCalls['Postcondition'] -eq 0 -and
                 $script:stageFixtureMutationCalls['Service'] -eq 0 -and
                 $script:stageFixtureMutationCalls['Task'] -eq 0 -and
@@ -2454,15 +2643,69 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
         Save-StageFixtureJournal (New-StageFixtureJournal -Phase 'artifacts-complete' -StageState 'complete' -WritersReleased $true)
         Reset-StageFixtureObservations
         $artifactsSavedBefore = [string]$script:stageFixtureJournalJson
-        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -LiveAction $liveAction -Postcondition $postcondition
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -Postcondition $postcondition
         Assert-Behavior ($script:stageFixtureCallbackCalls['Action'] -eq 0 -and
-            $script:stageFixtureCallbackCalls['LiveAction'] -eq 1 -and
+            $script:stageFixtureCallbackCalls['ReconcileAction'] -eq 0 -and
             $script:stageFixtureCallbackCalls['Postcondition'] -eq 1 -and
-            (($script:stageFixtureEvents -join ',') -ceq 'live-action,postcondition') -and
-            $script:stageFixtureWriteCalls -eq 0) 'an artifacts-complete complete stage runs LiveAction then Postcondition without a checkpoint.'
-        Assert-Behavior ($script:stageFixtureMutationCalls['Service'] -eq 1 -and $script:stageFixtureMutationCalls['Task'] -eq 1 -and
-            $script:stageFixtureState['Service'] -ceq 'postcondition' -and $script:stageFixtureState['Task'] -ceq 'live-action' -and
-            [string]$script:stageFixtureJournalJson -ceq $artifactsSavedBefore) 'an artifacts-complete stage reconciles live state while preserving the saved journal.'
+            (($script:stageFixtureEvents -join ',') -ceq 'postcondition') -and
+            $script:stageFixtureWriteCalls -eq 0) 'an artifacts-complete complete stage runs only its observation postcondition without a checkpoint.'
+        Assert-Behavior ($script:stageFixtureMutationCalls['Service'] -eq 0 -and $script:stageFixtureMutationCalls['Task'] -eq 0 -and
+            [string]$script:stageFixtureJournalJson -ceq $artifactsSavedBefore) 'an artifacts-complete stage preserves live state and its serialized journal without reconciliation.'
+
+        Reset-StageFixtureObservations -Service 'stable-service' -Task 'stable-task'
+        $reconcileSavedBefore = [string]$script:stageFixtureJournalJson
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition
+        Assert-Behavior ($script:stageFixtureCallbackCalls['Action'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['ReconcileAction'] -eq 1 -and
+            $script:stageFixtureCallbackCalls['Postcondition'] -eq 1 -and
+            (($script:stageFixtureEvents -join ',') -ceq 'checkpoint-restoring,reconcile-action,postcondition,checkpoint-complete') -and
+            $script:stageFixtureWriteCalls -eq 2) 'a completed stage journals reconciliation before mutation and commits it after its observation.'
+        $reconciledJournal = Read-RecoveryJournal $fixtureManifest
+        Assert-Behavior ([string]$reconciledJournal.stages.'fixture-stage' -ceq 'complete' -and
+            [string]$reconciledJournal.stages.'fixture-stage-reconcile' -ceq 'complete' -and
+            [string]$script:stageFixtureState['Task'] -ceq 'reconcile-action' -and
+            [string]$script:stageFixtureJournalJson -cne $reconcileSavedBefore) 'a completed stage keeps its original commit and durably records the reconciliation commit.'
+
+        Reset-StageFixtureObservations
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition
+        Assert-Behavior ($script:stageFixtureCallbackCalls['Action'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['ReconcileAction'] -eq 1 -and
+            $script:stageFixtureCallbackCalls['Postcondition'] -eq 1 -and
+            (($script:stageFixtureEvents -join ',') -ceq 'checkpoint-restoring,reconcile-action,postcondition,checkpoint-complete') -and
+            $script:stageFixtureWriteCalls -eq 2) 'a repeated reconciliation crosses a fresh companion checkpoint.'
+
+        Reset-StageFixtureObservations
+        $script:stageFixtureWriteFailure = $true
+        $savedBeforeCheckpointFailure = [string]$script:stageFixtureJournalJson
+        Assert-BehaviorThrows { Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition } 'a failed reconciliation checkpoint prevents mutation.'
+        Assert-Behavior ($script:stageFixtureCallbackCalls['ReconcileAction'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['Postcondition'] -eq 0 -and
+            $script:stageFixtureMutationCalls['Task'] -eq 0 -and
+            [string]$script:stageFixtureJournalJson -ceq $savedBeforeCheckpointFailure) 'a failed reconciliation checkpoint leaves the durable journal unchanged.'
+        $script:stageFixtureWriteFailure = $false
+
+        Reset-StageFixtureObservations
+        $script:stageFixtureReconcileFailure = $true
+        Assert-BehaviorThrows { Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition } 'a failed reconciliation remains retryable.'
+        $failedReconcileJournal = Read-RecoveryJournal $fixtureManifest
+        Assert-Behavior ([string]$failedReconcileJournal.stages.'fixture-stage' -ceq 'complete' -and
+            [string]$failedReconcileJournal.stages.'fixture-stage-reconcile' -ceq 'restoring' -and
+            $script:stageFixtureCallbackCalls['Action'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['Postcondition'] -eq 0) 'a failed reconciliation preserves the original completion and companion restoring state.'
+        $script:stageFixtureReconcileFailure = $false
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition
+        Assert-Behavior ([string](Read-RecoveryJournal $fixtureManifest).stages.'fixture-stage-reconcile' -ceq 'complete' -and
+            $script:stageFixtureCallbackCalls['Action'] -eq 0) 'a retry after reconciliation failure does not rerun the original action.'
+
+        Reset-StageFixtureObservations
+        $script:stageFixturePostconditionFailure = $true
+        Assert-BehaviorThrows { Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition } 'a failed reconciliation postcondition remains retryable.'
+        $failedPostconditionJournal = Read-RecoveryJournal $fixtureManifest
+        Assert-Behavior ([string]$failedPostconditionJournal.stages.'fixture-stage-reconcile' -ceq 'restoring' -and
+            $script:stageFixtureCallbackCalls['Action'] -eq 0) 'a failed reconciliation postcondition leaves the companion restoring.'
+        $script:stageFixturePostconditionFailure = $false
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition
+        Assert-Behavior ([string](Read-RecoveryJournal $fixtureManifest).stages.'fixture-stage-reconcile' -ceq 'complete') 'a postcondition failure can be retried through the companion boundary.'
 
         $script:stageFixtureRetryAttempts = 0
         $retryAction = {
@@ -2474,20 +2717,20 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
         }
         Save-StageFixtureJournal (New-StageFixtureJournal -Phase 'artifacts-complete' -StageState $null -IncludeStage $false)
         Reset-StageFixtureObservations
-        Assert-BehaviorThrows { Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $retryAction -LiveAction $liveAction -Postcondition $postcondition } 'failed artifacts-complete action stays retryable'
+        Assert-BehaviorThrows { Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $retryAction -ReconcileAction $reconcileAction -Postcondition $postcondition } 'failed artifacts-complete action stays retryable'
         $failedRetryJournal = Read-RecoveryJournal $fixtureManifest
         Assert-Behavior ([string]$failedRetryJournal.stages.'fixture-stage' -ceq 'restoring' -and
             $script:stageFixtureCallbackCalls['Action'] -eq 1 -and
-            $script:stageFixtureCallbackCalls['LiveAction'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['ReconcileAction'] -eq 0 -and
             $script:stageFixtureCallbackCalls['Postcondition'] -eq 0 -and
             $script:stageFixtureWriteCalls -eq 1) 'a failed artifacts-complete action saves restoring and does not run live reconciliation.'
-        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $retryAction -LiveAction $liveAction -Postcondition $postcondition
+        Invoke-RecoveryStage $fixtureManifest 'fixture-stage' $retryAction -ReconcileAction $reconcileAction -Postcondition $postcondition
         $successfulRetryJournal = Read-RecoveryJournal $fixtureManifest
         Assert-Behavior ([string]$successfulRetryJournal.stages.'fixture-stage' -ceq 'complete' -and
             $script:stageFixtureCallbackCalls['Action'] -eq 2 -and
-            $script:stageFixtureCallbackCalls['LiveAction'] -eq 0 -and
+            $script:stageFixtureCallbackCalls['ReconcileAction'] -eq 0 -and
             $script:stageFixtureCallbackCalls['Postcondition'] -eq 1 -and
-            $script:stageFixtureWriteCalls -eq 3) 'a successful retry completes the stage after Action and Postcondition, without LiveAction.'
+            $script:stageFixtureWriteCalls -eq 3) 'a successful retry completes the stage after Action and Postcondition, without ReconcileAction.'
     } finally {
         Remove-Variable -Name stageFixtureJournalJson -Scope Script -ErrorAction SilentlyContinue
         Remove-Variable -Name stageFixtureWriteCalls -Scope Script -ErrorAction SilentlyContinue
@@ -2496,6 +2739,9 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
         Remove-Variable -Name stageFixtureEvents -Scope Script -ErrorAction SilentlyContinue
         Remove-Variable -Name stageFixtureState -Scope Script -ErrorAction SilentlyContinue
         Remove-Variable -Name stageFixtureRetryAttempts -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name stageFixtureWriteFailure -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name stageFixtureReconcileFailure -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name stageFixturePostconditionFailure -Scope Script -ErrorAction SilentlyContinue
     }
 }
 

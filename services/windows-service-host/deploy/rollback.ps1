@@ -18,6 +18,9 @@ Assert-WindowsAdministrator
 $deploymentMutex = $null
 $rollbackCompleted = $false
 $recoveryDiagnosticsSession = $null
+$legacySnapshot = $null
+$codexSnapshot = $null
+$snapshotTaskSnapshot = $null
 try {
 $recoveryDiagnosticsSession = Start-LifeOSRecoveryDiagnostics -Enabled:$RecoveryDiagnostics
 Assert-ExistingFile $ManifestPath 'Rollback manifest'
@@ -96,11 +99,23 @@ if ($legacySnapshot.Exists) {
     $legacySnapshot.Xml = Read-LifeOSCappedFileText -Path $taskBackup -MaxBytes (1 * 1024 * 1024) -Description 'Legacy task recovery XML'
 }
 Enable-RecoveryWriterRestoration $manifest
-Restore-LegacyTask $legacySnapshot $LegacyTaskName
-if ($null -ne $manifest.PSObject.Properties['legacyListener'] -and [bool]$manifest.legacyListener.Exists) {
-    Restore-LegacyGatewayListener -TaskSnapshot $legacySnapshot -ListenerSnapshot $manifest.legacyListener -TaskName $LegacyTaskName -TaskPath ([string]$legacySnapshot.TaskPath) -Port 8421
+Invoke-RecoveryStage $manifest 'Restore-LegacyTask' {
+    Restore-LegacyTask $legacySnapshot $LegacyTaskName
+        if ($null -ne $manifest.PSObject.Properties['legacyListener'] -and [bool]$manifest.legacyListener.Exists) {
+            Restore-LegacyGatewayListener -TaskSnapshot $legacySnapshot -ListenerSnapshot $manifest.legacyListener -TaskName $LegacyTaskName -TaskPath ([string]$legacySnapshot.TaskPath) -Port 8421
+        }
+        Reconcile-LifeOSScheduledTaskSnapshotState $legacySnapshot $LegacyTaskName
+    } -ReconcileAction {
+    if ($null -ne $manifest.PSObject.Properties['legacyListener'] -and [bool]$manifest.legacyListener.Exists) {
+        Restore-LegacyGatewayListener -TaskSnapshot $legacySnapshot -ListenerSnapshot $manifest.legacyListener -TaskName $LegacyTaskName -TaskPath ([string]$legacySnapshot.TaskPath) -Port 8421
+    }
+    Reconcile-LifeOSScheduledTaskSnapshotState $legacySnapshot $LegacyTaskName
+} -Postcondition {
+    Assert-LifeOSScheduledTaskSnapshotState $legacySnapshot $LegacyTaskName
+    if ($null -ne $manifest.PSObject.Properties['legacyListener']) {
+        Assert-LifeOSLegacyGatewayListenerSnapshotState -TaskSnapshot $legacySnapshot -ListenerSnapshot $manifest.legacyListener -TaskName $LegacyTaskName -TaskPath ([string]$legacySnapshot.TaskPath) -Port 8421
+    }
 }
-Reconcile-LifeOSScheduledTaskSnapshotState $legacySnapshot $LegacyTaskName
 
 $codexSnapshot = [pscustomobject]@{ Exists = $false; Enabled = $false; State = 'Stopped'; TaskPath = '\'; Xml = $null }
 if ($null -ne $manifest.PSObject.Properties['codexTask']) {
@@ -160,10 +175,10 @@ if ($gatewayNeedsSnapshot) {
     $stoppedSnapshotTask = [pscustomobject]@{ Exists = $true; Enabled = $false; State = 'Stopped'; TaskPath = $snapshotTaskPath }
     Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' {
         Restore-TailscaleSnapshotTask -Snapshot $snapshotTaskSnapshot -TaskName $TailscaleSnapshotTaskName -KeepStopped
-    } -LiveAction {
+    } -ReconcileAction {
         Reconcile-LifeOSScheduledTaskSnapshotState $stoppedSnapshotTask $TailscaleSnapshotTaskName
     } -Postcondition {
-        Reconcile-LifeOSScheduledTaskSnapshotState $stoppedSnapshotTask $TailscaleSnapshotTaskName
+        Assert-LifeOSScheduledTaskSnapshotState $stoppedSnapshotTask $TailscaleSnapshotTaskName
     }
 }
 
@@ -175,14 +190,36 @@ Stop-DeploymentTaskBarrier $manifest $manifestPath
 Restore-LifeOSServiceSnapshots -Snapshots $serviceSnapshots -Manifest $manifest -ContinueOnFailure -VerifyHealth -BeforeGatewayStart {
     Invoke-LifeOSBeforeGatewayStart -TaskName $TailscaleSnapshotTaskName -TaskPath $snapshotTaskPath -OutputPath ([string]$manifest.paths.tailscaleSnapshot) -TailscaleExecutable ([string]$manifest.paths.tailscaleExecutable)
 }
-Invoke-RecoveryStage $manifest 'Restore-CodexCollectorTask' { Restore-CodexCollectorTask $codexSnapshot $CodexTaskName } -Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState $codexSnapshot $CodexTaskName }
-Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' { Restore-TailscaleSnapshotTask $snapshotTaskSnapshot $TailscaleSnapshotTaskName } -LiveAction { Restore-TailscaleSnapshotTask $snapshotTaskSnapshot $TailscaleSnapshotTaskName } -Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState $snapshotTaskSnapshot $TailscaleSnapshotTaskName }
-Reconcile-LifeOSScheduledTaskSnapshotState $legacySnapshot $LegacyTaskName
-Reconcile-LifeOSScheduledTaskSnapshotState $codexSnapshot $CodexTaskName
-Reconcile-LifeOSScheduledTaskSnapshotState $snapshotTaskSnapshot $TailscaleSnapshotTaskName
+Invoke-RecoveryStage $manifest 'Restore-CodexCollectorTask' {
+    Restore-CodexCollectorTask $codexSnapshot $CodexTaskName
+} -ReconcileAction {
+    Reconcile-LifeOSScheduledTaskSnapshotState $codexSnapshot $CodexTaskName
+} -Postcondition {
+    Assert-LifeOSScheduledTaskSnapshotState $codexSnapshot $CodexTaskName
+}
+Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' {
+    Restore-TailscaleSnapshotTask $snapshotTaskSnapshot $TailscaleSnapshotTaskName
+} -ReconcileAction {
+    Restore-TailscaleSnapshotTask $snapshotTaskSnapshot $TailscaleSnapshotTaskName
+} -Postcondition {
+    Assert-LifeOSScheduledTaskSnapshotState $snapshotTaskSnapshot $TailscaleSnapshotTaskName
+}
+Assert-LifeOSScheduledTaskSnapshotState $legacySnapshot $LegacyTaskName
+Assert-LifeOSScheduledTaskSnapshotState $codexSnapshot $CodexTaskName
+Assert-LifeOSScheduledTaskSnapshotState $snapshotTaskSnapshot $TailscaleSnapshotTaskName
 $recoveryArchivePath = Complete-LifeOSRecoveryState $manifest
 $rollbackCompleted = $true
 Write-Host 'LifeOS Windows rollback completed. Prior task/data/code artifacts were restored or moved to the rollback backup, and captured service state was reconciled.'
+} catch {
+    if (-not $rollbackCompleted -and $null -ne $deploymentMutex) {
+        $recoveryObservationTasks = @(
+            [pscustomobject]@{ Name = $LegacyTaskName; TaskPath = if ($null -ne $legacySnapshot -and $null -ne $legacySnapshot.PSObject.Properties['TaskPath']) { [string]$legacySnapshot.TaskPath } else { '\' } }
+            [pscustomobject]@{ Name = $CodexTaskName; TaskPath = if ($null -ne $codexSnapshot -and $null -ne $codexSnapshot.PSObject.Properties['TaskPath']) { [string]$codexSnapshot.TaskPath } else { '\' } }
+            [pscustomobject]@{ Name = $TailscaleSnapshotTaskName; TaskPath = if ($null -ne $snapshotTaskSnapshot -and $null -ne $snapshotTaskSnapshot.PSObject.Properties['TaskPath']) { [string]$snapshotTaskSnapshot.TaskPath } else { '\' } }
+        )
+        Write-LifeOSRecoveryFailureObservation -TaskSpecs $recoveryObservationTasks
+    }
+    throw
 } finally {
     try {
         Exit-LifeOSDeploymentTransaction $deploymentMutex -Completed:$rollbackCompleted

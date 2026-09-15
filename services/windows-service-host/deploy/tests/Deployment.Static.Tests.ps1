@@ -13,6 +13,7 @@ $files = @(Get-ChildItem -LiteralPath $root -File -Include '*.ps1', '*.py' -Recu
     })
 $text = ($files | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
 $installText = Get-Content -LiteralPath (Join-Path $root 'install.ps1') -Raw
+$rollbackText = Get-Content -LiteralPath (Join-Path $root 'rollback.ps1') -Raw
 $verifyText = Get-Content -LiteralPath (Join-Path $root 'verify.ps1') -Raw
 
 function Assert-Text {
@@ -680,6 +681,9 @@ Assert-Text 'recoveryArchivePath' 'Recovered markers bind the durable recovery a
 Assert-Text 'Stop-DeploymentTaskBarrier' 'Scheduled writers join the recovery barrier.'
 Assert-Text 'Get-TaskRecoveryIdentity' 'Task action/principal/path are verified before mutation.'
 Assert-Text 'function Reconcile-LifeOSScheduledTaskSnapshotState' 'Scheduled task state is reconciled after recovery retries.'
+Assert-Text 'function Assert-LifeOSLegacyGatewayListenerSnapshotState' 'Legacy listener state is verified after recovery retries.'
+Assert-Text '\$checkpointStageNames' 'Recovery journal capacity includes companion stage names.'
+Assert-Text '\$companionName = \[string\]\$stageName \+ ''-reconcile''' 'Recovery journal capacity includes each companion stage entry.'
 Assert-Text '(?s)\[AllowEmptyString\(\)\].*?\$MarkerState' 'Fresh installs explicitly allow an empty marker state.'
 Assert-Text 'foreach \(\$key in \$Reference.Keys\)' 'Generation references validate dictionary keys.'
 Assert-Text 'Get-AuthorityInstallMode' 'Authority completeness is classified explicitly.'
@@ -789,7 +793,7 @@ if (-not $completedBranch.Contains('if ([string]$stageState -ne ''complete'')') 
     -not $completedBranch.Contains('return')) {
     throw 'FAIL: Completed recovery stages must validate, mark success, and return.'
 }
-foreach ($callbackInvocation in @('& $Action', '& $LiveAction', '& $Postcondition', 'Write-JsonAtomic')) {
+foreach ($callbackInvocation in @('& $Action', '& $ReconcileAction', '& $Postcondition', 'Write-JsonAtomic')) {
     if ($completedBranch.Contains($callbackInvocation)) {
         throw "FAIL: Completed recovery stages must not invoke callbacks or checkpoint the stage: $callbackInvocation"
     }
@@ -798,11 +802,39 @@ $artifactsCompleteStart = $stageText.IndexOf('if ([string]$stageState -eq ''comp
 $restoringStart = $stageText.IndexOf('Set-JournalProperty $stages $Name ''restoring''', $artifactsCompleteStart, [StringComparison]::Ordinal)
 if ($artifactsCompleteStart -lt 0 -or $restoringStart -le $artifactsCompleteStart) { throw 'FAIL: Artifacts-complete stage branch is missing.' }
 $artifactsCompleteBranch = $stageText.Substring($artifactsCompleteStart, $restoringStart - $artifactsCompleteStart)
-if (-not $artifactsCompleteBranch.Contains('& $LiveAction') -or
+if (-not $artifactsCompleteBranch.Contains('& $ReconcileAction') -or
     -not $artifactsCompleteBranch.Contains('& $Postcondition') -or
-    $artifactsCompleteBranch.IndexOf('& $LiveAction', [StringComparison]::Ordinal) -ge
+    $artifactsCompleteBranch.IndexOf("Set-JournalProperty `$stages `$reconcileName 'restoring'", [StringComparison]::Ordinal) -ge
+    $artifactsCompleteBranch.IndexOf('& $ReconcileAction', [StringComparison]::Ordinal) -or
+    $artifactsCompleteBranch.IndexOf('& $ReconcileAction', [StringComparison]::Ordinal) -ge
+    $artifactsCompleteBranch.IndexOf('& $Postcondition', [StringComparison]::Ordinal) -or
+    $artifactsCompleteBranch.LastIndexOf("Set-JournalProperty `$stages `$reconcileName 'complete'", [StringComparison]::Ordinal) -le
     $artifactsCompleteBranch.IndexOf('& $Postcondition', [StringComparison]::Ordinal)) {
-    throw 'FAIL: An artifacts-complete stage must run LiveAction before Postcondition.'
+    throw 'FAIL: A completed artifacts stage must checkpoint reconciliation before mutation and after its observation.'
+}
+if ($stageText.Contains('$LiveAction') -or $stageText.Contains('-LiveAction')) {
+    throw 'FAIL: The recovery stage API must not retain the unjournaled LiveAction callback.'
+}
+foreach ($source in @($installText, $rollbackText)) {
+    if ($source.Contains('-LiveAction') -or $source -match '(?s)-Postcondition\s*\{[^}]*Reconcile-LifeOSScheduledTaskSnapshotState') {
+        throw 'FAIL: Production recovery must not use LiveAction or a mutating task reconciliation as a postcondition.'
+    }
+    if (-not $source.Contains('-ReconcileAction') -or
+        -not $source.Contains('Assert-LifeOSScheduledTaskSnapshotState') -or
+        -not $source.Contains('Assert-LifeOSLegacyGatewayListenerSnapshotState') -or
+        -not $source.Contains('Restore-LegacyTask') -or
+        -not $source.Contains('Write-LifeOSRecoveryFailureObservation')) {
+        throw 'FAIL: Production recovery must use journaled reconciliation, observation-only task assertions, and guarded failure observation.'
+    }
+}
+if (-not $commonText.Contains('function Assert-LifeOSScheduledTaskSnapshotState') -or
+    -not $commonText.Contains('function Get-LifeOSRecoveryFailureObservation') -or
+    -not $commonText.Contains('Observed at recovery failure (read-only)')) {
+    throw 'FAIL: Recovery must provide bounded observation-only task and failure-state contracts.'
+}
+if (-not $installText.Contains('if (-not $deploymentRecoveryCompleted)') -or
+    -not $rollbackText.Contains('if (-not $rollbackCompleted -and $null -ne $deploymentMutex)')) {
+    throw 'FAIL: Failure observations must be guarded and omitted after successful recovery.'
 }
 if (-not $stageText.Contains('Read-RecoveryJournal $Manifest') -or
     $stageText.IndexOf('Read-RecoveryJournal $Manifest', [StringComparison]::Ordinal) -gt $stageText.IndexOf('& $Action', [StringComparison]::Ordinal)) {

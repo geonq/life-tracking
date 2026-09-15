@@ -1987,17 +1987,26 @@ def test_completed_recovery_stage_never_replays_callbacks() -> None:
     assert "if ([string]$stageState -ne 'complete')" in completed_branch
     assert '$stageScopeSucceeded = $true' in completed_branch
     assert 'return' in completed_branch
-    for invocation in ('& $Action', '& $LiveAction', '& $Postcondition', 'Write-JsonAtomic'):
+    for invocation in ('& $Action', '& $ReconcileAction', '& $Postcondition', 'Write-JsonAtomic'):
         assert invocation not in completed_branch
 
     artifacts_complete_start = stage.index("if ([string]$stageState -eq 'complete')", artifacts_gate)
     restoring_start = stage.index("Set-JournalProperty $stages $Name 'restoring'", artifacts_complete_start)
     artifacts_complete_branch = stage[artifacts_complete_start:restoring_start]
-    assert '& $LiveAction' in artifacts_complete_branch
+    assert '& $ReconcileAction' in artifacts_complete_branch
     assert '& $Postcondition' in artifacts_complete_branch
-    assert artifacts_complete_branch.index('& $LiveAction') < artifacts_complete_branch.index(
+    assert "Set-JournalProperty $stages $reconcileName 'restoring'" in artifacts_complete_branch
+    assert "Set-JournalProperty $stages $reconcileName 'complete'" in artifacts_complete_branch
+    assert artifacts_complete_branch.index("Set-JournalProperty $stages $reconcileName 'restoring'") < artifacts_complete_branch.index(
+        '& $ReconcileAction'
+    )
+    assert artifacts_complete_branch.index('& $ReconcileAction') < artifacts_complete_branch.index(
         '& $Postcondition'
     )
+    assert artifacts_complete_branch.rindex("Set-JournalProperty $stages $reconcileName 'complete'") > artifacts_complete_branch.index(
+        '& $Postcondition'
+    )
+    assert '$LiveAction' not in stage
 
 
 def test_completed_recovery_journal_uses_strict_progress_validation() -> None:
@@ -2184,7 +2193,7 @@ def test_artifact_mutation_phase_one_is_typed_handle_bound_and_unwired() -> None
     assert "requires a journal-bound restoring unit" in wrappers
     assert 'Assert-RecoveryArtifactStateGrammar' in wrappers
     assert '\\z' in common
-    assert 'ValidatedUnitPhases[$UnitIndex] = $Phase' in common
+    assert 'ValidatedUnitPhases[$UnitIndex] = [string]$committedRecord.Phase' in common
 
     for forbidden in ('Copy-Item', 'Remove-Item', 'Move-Item', '[IO.File]::',
                       '[System.IO.File]::', 'QuarantinePath'):
@@ -2211,12 +2220,12 @@ def test_recovery_phase_authority_is_immutable_and_artifact_validation_is_indexe
     for token in (
         'public sealed class RecoveryPhaseAuthority',
         'private readonly RecoveryPhaseToken[] tokens;',
-        'private RecoveryPhaseAuthority(string[] committedPhases)',
-        'internal static RecoveryPhaseAuthority Create(string[] committedPhases)',
+        'private RecoveryPhaseAuthority(string[] committedPhases, string transactionId',
+        'internal static RecoveryPhaseAuthority CreateWithExpectedIdentity(string[] committedPhases',
         'tokens = new RecoveryPhaseToken[committedPhases.Length];',
         'public long UpdateCount { get { return updateCount; } }',
         'public RecoveryPhaseToken GetToken(int unitIndex)',
-        'internal RecoveryPhaseToken Advance(int unitIndex, string nextPhase)',
+        'private RecoveryPhaseToken AdvanceNoLock(int unitIndex, string nextPhase)',
         'tokens[unitIndex] = replacement;',
         'public string GetPhase(int unitIndex)',
         'public bool Matches(int unitIndex, string expectedPhase)',
@@ -2224,10 +2233,10 @@ def test_recovery_phase_authority_is_immutable_and_artifact_validation_is_indexe
         assert token in authority
     assert 'public sealed class RecoveryPhaseToken' in native
     assert 'public RecoveryPhaseAuthority(' not in authority
-    assert 'return RecoveryPhaseAuthority.Create(committedPhases);' in native
+    assert 'return RecoveryPhaseAuthority.CreateWithExpectedIdentity(committedPhases,' in native
     assert 'CommitRecoveryProgressFrame' in native
     assert 'public static RecoveryPhaseToken AdvanceRecoveryPhaseAuthority' not in native
-    assert 'authority.Advance(unitIndex, nextPhase);' in native
+    assert 'AdvanceNoLock(record.UnitIndex, record.Phase);' in native
     assert 'progressLease.Stream.Flush(true);' in native
     for parser_contract in (
         'public sealed class RecoveryProgressRecord',
@@ -2235,7 +2244,7 @@ def test_recovery_phase_authority_is_immutable_and_artifact_validation_is_indexe
         'new UTF8Encoding(false, true)',
         'int fieldMask = 0',
         'ParseRecoveryProgressRecord(payload',
-        'authority.ExpectedTransactionId',
+        'public string ExpectedTransactionId { get { return expectedTransactionId; } }',
     ):
         assert parser_contract in native
     assert 'payloadText.IndexOf' not in native
@@ -2300,9 +2309,8 @@ def test_artifact_open_contracts_and_quarantine_finalization_match_native_signat
     # probe shares DELETE so it can coexist with that retained handle, while
     # its desired access contains no write or delete request.
     assert ('if (contract == ArtifactOpenContract.RetainedLease) { desiredAccess |= DeleteAccess; }' in compact)
-    assert ('uint shareAccess = contract == ArtifactOpenContract.ReadOnlyIdentityProbe '
-            '? FileShareRead | FileShareDelete : FileShareRead;') in compact
-    assert 'FileShareWrite' not in compact
+    assert 'uint shareAccess = FileShareRead | FileShareDelete;' in compact
+    assert 'uint shareAccess = directory ? FileShareRead | FileShareWrite : FileShareRead;' in compact
     assert 'ReadOnlyIdentityProbe && writable' in compact
 
     assert ('ArtifactCopyReceipt(this, destinationLease, quarantineLease, destinationLease.Length, digest, metadata)'
@@ -2382,12 +2390,20 @@ def test_scheduled_task_recovery_reconciles_live_state_after_retries() -> None:
     assert '$actualRunning -eq $expectedRunning -and $actualEnabled -eq $expectedEnabled' in reconciliation
     assert 'Scheduled task state is ambiguous after recovery' in reconciliation
     assert 'Scheduled task did not reach its captured state during recovery' in reconciliation
+    assertion = common.split('function Assert-LifeOSScheduledTaskSnapshotState', 1)[1].split('function Get-LifeOSScEmptyArgument', 1)[0]
+    assert 'Get-LifeOSScheduledTaskExact -TaskName $TaskName' in assertion
+    assert 'Scheduled task state is ambiguous after recovery' in assertion
+    assert 'Start-ScheduledTask' not in assertion
+    assert 'Stop-ScheduledTask' not in assertion
     stage = common.split('function Invoke-RecoveryStage', 1)[1].split('function Get-RecoveryJournalPath', 1)[0]
     assert '[AllowNull()][scriptblock]$Postcondition = $null' in stage
     assert '& $Postcondition' in stage
     for source, completed in ((install, '$deploymentRecoveryCompleted = $true'), (rollback, '$rollbackCompleted = $true')):
-        assert '-Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState' in source
-        assert source.rfind('Reconcile-LifeOSScheduledTaskSnapshotState') < source.index(completed)
+        assert '-LiveAction' not in source
+        assert '-ReconcileAction' in source
+        assert 'Assert-LifeOSScheduledTaskSnapshotState' in source
+        assert re.search(r'(?s)-Postcondition\s*\{[^}]*Reconcile-LifeOSScheduledTaskSnapshotState', source) is None
+        assert source.rfind('Assert-LifeOSScheduledTaskSnapshotState') < source.index(completed)
     for case in ('outer rollback does not report success after snapshot task restoration failure',
                  'collector retry restores its writer while snapshot restoration is still failed',
                  'successful recovery leaves previously running writers running and enabled',
@@ -2469,14 +2485,28 @@ def test_production_recovery_restores_serve_and_fresh_snapshot_before_gateway() 
         assert "Restore-TailscaleSnapshotTask $snapshotTask" in source or "Restore-TailscaleSnapshotTask $snapshotTaskSnapshot" in source
     assert 'function Publish-LifeOSTailscaleSnapshotForGatewayStart' in common
     assert 'function Invoke-LifeOSBeforeGatewayStart' in common
+    assert 'function Assert-LifeOSLegacyGatewayListenerSnapshotState' in common
+    listener_restore = common.split('function Restore-LegacyGatewayListener', 1)[1].split(
+        'function Assert-LifeOSLegacyGatewayListenerSnapshotState', 1
+    )[0]
+    assert 'Assert-LegacyTaskUnchanged $TaskSnapshot $TaskName $TaskPath' in listener_restore
+    assert 'Stop-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath' in listener_restore
+    assert '$stopDeadline = (Get-Date).AddSeconds(30)' in listener_restore
     assert 'Start-TailscaleSnapshotTaskAndVerify -TaskName $TaskName -TaskPath $TaskPath' in common
     assert 'Reconcile-LifeOSScheduledTaskSnapshotState $stoppedSnapshot $TaskName' in common
     helper = common.split('function Invoke-LifeOSBeforeGatewayStart', 1)[1].split('function Restore-TailscaleSnapshotTask', 1)[0]
     assert helper.index('Get-TailscaleIdentityFacts') < helper.index('Publish-LifeOSTailscaleSnapshotForGatewayStart')
     assert 'RestoreTaskEnabled' in helper
     assert '[switch]$KeepStopped' in common and '-KeepStopped' in install and '-KeepStopped' in rollback
-    assert "-LiveAction { Restore-TailscaleSnapshotTask $snapshotTask $TailscaleSnapshotTaskName }" in install
-    assert "-LiveAction { Restore-TailscaleSnapshotTask $snapshotTaskSnapshot $TailscaleSnapshotTaskName }" in rollback
+    for source in (install, rollback):
+        assert '-LiveAction' not in source
+        assert '-ReconcileAction' in source
+        assert 'Assert-LifeOSScheduledTaskSnapshotState' in source
+        assert 'Assert-LifeOSLegacyGatewayListenerSnapshotState' in source
+        assert 'Restore-LegacyTask' in source
+        assert re.search(r'(?s)-Postcondition\s*\{[^}]*Reconcile-LifeOSScheduledTaskSnapshotState', source) is None
+    assert re.search(r'(?s)-ReconcileAction\s*\{\s*Restore-TailscaleSnapshotTask \$snapshotTask \$TailscaleSnapshotTaskName', install)
+    assert re.search(r'(?s)-ReconcileAction\s*\{\s*Restore-TailscaleSnapshotTask \$snapshotTaskSnapshot \$TailscaleSnapshotTaskName', rollback)
 
 
 def test_candidate_verifier_uses_allowlist_derived_bounded_inventory() -> None:
@@ -2561,7 +2591,10 @@ def test_recovery_progress_is_append_only_and_bounded_per_unit() -> None:
     assert 'ConvertFrom-Json' not in checkpoint
     assert 'finally' in checkpoint
     assert "'restoring'" in checkpoint
-    assert 'foreach ($stageName in $script:LifeOSRecoveryStageNames)' in checkpoint
+    assert '$checkpointStageNames = New-Object' in checkpoint
+    assert '$checkpointStageSet = New-Object' in checkpoint
+    assert '$companionName = [string]$stageName + \'-reconcile\'' in checkpoint
+    assert 'foreach ($stageName in $checkpointStageNames)' in checkpoint
     unit_loop = restore.rsplit('$unitIndex = 0', 1)[1].split("Set-JournalProperty $journal 'phase' 'artifacts-complete'", 1)[0]
     assert 'Assert-RecoveryProgressCapacity -Manifest $Manifest -Journal $journal' in restore
     assert restore.index('Assert-RecoveryProgressCapacity -Manifest $Manifest -Journal $journal') < restore.index('Write-JsonAtomic $journalPath $journal')
@@ -2591,6 +2624,7 @@ def test_recovery_progress_is_append_only_and_bounded_per_unit() -> None:
                  'durable complete transitions are skipped at record and byte limits',
                  'writer output stays within the real reader serialized-size contract',
                  'checkpoint serialization failure',
+                 'companion capacity rejection',
                  'oversized count-valid recovery journal is rejected before artifact mutation',
                  'progress capacity is rejected before artifact mutation'):
         assert case in behavior_lower
@@ -2648,7 +2682,7 @@ def test_recovery_progress_repairs_checkpoint_order_and_holder_binding() -> None
     repair = security.index('if ($needsRepair)')
     assert boundary < repair
     assert 'Set-RecoveryProgressLeaseHolderContext' in common
-    assert 'ValidatedUnitPhases[$UnitIndex] = $Phase' in append
+    assert 'ValidatedUnitPhases[$UnitIndex] = [string]$committedRecord.Phase' in append
 
     new_journal_start = restore.index('    if ($null -eq $journal) {')
     new_journal_end = restore.index('    if (-not $journalCreated) {', new_journal_start)
@@ -3127,6 +3161,7 @@ def test_transaction_identity_never_authorizes_unowned_journal_paths() -> None:
 def test_recovery_failure_messages_do_not_claim_unverified_writer_state() -> None:
     install = read("install.ps1")
     rollback = read("rollback.ps1")
+    common = read("Deployment.Common.ps1")
     expected = (
         "Authority provenance changed or incomplete; recovery_required.",
         "Artifact or ACL recovery failed; recovery_required.",
@@ -3140,6 +3175,11 @@ def test_recovery_failure_messages_do_not_claim_unverified_writer_state() -> Non
         assert message in install
     assert install.count("throw 'Recovery incomplete; recovery_required.'") == 2
     assert "Authority provenance changed or incomplete; recovery_required." in rollback
+    assert "Write-LifeOSRecoveryFailureObservation" in install
+    assert "Write-LifeOSRecoveryFailureObservation" in rollback
+    assert "Observed at recovery failure (read-only)" in common
+    assert "if (-not $deploymentRecoveryCompleted)" in install
+    assert "if (-not $rollbackCompleted -and $null -ne $deploymentMutex)" in rollback
     for source in (install, rollback):
         assert re.search(r"writers?\s+remain\s+(?:stopped|disabled)", source, re.IGNORECASE) is None
         assert re.search(r"services?\s+remain\s+stopped", source, re.IGNORECASE) is None

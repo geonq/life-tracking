@@ -69,6 +69,7 @@ $script:LifeOSRecoveryStageNames = [string[]]@(
     'service-LifeOSAPI',
     'service-LifeOSGateway',
     'service-state-reconcile',
+    'Restore-LegacyTask',
     'Restore-TailscaleServeSnapshot',
     'Restore-CodexCollectorTask',
     'Restore-TailscaleSnapshotTask'
@@ -3704,7 +3705,7 @@ function Invoke-RecoveryStage {
         [string]$Name,
         [scriptblock]$Action,
         [AllowNull()][scriptblock]$Postcondition = $null,
-        [AllowNull()][scriptblock]$LiveAction = $null
+        [AllowNull()][scriptblock]$ReconcileAction = $null
     )
     if ([string]::IsNullOrWhiteSpace($Name) -or $Name.Length -gt 128 -or $Name -notmatch '\A[A-Za-z0-9-]+\z') {
         throw 'Recovery stage name is malformed.'
@@ -3728,11 +3729,31 @@ function Invoke-RecoveryStage {
     }
     if ($journal.phase -ne 'artifacts-complete') { throw 'Recovery artifacts are not complete.' }
     # A completed stage is a durable commit point. Re-running the outer
-    # recovery after a process restart must not repeat a destructive action,
-    # but its live postcondition still has to be reconciled after a barrier.
+    # recovery after a process restart must not repeat the original
+    # restoration, but an explicitly supplied live reconciliation crosses its
+    # own durable companion boundary before it can mutate state.
     if ([string]$stageState -eq 'complete') {
-        if ($null -ne $LiveAction) { & $LiveAction }
+        if ($null -ne $ReconcileAction) {
+            $reconcileName = $Name + '-reconcile'
+            if ($reconcileName.Length -gt 128) {
+                throw 'Recovery reconciliation stage name is too long.'
+            }
+            $reconcileState = Get-JournalProperty $stages $reconcileName
+            if ($null -ne $reconcileState -and [string]$reconcileState -notin @('restoring', 'complete')) {
+                throw "Recovery reconciliation stage has an invalid state: $Name"
+            }
+            # The original restoration stage is a durable commit point. A
+            # retryable live reconciliation gets its own checkpoint so a
+            # crash cannot replay the destructive restoration action.
+            Set-JournalProperty $stages $reconcileName 'restoring'
+            Write-JsonAtomic $path $journal -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+            & $ReconcileAction
+        }
         if ($null -ne $Postcondition) { & $Postcondition }
+        if ($null -ne $ReconcileAction) {
+            Set-JournalProperty $stages $reconcileName 'complete'
+            Write-JsonAtomic $path $journal -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+        }
         $stageScopeSucceeded = $true
         return
     }
@@ -3780,7 +3801,7 @@ function Restore-LifeOSServiceSnapshots {
     # rollback while the marker remains recovery_required.
     Invoke-RecoveryStage $Manifest 'service-state-reconcile' {
         Reconcile-LifeOSServiceSnapshotState -Snapshots $validatedSnapshots -VerifyHealth:$VerifyHealth -BeforeGatewayStart $BeforeGatewayStart
-    } -LiveAction {
+    } -ReconcileAction {
         Reconcile-LifeOSServiceSnapshotState -Snapshots $validatedSnapshots -VerifyHealth:$VerifyHealth -BeforeGatewayStart $BeforeGatewayStart
     } -Postcondition {
         Assert-LifeOSServiceSnapshotState -Snapshots $validatedSnapshots -VerifyHealth:$VerifyHealth
@@ -8442,7 +8463,15 @@ function Assert-RecoveryJournalCheckpointCapacity {
         Set-JournalProperty $checkpoint 'stages' ([pscustomobject]$stageValues)
         $writerBoundaryBytes = Get-LifeOSJsonSerializedByteCount $checkpoint
         if ($writerBoundaryBytes -gt $maximumBytes) { $maximumBytes = $writerBoundaryBytes }
+        $checkpointStageNames = New-Object 'System.Collections.Generic.List[string]'
+        $checkpointStageSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
         foreach ($stageName in $script:LifeOSRecoveryStageNames) {
+            if ($checkpointStageSet.Add([string]$stageName)) { [void]$checkpointStageNames.Add([string]$stageName) }
+            $companionName = [string]$stageName + '-reconcile'
+            if ($companionName.Length -gt 128) { throw 'Recovery reconciliation stage name is too long.' }
+            if ($checkpointStageSet.Add($companionName)) { [void]$checkpointStageNames.Add($companionName) }
+        }
+        foreach ($stageName in $checkpointStageNames) {
             $stageValues[$stageName] = 'restoring'
             Set-JournalProperty $checkpoint 'stages' ([pscustomobject]$stageValues)
             $restoringBytes = Get-LifeOSJsonSerializedByteCount $checkpoint
@@ -10072,8 +10101,13 @@ function Assert-LegacyTaskUnchanged {
     $current = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
     if ($null -eq $current) { throw 'The legacy task disappeared before its definition could be verified.' }
     $currentXml = Export-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
-    if ((Get-LegacyTaskActionFingerprint ([string]$currentXml)) -ne (Get-LegacyTaskActionFingerprint ([string]$TaskSnapshot.Xml))) {
-        throw 'The legacy task definition changed after the reviewed snapshot; refusing deployment.'
+    # Bind the restart to the complete reviewed execution identity. The action
+    # fingerprint alone would allow a principal-only change to run the
+    # listener under a different account or privilege level.
+    $currentIdentity = Get-TaskRecoveryIdentity ([string]$currentXml) $TaskPath
+    $expectedIdentity = Get-TaskRecoveryIdentity ([string]$TaskSnapshot.Xml) $TaskPath
+    if ($currentIdentity -cne $expectedIdentity) {
+        throw 'The legacy task execution identity changed after the reviewed snapshot; refusing deployment.'
     }
 }
 
@@ -10642,6 +10676,23 @@ function Restore-LegacyGatewayListener {
         $temporarilyEnabled = -not [bool]$ListenerSnapshot.TaskEnabled
     }
     $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
+    if ([string]$task.State -eq 'Running') {
+        # A crashed listener can leave Task Scheduler reporting the wrapper as
+        # running. Restart only the reviewed task, after rechecking its exact
+        # XML, and wait for the provider to observe a non-running state before
+        # starting it again.
+        Assert-LegacyTaskUnchanged $TaskSnapshot $TaskName $TaskPath
+        Stop-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
+        $stopDeadline = (Get-Date).AddSeconds(30)
+        do {
+            $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
+            if ($null -eq $task) { throw 'The legacy task disappeared while restarting its listener.' }
+            if ([string]$task.State -ne 'Running') { break }
+            if ((Get-Date) -ge $stopDeadline) { throw "The legacy task did not stop while restarting its listener: $TaskName" }
+            Start-Sleep -Milliseconds 250
+        } while ($true)
+        Assert-LegacyTaskUnchanged $TaskSnapshot $TaskName $TaskPath
+    }
     if ([string]$task.State -ne 'Running') {
         Start-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
     }
@@ -10650,6 +10701,27 @@ function Restore-LegacyGatewayListener {
     if ($temporarilyEnabled) {
         Disable-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop | Out-Null
     }
+}
+
+function Assert-LifeOSLegacyGatewayListenerSnapshotState {
+    param(
+        [Parameter(Mandatory)][psobject]$TaskSnapshot,
+        [Parameter(Mandatory)][psobject]$ListenerSnapshot,
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][string]$TaskPath,
+        [int]$Port = 8421
+    )
+    Assert-SafeTaskName $TaskName
+    Assert-SafeTaskPath $TaskPath
+    $expectedExists = Get-SnapshotValue $ListenerSnapshot 'Exists' $null
+    if ($expectedExists -isnot [bool]) { throw 'Legacy listener snapshot presence is malformed.' }
+    $observed = Get-LegacyGatewayListenerSnapshot -TaskSnapshot $TaskSnapshot -TaskName $TaskName -TaskPath $TaskPath -Port $Port
+    if (-not [bool]$expectedExists) {
+        if ([bool]$observed.Exists) { throw "Legacy listener remains after recovery on port $Port." }
+        return
+    }
+    if (-not [bool]$observed.Exists) { throw "Legacy listener is missing after recovery on port $Port." }
+    Assert-LegacyListenerCodeIdentity $observed $ListenerSnapshot
 }
 
 function Disable-LegacyTaskAfterCutover {
@@ -11026,6 +11098,10 @@ function Restore-TailscaleSnapshotTask {
     if ($KeepStopped) {
         $stoppedSnapshot = [pscustomobject]@{ Exists = $true; Enabled = $false; State = 'Stopped'; TaskPath = $priorPath }
         Reconcile-LifeOSScheduledTaskSnapshotState $stoppedSnapshot $TaskName
+    } else {
+        # Register/enable/start are asynchronous Task Scheduler mutations.
+        # Converge before the caller performs its observation-only postcondition.
+        Reconcile-LifeOSScheduledTaskSnapshotState $Snapshot $TaskName
     }
 }
 
@@ -11075,6 +11151,87 @@ function Get-LifeOSScheduledTaskExact {
         }
     }
     return @($matches.ToArray())
+}
+
+function Get-LifeOSRecoveryFailureObservation {
+    param(
+        [string[]]$ServiceNames = @('LifeOSAPI', 'LifeOSGateway'),
+        [object[]]$TaskSpecs = @()
+    )
+    $observations = New-Object System.Collections.ArrayList
+    $serviceStates = @('Unknown', 'Stopped', 'Start Pending', 'Stop Pending', 'Running', 'Continue Pending', 'Pause Pending', 'Paused')
+    $startModes = @('Unknown', 'Boot', 'System', 'Auto', 'Manual', 'Disabled')
+    foreach ($serviceName in @($ServiceNames)) {
+        $name = [string]$serviceName
+        try {
+            if ($name -notin @('LifeOSAPI', 'LifeOSGateway')) { throw 'unsupported service' }
+            $record = Get-ServiceRecord -Name $name
+            if ($null -eq $record) {
+                [void]$observations.Add([pscustomobject]@{ Kind = 'service'; Name = $name; Presence = 'absent'; State = 'n/a'; StartMode = 'n/a' })
+                continue
+            }
+            $state = [string]$record.State
+            if ($state -notin $serviceStates) { $state = 'Unknown' }
+            $startMode = [string]$record.StartMode
+            if ($startMode -notin $startModes) { $startMode = 'Unknown' }
+            [void]$observations.Add([pscustomobject]@{ Kind = 'service'; Name = $name; Presence = 'present'; State = $state; StartMode = $startMode })
+        } catch {
+            [void]$observations.Add([pscustomobject]@{ Kind = 'service'; Name = $name; Presence = 'query-failed'; State = 'unknown'; StartMode = 'unknown' })
+        }
+    }
+    if (@($TaskSpecs).Count -gt 8) { throw 'Recovery failure observation task bound exceeded.' }
+    $taskStates = @('Unknown', 'Disabled', 'Queued', 'Ready', 'Running', 'Stopped')
+    foreach ($spec in @($TaskSpecs)) {
+        $name = if ($null -ne $spec -and $null -ne $spec.PSObject.Properties['Name']) { [string]$spec.Name } else { '' }
+        $path = if ($null -ne $spec -and $null -ne $spec.PSObject.Properties['TaskPath']) { [string]$spec.TaskPath } else { '\' }
+        if ([string]::IsNullOrWhiteSpace($path)) { $path = '\' }
+        try {
+            Assert-SafeTaskName $name
+            Assert-SafeTaskPath $path
+            $tasks = @(Get-LifeOSScheduledTaskExact -TaskName $name -TaskPath $path)
+            if ($tasks.Count -eq 0) {
+                [void]$observations.Add([pscustomobject]@{ Kind = 'task'; Name = $name; Presence = 'absent'; State = 'n/a'; StartMode = 'n/a' })
+                continue
+            }
+            if ($tasks.Count -ne 1) { throw 'ambiguous task identity' }
+            $state = [string]$tasks[0].State
+            if ($state -notin $taskStates) { throw 'invalid task state' }
+            [void]$observations.Add([pscustomobject]@{ Kind = 'task'; Name = $name; Presence = 'present'; State = $state; StartMode = 'n/a' })
+        } catch {
+            [void]$observations.Add([pscustomobject]@{ Kind = 'task'; Name = $name; Presence = 'query-failed'; State = 'unknown'; StartMode = 'unknown' })
+        }
+    }
+    return @($observations.ToArray())
+}
+
+function Format-LifeOSRecoveryFailureObservation {
+    param([object[]]$Observations)
+    $parts = New-Object System.Collections.ArrayList
+    foreach ($observation in @($Observations)) {
+        if ($null -eq $observation) { continue }
+        if ([string]$observation.Kind -ceq 'service') {
+            [void]$parts.Add(('{0}=presence:{1},state:{2},startMode:{3}' -f
+                [string]$observation.Name, [string]$observation.Presence, [string]$observation.State, [string]$observation.StartMode))
+        } elseif ([string]$observation.Kind -ceq 'task') {
+            [void]$parts.Add(('{0}=presence:{1},state:{2}' -f
+                [string]$observation.Name, [string]$observation.Presence, [string]$observation.State))
+        }
+    }
+    if ($parts.Count -eq 0) { return 'unavailable' }
+    return ($parts -join '; ')
+}
+
+function Write-LifeOSRecoveryFailureObservation {
+    param(
+        [string[]]$ServiceNames = @('LifeOSAPI', 'LifeOSGateway'),
+        [object[]]$TaskSpecs = @()
+    )
+    try {
+        $observations = @(Get-LifeOSRecoveryFailureObservation -ServiceNames $ServiceNames -TaskSpecs $TaskSpecs)
+        Write-Warning ('Observed at recovery failure (read-only): ' + (Format-LifeOSRecoveryFailureObservation $observations))
+    } catch {
+        Write-Warning 'Recovery state observation failed; the original recovery error is preserved.'
+    }
 }
 
 function Reconcile-LifeOSScheduledTaskSnapshotState {
@@ -11150,6 +11307,52 @@ function Reconcile-LifeOSScheduledTaskSnapshotState {
         if ((Get-Date) -ge $deadline) { throw "Scheduled task did not reach its captured state during recovery: $TaskName" }
         Start-Sleep -Milliseconds 100
     } while ($true)
+}
+
+function Assert-LifeOSScheduledTaskSnapshotState {
+    param(
+        [Parameter(Mandatory)][object]$Snapshot,
+        [Parameter(Mandatory)][string]$TaskName
+    )
+    Assert-SafeTaskName $TaskName
+
+    $exists = Get-SnapshotValue $Snapshot 'Exists' $null
+    $enabled = Get-SnapshotValue $Snapshot 'Enabled' $null
+    $state = Get-SnapshotValue $Snapshot 'State' $null
+    if ($exists -isnot [bool] -or $enabled -isnot [bool] -or
+        $state -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$state) -or
+        [string]$state -notin @('Unknown', 'Disabled', 'Queued', 'Ready', 'Running', 'Stopped')) {
+        throw 'Scheduled task snapshot state is malformed.'
+    }
+    $taskPath = Get-SnapshotValue $Snapshot 'TaskPath' '\'
+    if ($taskPath -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$taskPath)) { $taskPath = '\' }
+    Assert-SafeTaskPath ([string]$taskPath)
+    $expectedRunning = [string]$state -ceq 'Running'
+    $expectedEnabled = [bool]$enabled
+    if ($expectedRunning -and -not $expectedEnabled) { throw 'Scheduled task snapshot is internally inconsistent.' }
+
+    $tasks = @(Get-LifeOSScheduledTaskExact -TaskName $TaskName -TaskPath ([string]$taskPath))
+    if (-not [bool]$exists) {
+        if ($tasks.Count -ne 0) { throw "Scheduled task remains after recovery: $TaskName" }
+        return
+    }
+    if ($tasks.Count -ne 1) { throw "Scheduled task state is ambiguous after recovery: $TaskName" }
+    $task = $tasks[0]
+    if ($null -eq $task.PSObject.Properties['TaskPath'] -or $null -eq $task.PSObject.Properties['State']) {
+        throw "Scheduled task state is incomplete after recovery: $TaskName"
+    }
+    $actualPath = [string]$task.TaskPath
+    if ([string]::IsNullOrWhiteSpace($actualPath)) { $actualPath = '\' }
+    if ($actualPath -cne [string]$taskPath) { throw "Scheduled task path changed during recovery: $TaskName" }
+    $actualState = [string]$task.State
+    if ($actualState -notin @('Unknown', 'Disabled', 'Queued', 'Ready', 'Running', 'Stopped')) {
+        throw "Scheduled task state is invalid after recovery: $TaskName"
+    }
+    $actualRunning = $actualState -ceq 'Running'
+    $actualEnabled = $actualState -cne 'Disabled'
+    if ($actualRunning -ne $expectedRunning -or $actualEnabled -ne $expectedEnabled) {
+        throw "Scheduled task state does not match the captured recovery snapshot: $TaskName"
+    }
 }
 
 function Get-LifeOSScEmptyArgument {

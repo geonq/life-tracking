@@ -1315,6 +1315,9 @@ $deploymentCompleted = $false
 $deploymentRollbackSucceeded = $false
 $deploymentRecoveryCompleted = $false
 $recoveryDiagnosticsSession = $null
+$legacy = $null
+$codexTask = $null
+$snapshotTask = $null
 try {
 $paths = Get-LifeOSDefaultPaths
 $operatorSid = Get-InteractiveOperatorSid
@@ -2163,6 +2166,12 @@ Save-InstallManifest $manifest $manifestPath
     # A read-only preflight failure occurs before the transaction is acquired;
     # there is no journal or deployment mutation to recover in that case.
     if ($null -eq $deploymentMutex) { throw }
+    $recoveryObservationTasks = @(
+        [pscustomobject]@{ Name = $LegacyTaskName; TaskPath = if ($null -ne $legacy -and $null -ne $legacy.PSObject.Properties['TaskPath']) { [string]$legacy.TaskPath } else { '\' } }
+        [pscustomobject]@{ Name = $CodexTaskName; TaskPath = if ($null -ne $codexTask -and $null -ne $codexTask.PSObject.Properties['TaskPath']) { [string]$codexTask.TaskPath } else { '\' } }
+        [pscustomobject]@{ Name = $TailscaleSnapshotTaskName; TaskPath = if ($null -ne $snapshotTask -and $null -ne $snapshotTask.PSObject.Properties['TaskPath']) { [string]$snapshotTask.TaskPath } else { '\' } }
+    )
+    try {
     $deploymentRollbackSucceeded = $true
     if ($null -ne $hostStage -and $null -ne $hostStage.PSObject.Properties['StagedPath'] -and
         -not [string]::IsNullOrWhiteSpace([string]$hostStage.StagedPath) -and
@@ -2222,11 +2231,23 @@ Save-InstallManifest $manifest $manifestPath
     }
     if ($legacyWasMutated) {
         try {
-            Restore-LegacyTask $legacy $LegacyTaskName
-            if ($null -ne $manifest.PSObject.Properties['legacyListener'] -and [bool]$manifest.legacyListener.Exists) {
-                Restore-LegacyGatewayListener -TaskSnapshot $legacy -ListenerSnapshot $manifest.legacyListener -TaskName $LegacyTaskName -TaskPath ([string]$legacy.TaskPath) -Port 8421
+            Invoke-RecoveryStage $manifest 'Restore-LegacyTask' {
+                Restore-LegacyTask $legacy $LegacyTaskName
+                if ($null -ne $manifest.PSObject.Properties['legacyListener'] -and [bool]$manifest.legacyListener.Exists) {
+                    Restore-LegacyGatewayListener -TaskSnapshot $legacy -ListenerSnapshot $manifest.legacyListener -TaskName $LegacyTaskName -TaskPath ([string]$legacy.TaskPath) -Port 8421
+                }
+                Reconcile-LifeOSScheduledTaskSnapshotState $legacy $LegacyTaskName
+            } -ReconcileAction {
+                if ($null -ne $manifest.PSObject.Properties['legacyListener'] -and [bool]$manifest.legacyListener.Exists) {
+                    Restore-LegacyGatewayListener -TaskSnapshot $legacy -ListenerSnapshot $manifest.legacyListener -TaskName $LegacyTaskName -TaskPath ([string]$legacy.TaskPath) -Port 8421
+                }
+                Reconcile-LifeOSScheduledTaskSnapshotState $legacy $LegacyTaskName
+            } -Postcondition {
+                Assert-LifeOSScheduledTaskSnapshotState $legacy $LegacyTaskName
+                if ($null -ne $manifest.PSObject.Properties['legacyListener']) {
+                    Assert-LifeOSLegacyGatewayListenerSnapshotState -TaskSnapshot $legacy -ListenerSnapshot $manifest.legacyListener -TaskName $LegacyTaskName -TaskPath ([string]$legacy.TaskPath) -Port 8421
+                }
             }
-            Reconcile-LifeOSScheduledTaskSnapshotState $legacy $LegacyTaskName
         } catch {
             $deploymentRollbackSucceeded = $false
             Write-Warning ("Could not restore legacy task/listener: {0}" -f $_.Exception.Message)
@@ -2260,10 +2281,10 @@ Save-InstallManifest $manifest $manifestPath
         try {
             Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' {
                 Restore-TailscaleSnapshotTask -Snapshot $snapshotTask -TaskName $TailscaleSnapshotTaskName -KeepStopped
-            } -LiveAction {
+            } -ReconcileAction {
                 Reconcile-LifeOSScheduledTaskSnapshotState $stoppedSnapshotTask $TailscaleSnapshotTaskName
             } -Postcondition {
-                Reconcile-LifeOSScheduledTaskSnapshotState $stoppedSnapshotTask $TailscaleSnapshotTaskName
+                Assert-LifeOSScheduledTaskSnapshotState $stoppedSnapshotTask $TailscaleSnapshotTaskName
             }
         } catch {
             $deploymentRollbackSucceeded = $false
@@ -2297,22 +2318,34 @@ Save-InstallManifest $manifest $manifestPath
     if (-not $deploymentRollbackSucceeded) { throw 'Service recovery failed after the writer barrier; recovery_required.' }
 
     try {
-        Invoke-RecoveryStage $manifest 'Restore-CodexCollectorTask' { Restore-CodexCollectorTask $codexTask $CodexTaskName } -Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState $codexTask $CodexTaskName }
+        Invoke-RecoveryStage $manifest 'Restore-CodexCollectorTask' {
+            Restore-CodexCollectorTask $codexTask $CodexTaskName
+        } -ReconcileAction {
+            Reconcile-LifeOSScheduledTaskSnapshotState $codexTask $CodexTaskName
+        } -Postcondition {
+            Assert-LifeOSScheduledTaskSnapshotState $codexTask $CodexTaskName
+        }
     } catch {
         $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore Codex collector task: {0}" -f $_.Exception.Message)
     }
     try {
-        Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' { Restore-TailscaleSnapshotTask $snapshotTask $TailscaleSnapshotTaskName } -LiveAction { Restore-TailscaleSnapshotTask $snapshotTask $TailscaleSnapshotTaskName } -Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState $snapshotTask $TailscaleSnapshotTaskName }
+        Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' {
+            Restore-TailscaleSnapshotTask $snapshotTask $TailscaleSnapshotTaskName
+        } -ReconcileAction {
+            Restore-TailscaleSnapshotTask $snapshotTask $TailscaleSnapshotTaskName
+        } -Postcondition {
+            Assert-LifeOSScheduledTaskSnapshotState $snapshotTask $TailscaleSnapshotTaskName
+        }
     } catch {
         $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore Tailscale snapshot task: {0}" -f $_.Exception.Message)
     }
     if (-not $deploymentRollbackSucceeded) { throw 'Task recovery failed; recovery_required.' }
     try {
-        if ($legacyWasMutated) { Reconcile-LifeOSScheduledTaskSnapshotState $legacy $LegacyTaskName }
-        Reconcile-LifeOSScheduledTaskSnapshotState $codexTask $CodexTaskName
-        Reconcile-LifeOSScheduledTaskSnapshotState $snapshotTask $TailscaleSnapshotTaskName
+        if ($legacyWasMutated) { Assert-LifeOSScheduledTaskSnapshotState $legacy $LegacyTaskName }
+        Assert-LifeOSScheduledTaskSnapshotState $codexTask $CodexTaskName
+        Assert-LifeOSScheduledTaskSnapshotState $snapshotTask $TailscaleSnapshotTaskName
     } catch {
         $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not reconcile scheduled task state: {0}" -f $_.Exception.Message)
@@ -2321,6 +2354,12 @@ Save-InstallManifest $manifest $manifestPath
     $recoveryArchivePath = Complete-LifeOSRecoveryState $manifest
     $deploymentRecoveryCompleted = $true
     throw
+    } catch {
+        if (-not $deploymentRecoveryCompleted) {
+            Write-LifeOSRecoveryFailureObservation -TaskSpecs $recoveryObservationTasks
+        }
+        throw
+    }
 }
 } finally {
     try {
