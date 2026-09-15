@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-15 Europe/Berlin. Release: **NO-GO**. Local `main` contains
-source checkpoint `29bbbde`, pushed with zero divergence; coordination docs
+source checkpoint `f6a848a`, pushed with zero divergence; coordination docs
 still need their matching checkpoint. Track completion separately as
 approximately **70–75% implemented** and **35–45% release-ready**. T12c and
 D1/D2 have Astra Medium source **MERGE** reviews.
@@ -19,10 +19,10 @@ D1/D2 have Astra Medium source **MERGE** reviews.
    complete at `f0d59a5`; finish T12d D3–D5
    reconciliation,
    then continue the remaining Finance/live, motion, and widget evidence.
-3. Finish A1.3 Windows recovery source repair after the A1.2 authority
-   checkpoint `29bbbde`, then use the bounded recovery diagnostics and strict
-   journal observation in a disposable validation, finish the
-   Windows recovery, install the verified `6baa1f3` candidate, and
+3. Use the accepted A1.3 Windows recovery source checkpoint `f6a848a`, then
+   use the bounded recovery diagnostics and strict journal observation in a
+   disposable validation, finish the Windows recovery, install the verified
+   `6baa1f3` candidate, and
    verify service listeners, health, ACLs, Tailscale Serve, and current native
    Enable Banking reads on the reachable PC. Enable Banking is historically
    live-proven; this is deployment/readback re-certification. The first real resume reached journal
@@ -33,16 +33,21 @@ D1/D2 have Astra Medium source **MERGE** reviews.
 4. Verify iPhone install, App Group/HealthKit, personal signing renewal, and
    the native Shortcut flows.
 5. Resolve Zepp/workout evidence and implement the Obsidian Canvas mind-map
-   plan from GitHub issue #2.
+   plan. GitHub issue #2 is closed as the notification thread; its product
+   scope remains in the plan.
 6. Run the batched Astra security/product review and close every acceptance
    registry row before changing the release verdict.
 
 ## Verified checkpoint
 
-`29bbbde` is pushed; its complete A1.2 authority/artifact candidate is Astra
+`f6a848a` is pushed; its A1.3 recovery candidate is Astra Medium
+**MERGE** with 73 local source checks (three environment skips) and passing
+disposable Windows PowerShell 5.1 static, behavior, legacy Serve, and native
+recovery suites. `29bbbde` remains the complete A1.2 authority/artifact
+checkpoint and is Astra
 Medium **MERGE** and fresh Windows PowerShell 5.1 native/static suites pass.
-The deployable Windows source checkpoint is `6baa1f3`; A1.3 and canonical
-recovery remain open.
+The deployable Windows source checkpoint is `6baa1f3`; canonical recovery
+remains open.
 The strict journal observation mode is native-Windows-validated and Astra
 reviewed GREEN. Fresh SSH readback confirms the canonical marker is still
 active, while the older 31,401-unit/sequence-59,167 receipt is not treated as

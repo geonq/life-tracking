@@ -35,9 +35,9 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint is `29bbbde`, pushed on `main` with
-  zero local/remote divergence. A1.2 is the current checkpoint;
-  PR #1 is merged and no open PR is recorded.
+- Current application source checkpoint is `f6a848a`, pushed on `main` with
+  zero local/remote divergence. A1.2 is the current checkpoint; PR #1 is
+  merged and GitHub issues #2, #3, and #4 are closed; no open issues remain.
   The verified Windows candidate is `6baa1f3`; current read-only observation
   has BitLocker protection, stopped `LifeOSAPI`, absent `LifeOSGateway`, and an
   active marker without current stage/recovery/progress at the default backup
@@ -89,12 +89,10 @@ name the concrete gate moved, the evidence produced, and the next dependency.
   historical telemetry coordination receipt is `056c1b4`, not the current
   source checkpoint. Native Windows PowerShell 5.1 static,
   behavior, failure-parity, and legacy Serve suites passed with exit 0 for the
-  latest slice, and Astra Medium reviewed all four slices GREEN. The digest
-  callers use a mutable holder because named `[ref]` arguments are rebound by
-  Windows PowerShell 5.1. The canonical transaction remains untouched. The
-  public CalendarStore merge boundary is hardened at `e07a0a4`, with an Astra
-  Medium **GREEN** review and a focused iPhone 17 receipt of 96/96 tests with
-  0 failures.
+  latest slice, and Astra Medium reviewed all four slices GREEN; the canonical
+  transaction remains untouched. The public CalendarStore merge boundary is
+  hardened at `e07a0a4`, with an Astra Medium **GREEN** review and a focused
+  iPhone 17 receipt is 96/96 with 0 failures.
 
 ## Current dispatch
 
@@ -103,7 +101,10 @@ name the concrete gate moved, the evidence produced, and the next dependency.
   authority-owned lease/cursor state, restart mirror reconciliation, exact
   commit boundaries, and pre-publication replay-limit fencing. Astra Medium
   reviewed the exact candidate **MERGE**; fresh Windows PowerShell 5.1 native
-  and static suites pass. A1.3 and canonical recovery evidence remain open.
+  and static suites pass. A1.3 is accepted at `f6a848a` after Astra Medium
+  **MERGE**, 73 local source checks with three environment skips, and passing
+  disposable Windows static, behavior, legacy Serve, and native suites. Canonical
+  recovery evidence remains open.
 - A prior narrow Mac shell candidate was compiled and tested, then rejected by
   Astra Medium for missing actual shell evidence and collapsed-header geometry
   risk; its patch is preserved in `/private/tmp/lifeos-mac-shell-candidate-red.patch`.
@@ -122,9 +123,9 @@ name the concrete gate moved, the evidence produced, and the next dependency.
   `16e0855`; D2 revision/undo reconciliation is pushed at `f0d59a5`, and D3
   is pushed at `b6bc465`. A1.1 terminal-stage repair is pushed at `0f8fd8e`;
   A1.2 complete authority checkpoint `29bbbde` is pushed and reviewed **MERGE**
-  with fresh native/static Windows evidence. The next dispatch is A1.3, then
-  D4/D5. A1.4 truthfulness is pushed at `9539841`; canonical recovery remains
-  blocked.
+  with fresh native/static Windows evidence. A1.3 is pushed at `f6a848a` and
+  reviewed **MERGE** with all four disposable Windows suites passing. Next is
+  canonical recovery evidence, then D4/D5; A1.4 truthfulness is `9539841`.
   The calendar reconciliation receipt is at
   `artifacts/final/T0/calendar-security-reconciliation.md`.
 

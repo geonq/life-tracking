@@ -3,7 +3,7 @@
 Updated 2026-09-15 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Main source checkpoint: `29bbbde` (`Harden recovery replay and commit boundaries`)
+- Main source checkpoint: `f6a848a` (`Harden staged recovery retries and task identity`)
   on local `main` and `origin/main` with zero divergence. D2a/D2b, D3, and A1.1
   are Astra Medium source-reviewed **MERGE**. The deployable Windows
   candidate remains `6baa1f3`; PR #1 is already merged.
@@ -106,16 +106,18 @@ Updated 2026-09-15 Europe/Berlin.
 - T1/A1 Windows recovery review is recorded at
   `artifacts/final/T0/t1-a1-review.md` as the historical **RED** baseline. A1.2
   repairs its native progress/artifact boundary and passes disposable Windows
-  suites at `29bbbde`; A1.3, canonical recovery, and full-size measurement
-  remain open.
+  suites at `29bbbde`; A1.3 is accepted at `f6a848a` after Astra Medium
+  **MERGE**, local source checks, and passing static, behavior, legacy Serve,
+  and native PowerShell 5.1 suites. Canonical recovery and full-size
+  measurement remain open.
 - The scoped A1.4 truthfulness repair is pushed at `9539841` and reviewed
   **GREEN**. A1.1 terminal-stage no-replay/strict-progress repair is pushed at
   `0f8fd8e` and source-reviewed **MERGE**. A1.2 at `29bbbde` includes native
   retained artifact capability, immutable phase tokens, strict payload parsing,
   authority-owned lease/cursor, restart reconciliation, exact commit boundary,
   and replay-limit fencing. Astra Medium reviewed the exact candidate **MERGE**;
-  fresh Windows PowerShell 5.1 native/static suites pass. A1.3 and canonical
-  recovery remain open.
+  fresh Windows PowerShell 5.1 native/static suites pass. A1.3 is accepted at
+  `f6a848a`; canonical recovery remains open.
 - The current 191-line visual contract is committed at `5ebc17e`. A prior Mac
   shell candidate passed compile and 6 selected tests but was Astra RED for
   missing shell-state evidence and a possible collapsed-header overflow; it was
@@ -148,8 +150,9 @@ Updated 2026-09-15 Europe/Berlin.
   diagnostics/strict-reader/phase-telemetry validation passed.
 - Three T1a/T1b Luna Max recovery-preparation workers were stopped without
   usable reports and without source or Windows mutation. A1.1 is source-fixed
-  at `0f8fd8e`; A1.2 is source/disposable-validated at `29bbbde`, while A1.3,
-  canonical recovery, and full-size measurement still block T2.
+  at `0f8fd8e`; A1.2 is source/disposable-validated at `29bbbde`; A1.3 is
+  accepted at `f6a848a`. Canonical recovery and full-size measurement still
+  block T2.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 - T12d calendar reconciliation/security work remains open: D1 bounded local

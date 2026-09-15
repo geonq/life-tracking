@@ -12,7 +12,7 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
 
 ## Current source checkpoint
 
-- Application source checkpoint: `29bbbde Harden recovery replay and commit boundaries`;
+- Application source checkpoint: `f6a848a Harden staged recovery retries and task identity`;
   local `main` matches `origin/main` with zero divergence. PR #1 is merged and
   no open PRs are recorded. Reviewed source includes dashboard, calendar,
   usage, finance, backend-security, and installer; Windows recovery-
@@ -51,15 +51,13 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
 - Verification: iOS focused route/Usage suite **95 tests, 0 failures**;
   macOS route tests **2/2, exit 0**; full macOS snapshot run executed
   **51/51 test cases with 0 failures** before its result-archive I/O crash.
-- Windows source suite: **61 passed, 1 skipped, 0 failures**; the pushed
-  `6baa1f3` candidate verifier passed **108 files**. Native PowerShell 5.1
-  static, behavior, failure-parity, and legacy Serve suites passed exit 0 for
-  diagnostics at `14a3b7f`, strict progress validation at `4e14e38`, strict
-  journal observation at `9e43dd7`, and bounded phase telemetry at `0a8d5b6`;
-  Astra Medium reviewed all four slices **GREEN**. The latest disposable
-  native run passed static, behavior, and legacy Serve suites under Windows
-  PowerShell 5.1. The digest telemetry handoff uses a mutable holder because
-  named `[ref]` arguments are rebound incorrectly by Windows PowerShell 5.1.
+- Windows source suite: the latest local harness is **73 passed, 3 environment
+  skips, 0 failures**; the disposable Windows PowerShell 5.1 static, behavior,
+  legacy Serve, and native recovery suites all pass. A1.3 is pushed at
+  `f6a848a` after Astra Medium **MERGE**. It adds durable reconciliation
+  companions, bounded scheduler convergence before observation, complete
+  legacy task identity binding, and read-only failure observations. The
+  canonical Windows transaction remains untouched.
 - Personal installer security slice: Astra Medium scoped GREEN at `1d1af18`;
   **13/13 tests** and `bash -n` pass. Exact Apple command allowlisting,
   minimal child environment, hostile Python-startup rejection, toolchain
@@ -84,16 +82,16 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
   reviewed the two-file patch **GREEN**. The focused iPhone 17 simulator
   receipt is **96/96 with 0 failures**. Peer transport identity remains open.
 - T1/A1 Windows recovery review is recorded at
-  `artifacts/final/T0/t1-a1-review.md` and is **RED**. Astra found four
-  blocking recovery-boundary defects; no canonical Windows state was changed.
-- A1.4 is a scoped **GREEN** subpacket at `9539841`. A1.1 terminal-stage
-  repair is pushed at `0f8fd8e` and Astra Medium source-reviewed **MERGE**;
-  focused source checks are 6/6. A1.2 is checkpointed at `29bbbde`, adding
-  retained artifact capability, immutable phase tokens, strict payload parsing,
-  authority-owned lease/cursor, restart mirror reconciliation, exact commit
-  boundaries, and pre-publication record-limit rejection. Astra Medium reviewed
-  the exact three-file candidate **MERGE**; fresh Windows PowerShell 5.1 native
-  and static suites pass. A1.3 and canonical recovery evidence remain open; this does not authorize recovery.
+  `artifacts/final/T0/t1-a1-review.md` as the historical **RED** baseline.
+  A1.1 terminal-stage repair is pushed at `0f8fd8e` and Astra Medium
+  source-reviewed **MERGE**; focused source checks are 6/6. A1.2 is
+  checkpointed at `29bbbde`, adding retained artifact capability, immutable
+  phase tokens, strict payload parsing, authority-owned lease/cursor, restart
+  mirror reconciliation, exact commit boundaries, and pre-publication
+  record-limit rejection. A1.3 is accepted at `f6a848a` after Astra Medium
+  **MERGE**, local source checks, and all four disposable Windows suites
+  passing. Canonical recovery evidence remains open; this does not authorize
+  recovery.
 - Mac Tax accessibility repair is committed at `66953af`: macOS exposes one
   direct `import-tax-pdf` button, platform-specific empty-state actions
   compile, and the exact artifact passed direct AX inspection and native picker
@@ -145,14 +143,16 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
   after producing no usable report and made no source or Windows mutation.
   A1.1 is accepted at `0f8fd8e`; A1.2 is accepted as a source/disposable
   validation checkpoint at `29bbbde` after Astra Medium **MERGE** and passing
-  native/static suites. A1.3, canonical recovery, and full-size measurement
-  remain blocked by the broader recovery gate.
+  native/static suites. A1.3 is accepted at `f6a848a`; canonical recovery and
+  full-size measurement remain blocked by the broader recovery gate.
 - Astra rejected an uncommitted runtime optimization for a mutating
   reconcile-only path and TOCTOU gap; it is preserved at
   `/private/tmp/lifeos-red-runtime-optimization-20260913.patch` and excluded.
 - Runtime route transitions, whole-app visual captures at all review widths,
   calendar gestures, widgets, physical iPhone, signing, and Shortcuts.
-- Zepp workout fidelity/sync and the Obsidian Canvas mind map; see issue #2.
+- Zepp workout fidelity/sync and the Obsidian Canvas mind map remain open. The
+  GitHub notification thread for Canvas (issue #2) is closed after its reply
+  was recorded in the local plan.
 - Final operational security, transport, and release acceptance checks.
 - Claude's supplied High/Medium/Low security findings are reconciled
   finding-by-finding in `artifacts/final/T0/security-findings.md`. Most API,
@@ -188,10 +188,10 @@ release-ready** separately; estimates, not acceptance counts—never collapse th
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-  `070b7db`. T0 is pushed at `e07a0a4`; current source is `29bbbde`, with T11a
+  `070b7db`. T0 is pushed at `e07a0a4`; current source is `f6a848a`, with T11a
 visual foundation, T12a zoom, T12b viewport, T12c Mac pinch/settle, T13a widget
   I/O, T12d D1–D3, A1.1, and the complete A1.2 authority checkpoint integrated.
-  Next is A1.3 Windows recovery source repair, then T12d D4/D5; conforming source remains subject to runtime
+  Next is canonical recovery evidence and T12d D4/D5; conforming source remains subject to runtime
 verification. Usage is at `e8bbefa`; keep Calendar work in the smaller packets
 in `tasks/final-execution-plan.md`. The two broad security workers returned no
 report, so later reconciliation needs a completed bounded method. Keep the
