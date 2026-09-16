@@ -1,8 +1,8 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-16 Europe/Berlin. Release: **NO-GO**. Local `main` contains
-source checkpoint `a6020d0` plus the uncommitted Windows/storage candidate and
-is one commit ahead of `origin/main`; coordination docs are refreshed locally.
+Updated 2026-09-16 Europe/Berlin. Release: **NO-GO**. Local and remote `main`
+are clean and equal at `8fde743`; coordination docs record the storage guard
+and the next finance tranche.
 Track completion separately as
 approximately **70–75% implemented** and **35–45% release-ready**. T12c and
 D1/D2 have Astra Medium source **MERGE** reviews.
@@ -46,7 +46,15 @@ D1/D2 have Astra Medium source **MERGE** reviews.
 
 ## Verified checkpoint
 
-`a6020d0` is the last pushed source checkpoint before the current candidate;
+`8fde743` is the pushed Windows publication/storage checkpoint. The Apple
+storage guard is report/dry-run by default, requires explicit `--apply` for
+deletion, refuses active or uncheckable builds, skips booted simulators,
+preserves the current iPhone 17 simulator, and fails every Apple lane below a
+15 GiB free-space floor. The latest check reported 28.8 GiB free and the
+developer root at 16 GiB. Storage tests are 7 passed plus 2 process-probe
+subtests; the guard and all lane scripts pass `bash -n`.
+
+`a6020d0` was the prior source checkpoint before the candidate;
 its A1.3 recovery candidate is Astra Medium
 **MERGE** with 73 local source checks (three environment skips) and passing
 disposable Windows PowerShell 5.1 static, behavior, legacy Serve, and native
@@ -85,11 +93,9 @@ actool by the missing simulator runtime. These results
 do not prove live, runtime, device, visual, or operational
 completion.
 
-The current macOS storage guard has 7 passing tests plus 2 process-probe
-subtests, refuses active/uncheckable cleanup, preserves the kept iPhone 17 and
-booted simulators, and enforces a 15 GiB free-space floor before every Apple
-lane. No scheduler or automatic deletion of source/personal/final evidence was
-added.
+No scheduler or automatic deletion of source/personal/final evidence was
+added. Future Apple work must use the guard and owned per-lane DerivedData;
+parallel native builds remain disallowed on this Mac.
 
 The frozen registry is structurally valid but has 0 accepted leaves; do not use
 the earlier 60% estimate as release progress. Acceptance must be earned with

@@ -4,14 +4,14 @@ Updated 2026-09-16 Europe/Berlin.
 
 ## Active task
 
-Finish the Windows snapshot/security tranche and add bounded macOS storage
-maintenance. Keep the release verdict honest; do not call the product done.
+Continue the finance institution-detection tranche after the verified Windows
+publication/security and macOS storage checkpoint. Keep the release verdict
+honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. Local `main` is `a6020d0` plus uncommitted source,
-  tests, storage tooling, and coordination updates; it is one commit ahead of
-  `origin/main`.
+- Release is **NO-GO**. `main` and `origin/main` are clean and equal at
+  `8fde743` (`Harden Windows publication and bound Apple build storage`).
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
@@ -29,7 +29,7 @@ maintenance. Keep the release verdict honest; do not call the product done.
 - Local deployment source harness: 75 passed, 2 environment skips. Native C#
   extraction/build: 0 errors, 31 nullable/platform warnings.
 - Storage tests: 7 passed, 2 subtests. `bash -n` passes. Storage check reports
-  28.9 GiB free, 16 GiB Developer root, 11 GiB device support, and one kept
+  28.8 GiB free, 16 GiB Developer root, 11 GiB device support, and one kept
   shutdown iPhone 17 simulator.
 
 ## Storage policy
@@ -40,10 +40,14 @@ maintenance. Keep the release verdict honest; do not call the product done.
   15 GiB floor.
 - Apple validation/prerelease lanes call the guard before every lane and use
   serialized `xcodebuild -jobs 1`. No scheduler was added.
+- The guard is the required preflight for future Apple lanes. Generated
+  DerivedData and validation artifacts have owned paths; source, personal
+  data, final evidence, and the kept simulator are outside cleanup scope.
 
 ## Open gates
 
-- Fresh Astra review of this candidate, then commit and push to `main`.
+- Finance institution-detection plan, implementation, focused tests, Astra
+  review, then commit and push to `main`.
 - Canonical Windows install/listener/health/Serve/Enable Banking readback.
 - Finance live connector/import/recurring/net-worth work; Zepp workouts;
   Obsidian Canvas round trip; widgets, Shortcuts, signing, physical iPhone.
@@ -52,9 +56,10 @@ maintenance. Keep the release verdict honest; do not call the product done.
 
 ## Next action
 
-Reconcile Astra’s verdict, repair only blocking findings, rerun affected lanes,
-refresh this file and the short phase status, commit specific files, push, and
-verify local/remote parity plus open GitHub issues/PRs.
+Reconcile the current Astra finance plan, dispatch only its bounded Luna patch,
+run focused tests and a batched Astra review, then refresh coordination,
+commit specific files, push, and verify local/remote parity plus open GitHub
+issues/PRs.
 
 ## Blockers
 
