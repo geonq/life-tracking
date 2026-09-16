@@ -9,6 +9,35 @@ final class FinanceStatementImporterTests: XCTestCase {
         return calendar
     }
 
+#if DEBUG
+    private func parseCSVWithLinearLexerWorkBound(_ csv: String) -> FinanceImportResult {
+        let measured = FinanceStatementImporter.parseCSVForTesting(csv)
+        let bound = csv.utf8.count * 256 + 100_000
+        XCTAssertLessThanOrEqual(
+            measured.scanUnits,
+            bound,
+            "scanUnits=\(measured.scanUnits), bound=\(bound), inputBytes=\(csv.utf8.count)"
+        )
+        return measured.result
+    }
+#else
+    private func parseCSVWithLinearLexerWorkBound(_ csv: String) -> FinanceImportResult {
+        FinanceStatementImporter.parseCSV(csv)
+    }
+#endif
+
+    private func adversarialContinuationLines(count: Int, addExtraCandidateField: Bool = false) -> String {
+        (0..<count)
+            .map { index in
+                if index.isMultiple(of: 2) {
+                    let extraField = addExtraCandidateField ? ",unexpected" : ""
+                    return "2026-08-02,Candidate \(index),-99.00\(extraField)"
+                }
+                return "continuation \(index) with \"\" escaped quote"
+            }
+            .joined(separator: "\n")
+    }
+
     // MARK: 1. Valid CSV, European decimal-comma amounts + dd.MM.yyyy dates
     //
     // Real European bank exports that use comma as the decimal separator use
@@ -27,6 +56,9 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(result.skippedRowCount, 0)
         XCTAssertEqual(result.dataRowCount, 2)
         XCTAssertTrue(result.headerRecognized)
+        XCTAssertEqual(result.detectedSource, .genericCSV)
+        XCTAssertEqual(result.institutionDetection.state, .unknown)
+        XCTAssertNil(result.institutionDetection.institution)
 
         let spending = result.transactions.first { $0.description == "Supermarkt Rewe" }
         XCTAssertEqual(spending?.amountCents, -4590)
@@ -112,6 +144,9 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(result.transactions.first?.source, .tradeRepublicCSV)
         XCTAssertEqual(result.transactions.first?.amountCents, -10000)
         XCTAssertEqual(result.transactions.last?.amountCents, 53)
+        XCTAssertEqual(result.institutionDetection.state, .known)
+        XCTAssertEqual(result.institutionDetection.institution, .tradeRepublic)
+        XCTAssertTrue(result.institutionDetection.provenance.legacyLayoutCompatibility)
     }
 
     func testTradeRepublicDividendAndInterestRemainCashIncomeEvenWithSecurityFields() {
@@ -125,6 +160,8 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertTrue(result.transactions.allSatisfy { !$0.isInvestmentOrder })
         XCTAssertEqual(result.investmentTransactionCount, 0)
         XCTAssertEqual(FinanceCategorizer.category(for: result.transactions[0]), .income)
+        XCTAssertEqual(result.institutionDetection.state, .known)
+        XCTAssertEqual(result.institutionDetection.institution, .tradeRepublic)
     }
 
     func testTradeRepublicInvestmentFieldsRemainOrdersAndDoNotBecomeHoldings() {
@@ -143,6 +180,8 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(order.investment?.unitPriceCents, 10_050)
         XCTAssertEqual(order.providerCode, "5411")
         XCTAssertEqual(result.investmentTransactionCount, 1)
+        XCTAssertEqual(result.institutionDetection.state, .known)
+        XCTAssertEqual(result.institutionDetection.institution, .tradeRepublic)
     }
 
     // MARK: 4. Malformed/short rows are skipped and counted, not fabricated
@@ -256,6 +295,34 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(utf8Result.transactions.count, 1)
     }
 
+    func testCRLFAndQuotedFirstHeaderWithUTF8BOMAreAccepted() {
+        let csv = "\u{FEFF}\"date\",\"description\",\"amount\"\r\n2026-08-01,Apotheke,-12.50\r\n"
+        let result = FinanceStatementImporter.parseCSV(csv)
+
+        XCTAssertTrue(result.headerRecognized)
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(result.transactions.first?.description, "Apotheke")
+        XCTAssertEqual(result.transactions.first?.amountCents, -1250)
+    }
+
+    func testUTF16BOMWithQuotedHeadersIsAccepted() throws {
+        let text = "\"date\",\"description\",\"amount\"\r\n2026-08-01,UTF16 merchant,-8.75\r\n"
+        let utf16 = try XCTUnwrap(text.data(using: .utf16LittleEndian))
+        let result = try FinanceStatementImporter.parseCSV(data: Data([0xFF, 0xFE]) + utf16)
+
+        XCTAssertTrue(result.headerRecognized)
+        XCTAssertEqual(result.transactions.map(\.amountCents), [-875])
+    }
+
+    func testLegacyCarriageReturnLineEndingsAreAccepted() {
+        let result = FinanceStatementImporter.parseCSV(
+            "date,description,amount\r2026-08-01,Legacy CR,-4.00\r"
+        )
+
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(result.transactions.first?.amountCents, -400)
+    }
+
     func testQuotedMultilineDescriptionRemainsOneCSVRecord() {
         let result = FinanceStatementImporter.parseCSV("""
         date,description,amount
@@ -266,11 +333,556 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(result.transactions.first?.description, "Merchant, note\nsecond line")
     }
 
+    func testImmediateClosingQuoteDelimiterAndNewlineRemainRecordBoundaries() {
+        let result = FinanceStatementImporter.parseCSV(
+            "date,description,amount\n"
+                + "2026-08-01,\"Notes\n"
+                + "2026-08-02,Candidate,-99.00\n"
+                + "continued\",-10.00\n"
+                + "2026-08-03,Final,\"-2.50\"\n"
+        )
+
+        XCTAssertEqual(result.transactions.count, 2)
+        XCTAssertEqual(result.transactions.map(\.amountCents), [-1_000, -250])
+        XCTAssertEqual(result.transactions.first?.description, "Notes\n2026-08-02,Candidate,-99.00\ncontinued")
+        XCTAssertEqual(result.skippedRowCount, 0)
+    }
+
+    func testMalformedMiddleRecordDoesNotSwallowLaterValidRecord() {
+        let result = FinanceStatementImporter.parseCSV(
+            "date,description,amount\n"
+                + "2026-08-01,\"unterminated,-10.00\n"
+                + "2026-08-02,Recovered,-11.00\n"
+        )
+
+        XCTAssertEqual(result.transactions.map(\.description), ["Recovered"])
+        XCTAssertEqual(result.skippedRowCount, 1)
+        XCTAssertEqual(result.diagnostics.map(\.rowNumber), [2])
+        XCTAssertEqual(result.diagnostics.map(\.reason), [.malformedRow])
+    }
+
+    func testMalformedMiddleRecordDoesNotSwallowQuotedLaterRecord() {
+        let result = FinanceStatementImporter.parseCSV(
+            "date,description,amount\n"
+                + "2026-08-01,\"unterminated,-10.00\n"
+                + "2026-08-02,\"Recovered\",-11.00\n"
+        )
+
+        XCTAssertEqual(result.transactions.map(\.description), ["Recovered"])
+        XCTAssertEqual(result.transactions.map(\.amountCents), [-1_100])
+        XCTAssertEqual(result.skippedRowCount, 1)
+        XCTAssertEqual(result.diagnostics, [FinanceImportDiagnostic(rowNumber: 2, reason: .malformedRow)])
+    }
+
+    func testMalformedQuotedRecordRecoversBeforeLaterUnquotedAndQuotedRows() {
+        let result = FinanceStatementImporter.parseCSV(
+            "date,description,amount\n"
+                + "2026-08-01,\"unterminated,-10.00\n"
+                + "2026-08-02,Recovered plain,-11.00\n"
+                + "2026-08-03,\"Recovered quoted\",-12.00\n"
+        )
+
+        XCTAssertEqual(result.transactions.map(\.description), ["Recovered plain", "Recovered quoted"])
+        XCTAssertEqual(result.transactions.map(\.amountCents), [-1_100, -1_200])
+        XCTAssertEqual(result.dataRowCount, 3)
+        XCTAssertEqual(result.skippedRowCount, 1)
+        XCTAssertEqual(result.diagnostics, [FinanceImportDiagnostic(rowNumber: 2, reason: .malformedRow)])
+    }
+
+    func testMalformedRecoveryAlsoHandlesReorderedDateAndAmountColumns() {
+        let result = FinanceStatementImporter.parseCSV(
+            "description,amount,date\n"
+                + "Broken,\"unterminated,-10.00,2026-08-01\n"
+                + "Recovered,-11.00,2026-08-02\n"
+        )
+
+        XCTAssertEqual(result.transactions.map(\.description), ["Recovered"])
+        XCTAssertEqual(result.skippedRowCount, 1)
+        XCTAssertEqual(result.diagnostics.map(\.rowNumber), [2])
+    }
+
+    func testDateShapedMultilineDescriptionIsPreservedWhenTheQuoteCloses() {
+        let result = FinanceStatementImporter.parseCSV(
+            "date,description,amount\n"
+                + "2026-08-01,\"Notes\n"
+                + "2026-08-02,Invented,-99.00\n"
+                + "continued\",-10.00\n"
+        )
+
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(result.transactions.first?.description, "Notes\n2026-08-02,Invented,-99.00\ncontinued")
+        XCTAssertEqual(result.transactions.first?.amountCents, -1000)
+        XCTAssertEqual(result.skippedRowCount, 0)
+    }
+
+    func testTabDelimitedMultilineDescriptionWithClosingQuoteDelimiterRemainsOneRecord() {
+        let result = FinanceStatementImporter.parseCSV(
+            "date\tdescription\tamount\n"
+                + "2026-08-01\t\"Notes\n"
+                + "2026-08-02\tInvented\t-99.00\n"
+                + "continued\"\t-10.00\n"
+        )
+
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(
+            result.transactions.first?.description,
+            "Notes\n2026-08-02\tInvented\t-99.00\ncontinued"
+        )
+        XCTAssertEqual(result.transactions.first?.amountCents, -1_000)
+        XCTAssertEqual(result.skippedRowCount, 0)
+    }
+
+    func testTabDelimitedMultilineDescriptionWithSpaceBeforeClosingDelimiterRemainsOneRecord() {
+        let result = FinanceStatementImporter.parseCSV(
+            "date\tdescription\tamount\n"
+                + "2026-08-01\t\"Notes\n"
+                + "2026-08-02\tInvented\t-99.00\n"
+                + "continued\" \t-10.00\n"
+        )
+
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(
+            result.transactions.first?.description,
+            "Notes\n2026-08-02\tInvented\t-99.00\ncontinued"
+        )
+        XCTAssertEqual(result.transactions.first?.amountCents, -1_000)
+        XCTAssertEqual(result.skippedRowCount, 0)
+    }
+
+    func testUnicodeWhitespaceAfterClosingQuotePreservesMultilineRecord() {
+        let result = FinanceStatementImporter.parseCSV(
+            "date,description,amount\n"
+                + "2026-08-01,\"Notes\n"
+                + "2026-08-02,Invented,-99.00\n"
+                + "continued\"\u{2003},-10.00\n"
+        )
+
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(
+            result.transactions.first?.description,
+            "Notes\n2026-08-02,Invented,-99.00\ncontinued"
+        )
+        XCTAssertEqual(result.transactions.first?.amountCents, -1_000)
+        XCTAssertEqual(result.skippedRowCount, 0)
+    }
+
+    func testEscapedQuoteInValidMultilineDescriptionRemainsOneCSVRecord() {
+        let result = FinanceStatementImporter.parseCSV(
+            "date,description,amount\n"
+                + "2026-08-01,\"Notes\n"
+                + "2026-08-02,\"\",-99.00\n"
+                + "continued\",-10.00\n"
+        )
+
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(result.transactions.first?.description, "Notes\n2026-08-02,\",-99.00\ncontinued")
+        XCTAssertEqual(result.transactions.first?.amountCents, -1_000)
+        XCTAssertEqual(result.skippedRowCount, 0)
+    }
+
+    func testLargeQuotedMultilineDescriptionRemainsOneRecord() {
+        // Deterministic scaling regression for the cached linear lexer.
+        for continuationCount in [256, 1_024, 3_000] {
+            let continuationLines = (0..<continuationCount)
+                .map { "continuation \($0)" }
+                .joined(separator: "\n")
+            let result = parseCSVWithLinearLexerWorkBound(
+                "date,description,amount\n"
+                    + "2026-08-01,\"Opening\n"
+                    + continuationLines
+                    + "\",-10.00"
+            )
+
+            XCTAssertEqual(result.transactions.count, 1, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(result.skippedRowCount, 0, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(
+                result.transactions.first?.description.components(separatedBy: "\n").count,
+                continuationCount + 1,
+                "continuationCount=\(continuationCount)"
+            )
+            XCTAssertEqual(result.transactions.first?.amountCents, -1_000, "continuationCount=\(continuationCount)")
+        }
+    }
+
+    func testLargeCandidateLikeMultilineDescriptionRemainsOneRecord() {
+        // These continuation lines are valid rows at the header-derived date
+        // and amount positions. The quoted empty field in alternating lines
+        // is escaped for the surrounding description and remains valid to
+        // the candidate row parser.
+        for continuationCount in [256, 1_024, 3_000] {
+            let continuationLines = (0..<continuationCount)
+                .map { index -> String in
+                    let day = (index % 28) + 2
+                    let date = "2026-08-" + (day < 10 ? "0" : "") + String(day)
+                    if index.isMultiple(of: 2) {
+                        return "\(date),ordinary \(index),-99.00"
+                    }
+                    let escapedQuotedField = String(repeating: "\"", count: 2)
+                    return "\(date),\(escapedQuotedField),-99.00"
+                }
+                .joined(separator: "\n")
+            let expectedDescription = (0..<continuationCount)
+                .map { index -> String in
+                    let day = (index % 28) + 2
+                    let date = "2026-08-" + (day < 10 ? "0" : "") + String(day)
+                    if index.isMultiple(of: 2) {
+                        return "\(date),ordinary \(index),-99.00"
+                    }
+                    return "\(date),\",-99.00"
+                }
+                .joined(separator: "\n")
+            let result = parseCSVWithLinearLexerWorkBound(
+                "date,description,amount\n"
+                    + "2026-08-01,\"Opening\n"
+                    + continuationLines
+                    + "\",-10.00"
+            )
+
+            XCTAssertEqual(result.transactions.count, 1, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(
+                result.transactions.first?.description,
+                "Opening\n" + expectedDescription,
+                "continuationCount=\(continuationCount)"
+            )
+            XCTAssertEqual(result.transactions.first?.amountCents, -1_000, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(result.skippedRowCount, 0, "continuationCount=\(continuationCount)")
+        }
+    }
+
+    func testUnmatchedQuoteAtEOFIsRejectedWithoutFabricatingATransaction() {
+        let result = FinanceStatementImporter.parseCSV(
+            "date,description,amount\n2026-08-01,\"unterminated,-10.00"
+        )
+
+        XCTAssertTrue(result.transactions.isEmpty)
+        XCTAssertEqual(result.skippedRowCount, 1)
+        XCTAssertEqual(result.diagnostics, [FinanceImportDiagnostic(rowNumber: 2, reason: .malformedRow)])
+    }
+
+    func testMalformedQuotedRecordRecoversValidRowBeforeEOFMalformedContinuation() {
+        for suffix in ["", "\n"] {
+            let result = FinanceStatementImporter.parseCSV(
+                "date,description,amount\n"
+                    + "2026-08-01,\"unterminated,-10.00\n"
+                    + "2026-08-02,Recovered plain,-11.00\n"
+                    + ",\"unterminated"
+                    + suffix
+            )
+
+            XCTAssertEqual(result.transactions.map(\.description), ["Recovered plain"], "suffix=\(suffix.debugDescription)")
+            XCTAssertEqual(result.transactions.map(\.amountCents), [-1_100], "suffix=\(suffix.debugDescription)")
+            XCTAssertEqual(result.dataRowCount, 3, "suffix=\(suffix.debugDescription)")
+            XCTAssertEqual(result.skippedRowCount, 2, "suffix=\(suffix.debugDescription)")
+            XCTAssertEqual(
+                result.diagnostics,
+                [
+                    FinanceImportDiagnostic(rowNumber: 2, reason: .malformedRow),
+                    FinanceImportDiagnostic(rowNumber: 4, reason: .malformedRow)
+                ],
+                "suffix=\(suffix.debugDescription)"
+            )
+        }
+    }
+
+    func testMeteredEOFRecoveryRetainsValidMiddleRowsAtExpectedLinearBound() {
+        for middleRowCount in [256, 1_024, 3_000] {
+            let middleRows = (0..<middleRowCount)
+                .map { index in
+                    "2026-08-02,Recovered \(index),-11.00"
+                }
+                .joined(separator: "\n")
+            let result = parseCSVWithLinearLexerWorkBound(
+                "date,description,amount\n"
+                    + "2026-08-01,\"unterminated,-10.00\n"
+                    + middleRows
+                    + "\n,\"unterminated"
+            )
+
+            XCTAssertEqual(result.transactions.count, middleRowCount, "middleRowCount=\(middleRowCount)")
+            XCTAssertEqual(
+                result.transactions.map(\.description),
+                (0..<middleRowCount).map { "Recovered \($0)" },
+                "middleRowCount=\(middleRowCount)"
+            )
+            XCTAssertEqual(
+                result.transactions.map(\.amountCents),
+                Array(repeating: -1_100, count: middleRowCount),
+                "middleRowCount=\(middleRowCount)"
+            )
+            XCTAssertEqual(result.dataRowCount, middleRowCount + 2, "middleRowCount=\(middleRowCount)")
+            XCTAssertEqual(result.skippedRowCount, 2, "middleRowCount=\(middleRowCount)")
+            XCTAssertEqual(
+                result.diagnostics,
+                [
+                    FinanceImportDiagnostic(rowNumber: 2, reason: .malformedRow),
+                    FinanceImportDiagnostic(rowNumber: middleRowCount + 3, reason: .malformedRow)
+                ],
+                "middleRowCount=\(middleRowCount)"
+            )
+        }
+    }
+
+    func testLargeUnterminatedQuotedInputIsOneMalformedRow() {
+        // Deterministic scaling regression for the cached linear lexer.
+        for continuationCount in [256, 1_024, 3_000] {
+            let continuationLines = adversarialContinuationLines(
+                count: continuationCount,
+                addExtraCandidateField: true
+            )
+            let result = parseCSVWithLinearLexerWorkBound(
+                "date,description,amount\n"
+                    + "2026-08-01,\"unterminated,-10.00\n"
+                    + continuationLines
+            )
+
+            XCTAssertTrue(result.transactions.isEmpty, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(result.dataRowCount, 1, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(result.skippedRowCount, 1, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(
+                result.diagnostics,
+                [FinanceImportDiagnostic(rowNumber: 2, reason: .malformedRow)],
+                "continuationCount=\(continuationCount)"
+            )
+        }
+    }
+
+    func testMalformedQuotedRecordRetainsManyUnquotedRowsBeforeFinalQuotedRow() {
+        for continuationCount in [256, 1_024, 3_000] {
+            let middleRows = (0..<continuationCount)
+                .map { index in
+                    "2026-08-02,Recovered \(index),-11.00"
+                }
+                .joined(separator: "\n")
+            let result = parseCSVWithLinearLexerWorkBound(
+                "date,description,amount\n"
+                    + "2026-08-01,\"unterminated,-10.00\n"
+                    + middleRows
+                    + "\n2026-08-03,\"Recovered quoted\",-12.00\n"
+            )
+
+            XCTAssertEqual(result.transactions.count, continuationCount + 1, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(result.transactions.first?.description, "Recovered 0", "continuationCount=\(continuationCount)")
+            XCTAssertEqual(result.transactions.last?.description, "Recovered quoted", "continuationCount=\(continuationCount)")
+            XCTAssertEqual(result.transactions.first?.amountCents, -1_100, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(result.transactions.last?.amountCents, -1_200, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(result.dataRowCount, continuationCount + 2, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(result.skippedRowCount, 1, "continuationCount=\(continuationCount)")
+            XCTAssertEqual(
+                result.diagnostics,
+                [FinanceImportDiagnostic(rowNumber: 2, reason: .malformedRow)],
+                "continuationCount=\(continuationCount)"
+            )
+        }
+    }
+
+    func testQuotedFinalAmountWithUnicodeWhitespaceBeforeNewlineOrEOFIsImported() {
+        for suffix in ["\u{2003}\n", "\u{2003}"] {
+            let result = FinanceStatementImporter.parseCSV(
+                "date,description,amount\n2026-08-01,Final amount,\"-10.00\"\(suffix)"
+            )
+
+            XCTAssertEqual(result.transactions.count, 1, "suffix=\(suffix.debugDescription)")
+            XCTAssertEqual(result.transactions.first?.description, "Final amount", "suffix=\(suffix.debugDescription)")
+            XCTAssertEqual(result.transactions.first?.amountCents, -1_000, "suffix=\(suffix.debugDescription)")
+            XCTAssertEqual(result.skippedRowCount, 0, "suffix=\(suffix.debugDescription)")
+        }
+    }
+
+    func testUnsupportedTradeRepublicNearMatchesAreBlockedBeforeGenericParsing() {
+        let fullHeaders = [
+            "datetime", "date", "account_type", "category", "type", "asset_class",
+            "name", "symbol", "shares", "price", "amount", "fee", "tax", "currency",
+            "original_amount", "original_currency", "fx_rate", "description", "transaction_id",
+            "counterparty_name", "counterparty_iban", "payment_reference", "mcc_code"
+        ]
+        let missingCurrency = fullHeaders.filter { $0 != "currency" }
+        let extraHeader = fullHeaders + ["unexpected"]
+        let cases: [(headers: [String], delimiter: String)] = [
+            (missingCurrency, ","),
+            (extraHeader, ","),
+            (fullHeaders, ";")
+        ]
+
+        for item in cases {
+            let header = item.headers.joined(separator: item.delimiter)
+            let row = Array(repeating: "", count: item.headers.count)
+                .enumerated()
+                .map { index, _ in
+                    switch item.headers[index] {
+                    case "datetime": return "2026-08-01T10:00:00"
+                    case "date": return "2026-08-01"
+                    case "amount": return "-10.00"
+                    default: return ""
+                    }
+                }
+                .joined(separator: item.delimiter)
+            let result = FinanceStatementImporter.parseCSV(header + "\n" + row)
+
+            XCTAssertTrue(result.transactions.isEmpty, "case should be blocked: \(item.headers.count)/\(item.delimiter)")
+            XCTAssertEqual(result.institutionDetection.state, .unknown)
+            XCTAssertTrue(result.institutionDetection.provenance.reasonCodes.contains(.unsupportedNearMatch))
+        }
+
+        let securityHeaders = ["Datum", "Typ", "Beschreibung", "Betrag", "Symbol", "Anzahl", "Kurs", "Gebühr"]
+        let securityRow = ["14.08.2026", "Kauf", "ETF order", "-100,00", "VWCE", "1", "100,00", "0,00"]
+        let securityResult = FinanceStatementImporter.parseCSV(
+            securityHeaders.joined(separator: ";") + "\n" + securityRow.joined(separator: ";")
+        )
+        XCTAssertTrue(securityResult.transactions.isEmpty)
+        XCTAssertTrue(securityResult.institutionDetection.provenance.reasonCodes.contains(.unsupportedNearMatch))
+    }
+
+    func testDisabledBrokerageMarkerProfilesNeverFallThroughToGenericCashParsing() {
+        let cases: [(headers: [String], institution: FinanceInstitution, profileID: String)] = [
+            (["Activity Date", "Trans Code", "Net Amount", "date", "description", "netto"], .robinhood, "robinhood-disabled-v1"),
+            (["Buchungstag", "Umsatz", "date", "description", "netto"], .sparkasse, "sparkasse-disabled-v1")
+        ]
+
+        for item in cases {
+            let row = item.headers.map { header in
+                switch header {
+                case "date": "2026-08-01"
+                case "description": "Payment"
+                case "netto": "-10.00"
+                default: ""
+                }
+            }
+            let result = FinanceStatementImporter.parseCSV(
+                item.headers.joined(separator: ",") + "\n" + row.joined(separator: ",")
+            )
+
+            XCTAssertTrue(result.transactions.isEmpty, "case should be blocked: \(item.institution)")
+            XCTAssertEqual(result.institutionDetection.institution, nil)
+            XCTAssertEqual(result.institutionDetection.profileID, item.profileID)
+            XCTAssertEqual(result.institutionDetection.provenance.reasonCodes, [.disabledProfile])
+        }
+
+        let revolutHeaders = ["Completed Date", "Amount", "Currency", "State", "date", "description", "netto"]
+        let revolutRow = revolutHeaders.map { header in
+            switch header {
+            case "Completed Date", "date": "2026-08-01"
+            case "Amount", "netto": "-10.00"
+            case "Currency": "EUR"
+            case "State": "COMPLETED"
+            case "description": "Payment"
+            default: ""
+            }
+        }
+        let revolutResult = FinanceStatementImporter.parseCSV(
+            revolutHeaders.joined(separator: ",") + "\n" + revolutRow.joined(separator: ",")
+        )
+        XCTAssertTrue(revolutResult.transactions.isEmpty)
+        XCTAssertEqual(revolutResult.skippedRowCount, 1)
+        XCTAssertEqual(revolutResult.institutionDetection.institution, nil)
+        XCTAssertEqual(revolutResult.institutionDetection.profileID, "revolut-disabled-v1")
+        XCTAssertEqual(revolutResult.institutionDetection.provenance.reasonCodes, [.disabledProfile])
+
+        let controlResult = FinanceStatementImporter.parseCSV(
+            "date,description,amount\n2026-08-01,Payment,-10.00"
+        )
+        XCTAssertEqual(controlResult.transactions.count, 1)
+        XCTAssertEqual(controlResult.transactions.first?.description, "Payment")
+        XCTAssertEqual(controlResult.transactions.first?.amountCents, -1_000)
+    }
+
     func testParsingSameCSVProducesStableIDs() {
         let csv = "date,description,amount\n2026-08-01,Rewe,-12.50\n"
         let first = FinanceStatementImporter.parseCSV(csv)
         let second = FinanceStatementImporter.parseCSV(csv)
         XCTAssertEqual(first.transactions.map(\.id), second.transactions.map(\.id))
+    }
+
+    func testHistoricalUUIDGoldensRemainStableAcrossDetectorChanges() {
+        let germanMinimal = FinanceStatementImporter.parseCSV("""
+        Datum;Beschreibung;Betrag
+        14.08.2026;Supermarkt Rewe;-45,90
+        """)
+        let tradeRepublicGermanLegacy = FinanceStatementImporter.parseCSV("""
+        Datum;Typ;Beschreibung;Betrag
+        14.08.2026;Karte;Supermarkt Rewe;-45,90
+        """)
+        let tradeRepublicGermanSecurity = FinanceStatementImporter.parseCSV("""
+        Datum;Typ;Beschreibung;Betrag;Symbol;Anzahl;Kurs
+        14.08.2026;Kauf;Supermarkt Rewe;-45,90;VWCE;1;45,90
+        """)
+        let duplicateGerman = FinanceStatementImporter.parseCSV("""
+        Datum;Beschreibung;Betrag
+        14.08.2026;Supermarkt Rewe;-45,90
+        14.08.2026;Supermarkt Rewe;-45,90
+        """)
+        let genericEnglishWithProviderID = FinanceStatementImporter.parseCSV("""
+        date,description,amount,transaction_id
+        2026-08-01,Rewe,-12.50,provider-1
+        """)
+        let genericReordered = FinanceStatementImporter.parseCSV("""
+        account,amount,category,description,date
+        Main,-12.50,Groceries,Rewe,2026-08-01
+        Main,-12.50,Groceries,Rewe,2026-08-01
+        """)
+        let tradeRepublicEnglish = FinanceStatementImporter.parseCSV("""
+        datetime,date,account_type,category,type,asset_class,name,symbol,shares,price,amount,fee,tax,currency,original_amount,original_currency,fx_rate,description,transaction_id,counterparty_name,counterparty_iban,payment_reference,mcc_code
+        "2025-06-07T10:15:00","2025-06-07","checking","card","payment_outbound","","REWE SAGT DANKE FIL.1234","","","","-23.450000","0.000000","0.000000","EUR","","","","TR Card Transaction","tid-1","","","",""
+        """)
+
+        // These are literal UUIDs from the pre-detector importer algorithm for
+        // synthetic rows. Candidate-vs-itself equality would not catch a
+        // source, field, or ordinal change that breaks re-import reconciliation.
+        // The old importer intentionally treated any Datum+Betrag header as
+        // Trade Republic, even when the detector now reports a minimal
+        // three-column German file as unknown.
+        XCTAssertEqual(germanMinimal.transactions.first?.id, UUID(uuidString: "5cf6697f-8641-63c6-50a0-88830e744e42"))
+        XCTAssertEqual(tradeRepublicGermanLegacy.transactions.first?.id, UUID(uuidString: "5cf6697f-8641-63c6-50a0-88830e744e42"))
+        XCTAssertEqual(tradeRepublicGermanSecurity.transactions.first?.id, UUID(uuidString: "5cf6697f-8641-63c6-50a0-88830e744e42"))
+        XCTAssertEqual(duplicateGerman.transactions.map(\.id), [
+            UUID(uuidString: "5cf6697f-8641-63c6-50a0-88830e744e42"),
+            UUID(uuidString: "51bde504-a3f1-0d6a-5ea0-5a1710420e21")
+        ])
+        XCTAssertEqual(genericEnglishWithProviderID.transactions.first?.id, UUID(uuidString: "59cf0e29-82b7-1a88-2f16-b85f3ee93109"))
+        XCTAssertEqual(genericReordered.transactions.map(\.id), [
+            UUID(uuidString: "5d5aac04-8458-e309-e318-7c1e21f4771f"),
+            UUID(uuidString: "571006d6-96a0-2055-25f5-c24541e5b669")
+        ])
+        XCTAssertEqual(tradeRepublicEnglish.transactions.first?.id, UUID(uuidString: "5a8d56c0-8d28-2f8a-ad19-15972027a4df"))
+    }
+
+    func testHistoricalDateAliasKeepsPreDetectorColumnPrecedence() {
+        let result = FinanceStatementImporter.parseCSV("""
+        Booking-Date,date,description,amount
+        not-a-date,2026-08-01,Preferred,-10.00
+        """)
+
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(result.transactions.first?.description, "Preferred")
+        XCTAssertEqual(result.transactions.first?.id, UUID(uuidString: "519adff0-af7d-53de-bd8d-d6785b3595da"))
+    }
+
+    func testEnglishTradeRepublicRequiresNonemptyEURCurrency() {
+        let headers = tradeRepublicRealExportHeader.split(separator: ",").map(String.init)
+        func row(currency: String, description: String) -> String {
+            headers.map { header in
+                switch header {
+                case "datetime": return "2026-08-01T10:00:00"
+                case "date": return "2026-08-01"
+                case "amount": return "-10.00"
+                case "currency": return currency
+                case "description": return description
+                default: return ""
+                }
+            }.joined(separator: ",")
+        }
+
+        let result = FinanceStatementImporter.parseCSV([
+            tradeRepublicRealExportHeader,
+            row(currency: "", description: "Missing currency"),
+            row(currency: "USD", description: "Unsupported currency"),
+            row(currency: "EUR", description: "Accepted currency")
+        ].joined(separator: "\n"))
+
+        XCTAssertEqual(result.transactions.map(\.description), ["Accepted currency"])
+        XCTAssertEqual(result.skippedRowCount, 2)
+        XCTAssertEqual(result.diagnostics.map(\.reason), [.unsupportedCurrency, .unsupportedCurrency])
+        XCTAssertEqual(result.institutionDetection.state, .known)
+        XCTAssertEqual(result.institutionDetection.institution, .tradeRepublic)
     }
 
     func testParenthesizedAmountIsNegative() {

@@ -85,6 +85,9 @@ class MacOSStorageMaintenanceTests(unittest.TestCase):
             (candidate / "sentinel").write_text("remove", encoding="utf-8")
             (kept_support / "sentinel").write_text("keep", encoding="utf-8")
             (old_support / "sentinel").write_text("remove", encoding="utf-8")
+            probe = temporary_root / "pgrep"
+            probe.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            probe.chmod(0o700)
             result = subprocess.run(
                 [
                     str(SCRIPT),
@@ -98,6 +101,7 @@ class MacOSStorageMaintenanceTests(unittest.TestCase):
                     "LIFEOS_DEVELOPER_ROOT": str(temporary_root),
                     "LIFEOS_DERIVED_DATA_ROOT": str(derived),
                     "LIFEOS_DEVICE_SUPPORT_ROOT": str(support),
+                    "LIFEOS_PGREP_PATH": str(probe),
                     "LIFEOS_MIN_FREE_GIB": "0",
                 },
                 text=True,
