@@ -565,6 +565,41 @@ def test_gateway_uses_separate_serve_and_identity_payloads() -> None:
     assert "Tailscale snapshot payload is oversized." in writer
 
 
+def test_tailscale_snapshot_writer_has_native_atomic_and_bounded_boundaries() -> None:
+    writer = read("tailscale_snapshot.ps1")
+    native = writer.split("Add-Type -TypeDefinition @'", 1)[1].split(
+        "'@ -ErrorAction Stop", 1
+    )[0]
+    native_tests = read("tests/Deployment.Snapshot.Native.Tests.ps1")
+
+    for marker in (
+        "CreateExclusiveForWrite",
+        "RenameWithHeldParent",
+        "DeleteByHandle",
+        "ReadBounded",
+        "SetFileInformationByHandle",
+        "Task.WaitAll",
+    ):
+        assert marker in native
+    assert "FileFlagOpenReparsePoint" in native
+    assert "NT SERVICE\\LifeOSGateway" in writer
+    assert "Set-SnapshotRestrictedFileSecurity" in writer
+    assert "Assert-SnapshotIdentityChain" in writer
+    assert "Move-Item" not in writer
+    assert "WriteAllBytes" not in writer
+    for marker in (
+        "repeated replacement updates the destination",
+        "exclusive temporary creation rejects a colliding path",
+        "bounded reader rejects oversized content",
+        "held ancestor prevents pathname replacement",
+        "native process reader enforces a total timeout",
+        "native process reader enforces an output bound",
+        "hardlink ambiguity is observable before publication",
+        "reparse ambiguity is observable before publication",
+    ):
+        assert marker in native_tests
+
+
 def test_tailscale_snapshot_task_is_system_owned_acl_bound_and_reversible() -> None:
     common = read("Deployment.Common.ps1")
     install = read("install.ps1")
@@ -655,6 +690,7 @@ def test_tailscale_snapshot_task_is_system_owned_acl_bound_and_reversible() -> N
     assert "$manifest.paths.stateDirectory" not in verify
     assert "$manifest.paths.tailscaleSnapshot" not in verify
     assert "tailscale_snapshot.ps1" in preflight
+    assert "Deployment.Snapshot.Native.Tests.ps1" in preflight
     assert "WindowsPowerShell\\v1.0\\powershell.exe" in preflight
     assert "unsafeLink = $null -ne $linkType -and [string]$linkType -ne 'HardLink'" in common
     assert "unsafeTarget = $null -ne $target -and [string]$target -ne 'HardLink'" not in common
@@ -1222,6 +1258,7 @@ def test_deployment_bundle_is_explicit_and_all_source_files_are_unignored() -> N
         "tailscale_snapshot.ps1",
         "verify.ps1",
         "tests/Deployment.Behavior.Tests.ps1",
+        "tests/Deployment.Snapshot.Native.Tests.ps1",
         "tests/Deployment.Static.Tests.ps1",
     ):
         assert f"services/windows-service-host/deploy/{relative}" in ignore

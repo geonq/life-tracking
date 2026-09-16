@@ -227,6 +227,7 @@ $expectedFiles = @(
     'deploy/verify.ps1'
     'deploy/tests/Deployment.Behavior.Tests.ps1'
     'deploy/tests/Deployment.LegacyServe.Tests.ps1'
+    'deploy/tests/Deployment.Snapshot.Native.Tests.ps1'
     'deploy/tests/Deployment.Static.Tests.ps1'
 )
 

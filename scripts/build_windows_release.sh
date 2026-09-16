@@ -694,6 +694,7 @@ done
 deploy_test_files=(
     Deployment.Behavior.Tests.ps1
     Deployment.LegacyServe.Tests.ps1
+    Deployment.Snapshot.Native.Tests.ps1
     Deployment.Static.Tests.ps1
 )
 for file in "${deploy_test_files[@]}"; do

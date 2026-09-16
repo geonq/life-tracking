@@ -331,34 +331,39 @@ try {
     [IO.File]::WriteAllText($statePath, $configured, [Text.UTF8Encoding]::new($false))
     Assert-BehaviorThrows { Restore-TailscaleServeSnapshot -TailscaleExecutable $fakeTailscale -Json $unrelated } 'missing post-install Serve snapshot'
 
-    # The gateway service account cannot query Tailscale, so the SYSTEM writer
-    # and the launcher's reader must agree on one exact file. Drive the real
-    # writer against the fake and assert the installer-side validation half.
-    # Registering the task itself needs Windows and is exercised on the host.
-    $env:LIFEOS_BEHAVIOR_IDENTITY_JSON = $fixtureIdentity
-    [IO.File]::WriteAllText($statePath, $configured, [Text.UTF8Encoding]::new($false))
-    $snapshotWriter = Join-Path $deploy 'tailscale_snapshot.ps1'
-    Assert-ExistingFile $snapshotWriter 'Tailscale snapshot script'
-    $snapshotFile = Join-Path $tempRoot 'tailscale-state.json'
-    Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $snapshotFile)) -Quiet | Out-Null
-    $identityFacts = Get-TailscaleIdentityFacts $fakeTailscale
-    Assert-Behavior ($identityFacts.DnsName -ceq $fixtureDnsName) 'the installer derives the node DNS name from its own Tailscale query.'
-    Assert-Behavior ($identityFacts.LoginName -ceq $fixtureLogin) 'the installer derives the node login from its own Tailscale query.'
-    Assert-TailscaleSnapshotFile -Path $snapshotFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin
-    $writtenSnapshot = Get-Content -LiteralPath $snapshotFile -Raw | ConvertFrom-Json
-    Assert-Behavior ((@($writtenSnapshot.identity.Self.PSObject.Properties | ForEach-Object { [string]$_.Name }) -join ',') -ceq 'DNSName') 'the snapshot publishes only the consumed identity field, never the tailnet topology.'
-    Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $snapshotFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName 'someone-else@example.com' } 'snapshot login mismatch'
-    Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $snapshotFile -ExpectedDnsName 'other.example.ts.net' -ExpectedLoginName $fixtureLogin } 'snapshot DNS mismatch'
-    Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $snapshotFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin -MaxAgeSeconds 0 -MaxFutureSeconds 0 } 'stale snapshot'
-    $tamperedFile = Join-Path $tempRoot 'tampered-state.json'
-    $tampered = Get-Content -LiteralPath $snapshotFile -Raw | ConvertFrom-Json
-    [void]($tampered | Add-Member -NotePropertyName 'extraField' -NotePropertyValue $true)
-    [IO.File]::WriteAllText($tamperedFile, ($tampered | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
-    Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $tamperedFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin } 'snapshot with an unexpected field'
-    [IO.File]::WriteAllText($statePath, $unrelated, [Text.UTF8Encoding]::new($false))
-    $noRouteFile = Join-Path $tempRoot 'no-route-state.json'
-    Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $noRouteFile)) -Quiet | Out-Null
-    Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $noRouteFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin } 'snapshot without the private Serve mapping'
+    $gatewayServicePresent = $null -ne (Get-Service -Name 'LifeOSGateway' -ErrorAction SilentlyContinue)
+    if (-not $gatewayServicePresent) {
+        Write-Host 'SKIP: snapshot writer service-SID integration requires an installed LifeOSGateway service.'
+    } else {
+        # The gateway service account cannot query Tailscale, so the SYSTEM writer
+        # and the launcher's reader must agree on one exact file. Drive the real
+        # writer against the fake and assert the installer-side validation half.
+        # Registering the task itself needs Windows and is exercised on the host.
+        $env:LIFEOS_BEHAVIOR_IDENTITY_JSON = $fixtureIdentity
+        [IO.File]::WriteAllText($statePath, $configured, [Text.UTF8Encoding]::new($false))
+        $snapshotWriter = Join-Path $deploy 'tailscale_snapshot.ps1'
+        Assert-ExistingFile $snapshotWriter 'Tailscale snapshot script'
+        $snapshotFile = Join-Path $tempRoot 'tailscale-state.json'
+        Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $snapshotFile)) -Quiet | Out-Null
+        $identityFacts = Get-TailscaleIdentityFacts $fakeTailscale
+        Assert-Behavior ($identityFacts.DnsName -ceq $fixtureDnsName) 'the installer derives the node DNS name from its own Tailscale query.'
+        Assert-Behavior ($identityFacts.LoginName -ceq $fixtureLogin) 'the installer derives the node login from its own Tailscale query.'
+        Assert-TailscaleSnapshotFile -Path $snapshotFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin
+        $writtenSnapshot = Get-Content -LiteralPath $snapshotFile -Raw | ConvertFrom-Json
+        Assert-Behavior ((@($writtenSnapshot.identity.Self.PSObject.Properties | ForEach-Object { [string]$_.Name }) -join ',') -ceq 'DNSName') 'the snapshot publishes only the consumed identity field, never the tailnet topology.'
+        Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $snapshotFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName 'someone-else@example.com' } 'snapshot login mismatch'
+        Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $snapshotFile -ExpectedDnsName 'other.example.ts.net' -ExpectedLoginName $fixtureLogin } 'snapshot DNS mismatch'
+        Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $snapshotFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin -MaxAgeSeconds 0 -MaxFutureSeconds 0 } 'stale snapshot'
+        $tamperedFile = Join-Path $tempRoot 'tampered-state.json'
+        $tampered = Get-Content -LiteralPath $snapshotFile -Raw | ConvertFrom-Json
+        [void]($tampered | Add-Member -NotePropertyName 'extraField' -NotePropertyValue $true)
+        [IO.File]::WriteAllText($tamperedFile, ($tampered | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+        Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $tamperedFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin } 'snapshot with an unexpected field'
+        [IO.File]::WriteAllText($statePath, $unrelated, [Text.UTF8Encoding]::new($false))
+        $noRouteFile = Join-Path $tempRoot 'no-route-state.json'
+        Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $noRouteFile)) -Quiet | Out-Null
+        Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $noRouteFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin } 'snapshot without the private Serve mapping'
+    }
 
     # tailscaled still starting reports BackendState NoState and no Self at
     # all. Under Set-StrictMode an unguarded property read would crash with
@@ -367,8 +372,10 @@ try {
     [IO.File]::WriteAllText($statePath, $configured, [Text.UTF8Encoding]::new($false))
     $env:LIFEOS_BEHAVIOR_IDENTITY_JSON = '{"BackendState":"NoState","Version":"1.0"}'
     $noSelfFile = Join-Path $tempRoot 'no-self-state.json'
-    Assert-BehaviorThrows { Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $noSelfFile)) -Quiet } 'a Tailscale status carrying no Self node'
-    Assert-Behavior (-not (Test-Path -LiteralPath $noSelfFile)) 'a Tailscale status without Self publishes no snapshot file.'
+    if ($gatewayServicePresent) {
+        Assert-BehaviorThrows { Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $noSelfFile)) -Quiet } 'a Tailscale status carrying no Self node'
+        Assert-Behavior (-not (Test-Path -LiteralPath $noSelfFile)) 'a Tailscale status without Self publishes no snapshot file.'
+    }
     Assert-BehaviorThrows { Get-TailscaleIdentityFacts $fakeTailscale } 'installer identity derivation without a Self node'
 
     # In .NET `$` also matches immediately before a trailing newline, so a
@@ -376,17 +383,21 @@ try {
     # rejected by the reader's re.fullmatch after cutover.
     $env:LIFEOS_BEHAVIOR_IDENTITY_JSON = '{"Self":{"DNSName":"node.example.ts.net.","UserID":"1001"},"User":{"1001":{"LoginName":"operator@example.com\n"}}}'
     Assert-BehaviorThrows { Get-TailscaleIdentityFacts $fakeTailscale } 'a node login with a trailing newline'
-    $newlineFile = Join-Path $tempRoot 'newline-login-state.json'
-    Assert-BehaviorThrows { Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $newlineFile)) -Quiet } 'a node login with a trailing newline reaching the snapshot'
-    Assert-Behavior (-not (Test-Path -LiteralPath $newlineFile)) 'a login with a trailing newline is never published.'
+    if ($gatewayServicePresent) {
+        $newlineFile = Join-Path $tempRoot 'newline-login-state.json'
+        Assert-BehaviorThrows { Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $newlineFile)) -Quiet } 'a node login with a trailing newline reaching the snapshot'
+        Assert-Behavior (-not (Test-Path -LiteralPath $newlineFile)) 'a login with a trailing newline is never published.'
+    }
 
     # The launcher compares schemaVersion against the JSON number 1, so this
     # mirror must reject the string "1" instead of coercing it to 1.
-    $stringVersionFile = Join-Path $tempRoot 'string-version-state.json'
-    $stringVersion = Get-Content -LiteralPath $snapshotFile -Raw | ConvertFrom-Json
-    $stringVersion.schemaVersion = '1'
-    [IO.File]::WriteAllText($stringVersionFile, ($stringVersion | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
-    Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $stringVersionFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin } 'a snapshot whose schemaVersion is the string "1"'
+    if ($gatewayServicePresent) {
+        $stringVersionFile = Join-Path $tempRoot 'string-version-state.json'
+        $stringVersion = Get-Content -LiteralPath $snapshotFile -Raw | ConvertFrom-Json
+        $stringVersion.schemaVersion = '1'
+        [IO.File]::WriteAllText($stringVersionFile, ($stringVersion | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+        Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $stringVersionFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin } 'a snapshot whose schemaVersion is the string "1"'
+    }
 } finally {
     if ($null -eq $previousStatePath) { Remove-Item Env:LIFEOS_BEHAVIOR_STATE_PATH -ErrorAction SilentlyContinue }
     else { $env:LIFEOS_BEHAVIOR_STATE_PATH = $previousStatePath }

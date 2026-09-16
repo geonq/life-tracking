@@ -80,6 +80,8 @@ $behaviorDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.Behavior.Tes
 Assert-ExistingFile $behaviorDeploymentTest 'Deployment behavioral test'
 $legacyServeDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.LegacyServe.Tests.ps1'
 Assert-ExistingFile $legacyServeDeploymentTest 'Legacy Serve deployment test'
+$snapshotNativeDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.Snapshot.Native.Tests.ps1'
+Assert-ExistingFile $snapshotNativeDeploymentTest 'Tailscale snapshot native test'
 $hostSource = Resolve-ServiceHostBinary $ServiceHostBinarySource $paths.ServiceHostPath
 $null = Assert-LifeOSCandidateSourceBindings -CandidateRoot $candidateRootFull -ApiRoot $apiRoot -GatewayRoot $GatewaySource -NodeRuntimeRoot $nodeSource -ServiceHostBinary $hostSource -GatewayEntryPoint $gatewayEntry -DeploymentScriptRoot $PSScriptRoot
 $tailscale = Resolve-TailscaleExecutable $TailscaleExecutable
@@ -97,7 +99,7 @@ Assert-TrustedSourcePath $hostSource $operatorSid
 # so a fixture's `exit` can terminate only its child PowerShell process. The
 # behavioral fixtures use local fake Tailscale commands; they never contact or
 # change the machine's real Tailscale state.
-foreach ($deploymentTest in @($staticDeploymentTest, $behaviorDeploymentTest, $legacyServeDeploymentTest)) {
+foreach ($deploymentTest in @($staticDeploymentTest, $behaviorDeploymentTest, $legacyServeDeploymentTest, $snapshotNativeDeploymentTest)) {
     $testResult = Invoke-NativeChecked -FilePath $deploymentTest -ArgumentList ([string[]]@())
     $testResult.Output | Out-Host
 }
