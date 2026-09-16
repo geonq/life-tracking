@@ -36,6 +36,92 @@ function Assert-BehaviorThrowsSafe {
     if ($caught -like "*$ForbiddenText*") { throw "FAIL: token value was not displayed: rejection diagnostic exposed token material: $Message" }
 }
 
+function Test-LifeOSGatewayServiceAbsent {
+    [CmdletBinding()]
+    param([string]$ServiceName = 'LifeOSGateway')
+
+    try {
+        $services = @(Get-Service -Name $ServiceName -ErrorAction Stop)
+        if ($services.Count -eq 0) {
+            throw "The service lookup returned no result for $ServiceName without a confirmed absence error."
+        }
+        if ($services.Count -ne 1 -or [string]$services[0].Name -cne $ServiceName) {
+            throw "The service lookup returned an unexpected result for $ServiceName."
+        }
+        return $false
+    } catch {
+        $record = $_
+        $absenceId = 'NoServiceFoundForGivenName,Microsoft.PowerShell.Commands.GetServiceCommand'
+        $confirmedAbsent =
+            $record.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound -and
+            ([string]$record.FullyQualifiedErrorId -ceq $absenceId -or
+             [string]$record.FullyQualifiedErrorId -ceq ($absenceId + ',Get-Service'))
+        if ($confirmedAbsent) { return $true }
+        throw
+    }
+}
+
+function Set-BehaviorSnapshotRootSecurity {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$GatewaySid
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "Snapshot fixture root is missing: $Path"
+    }
+
+    # Mirror the production snapshot boundary: an administrative owner,
+    # protected explicit DACL, SYSTEM/Administrators mutation rights, and a
+    # read-only virtual-service grant. Do this before invoking the real writer
+    # so the service-present branch cannot hide a fixture ACL defect.
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $gateway = [Security.Principal.SecurityIdentifier]::new($GatewaySid)
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    foreach ($identity in @($system, $administrators)) {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $identity,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            $propagation,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $gateway,
+        [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+        $inheritance,
+        $propagation,
+        [Security.AccessControl.AccessControlType]::Allow))
+    $security.SetOwner($administrators)
+    Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+
+    $actual = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $ownerSid = $actual.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    Assert-Behavior ($ownerSid -ceq 'S-1-5-32-544') 'service-present snapshot fixture has an administrative owner'
+    Assert-Behavior $actual.AreAccessRulesProtected 'service-present snapshot fixture has a protected DACL'
+    $mutationMask = [int64]([Security.AccessControl.FileSystemRights]::WriteData -bor
+        [Security.AccessControl.FileSystemRights]::AppendData -bor
+        [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+        [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership)
+    $gatewayRead = $false
+    foreach ($rule in @($actual.Access)) {
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($sid -cne $GatewaySid -or $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+        $rights = [int64]$rule.FileSystemRights
+        Assert-Behavior (($rights -band $mutationMask) -eq 0) 'service-present snapshot fixture grants the Gateway read role only'
+        if (($rights -band [int64][Security.AccessControl.FileSystemRights]::Read) -ne 0) { $gatewayRead = $true }
+    }
+    Assert-Behavior $gatewayRead 'service-present snapshot fixture grants explicit Gateway read access'
+}
+
 $behaviorOperatorSid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
 
 & {
@@ -271,6 +357,66 @@ try {
     Remove-Item -LiteralPath $tokenRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+& {
+    # Get-Service normally reports a missing exact name with this provider
+    # error. Only that exact category/id pair is an absence proof; an empty
+    # provider result, permission error, or provider failure must stop the
+    # behavior suite instead of converting a lookup failure into a skip.
+    $script:gatewayServiceFixtureMode = 'empty'
+    function Get-Service {
+        [CmdletBinding()]
+        param([string]$Name)
+        Assert-Behavior ($Name -ceq 'LifeOSGateway') 'service absence helper queries the exact LifeOSGateway name.'
+        switch ($script:gatewayServiceFixtureMode) {
+            'empty' { return }
+            'present' { return [pscustomobject]@{ Name = 'LifeOSGateway' } }
+            'absent-error' {
+                $record = [System.Management.Automation.ErrorRecord]::new(
+                    [Exception]::new('confirmed service absence fixture'),
+                    'NoServiceFoundForGivenName,Microsoft.PowerShell.Commands.GetServiceCommand',
+                    [System.Management.Automation.ErrorCategory]::ObjectNotFound, $Name)
+                $PSCmdlet.ThrowTerminatingError($record)
+            }
+            'provider-error' {
+                $record = [System.Management.Automation.ErrorRecord]::new(
+                    [Exception]::new('service provider failure fixture'),
+                    'ProviderEnumerationFailed',
+                    [System.Management.Automation.ErrorCategory]::InvalidOperation, $Name)
+                $PSCmdlet.ThrowTerminatingError($record)
+            }
+            'permission-error' {
+                $record = [UnauthorizedAccessException]::new('service permission failure fixture')
+                $errorRecord = [System.Management.Automation.ErrorRecord]::new(
+                    $record,
+                    'ServiceAccessDenied',
+                    [System.Management.Automation.ErrorCategory]::PermissionDenied, $Name)
+                $PSCmdlet.ThrowTerminatingError($errorRecord)
+            }
+            'wrong-absence-error' {
+                $record = [System.Management.Automation.ErrorRecord]::new(
+                    [Exception]::new('untrusted absence fixture'),
+                    'NoServiceFoundForGivenName,OtherProvider',
+                    [System.Management.Automation.ErrorCategory]::ObjectNotFound, $Name)
+                $PSCmdlet.ThrowTerminatingError($record)
+            }
+            default { throw 'Unknown service lookup fixture mode' }
+        }
+    }
+    try {
+        Assert-BehaviorThrows { Test-LifeOSGatewayServiceAbsent } 'a provider result with no rows is not mistaken for confirmed service absence.'
+        $script:gatewayServiceFixtureMode = 'present'
+        Assert-Behavior (-not (Test-LifeOSGatewayServiceAbsent)) 'an installed LifeOSGateway service is detected.'
+        $script:gatewayServiceFixtureMode = 'absent-error'
+        Assert-Behavior (Test-LifeOSGatewayServiceAbsent) 'the exact Get-Service absence error proves the service is absent.'
+        foreach ($mode in @('provider-error', 'permission-error', 'wrong-absence-error')) {
+            $script:gatewayServiceFixtureMode = $mode
+            Assert-BehaviorThrows { Test-LifeOSGatewayServiceAbsent } "service lookup fails closed: $mode"
+        }
+    } finally {
+        Remove-Variable -Name gatewayServiceFixtureMode -Scope Script -ErrorAction SilentlyContinue
+    }
+}
+
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('lifeos-deploy-behavior-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 $fakeTailscale = Join-Path $tempRoot 'fake-tailscale.ps1'
@@ -331,19 +477,24 @@ try {
     [IO.File]::WriteAllText($statePath, $configured, [Text.UTF8Encoding]::new($false))
     Assert-BehaviorThrows { Restore-TailscaleServeSnapshot -TailscaleExecutable $fakeTailscale -Json $unrelated } 'missing post-install Serve snapshot'
 
-    $gatewayServicePresent = $null -ne (Get-Service -Name 'LifeOSGateway' -ErrorAction SilentlyContinue)
-    if (-not $gatewayServicePresent) {
-        Write-Host 'SKIP: snapshot writer service-SID integration requires an installed LifeOSGateway service.'
+    $gatewayServiceAbsent = Test-LifeOSGatewayServiceAbsent
+    $snapshotOutputRoot = $tempRoot
+    if ($gatewayServiceAbsent) {
+        Write-Host 'SKIP: snapshot writer service-SID integration requires an installed LifeOSGateway service; absence was confirmed by the Service Control Manager lookup.'
     } else {
         # The gateway service account cannot query Tailscale, so the SYSTEM writer
         # and the launcher's reader must agree on one exact file. Drive the real
         # writer against the fake and assert the installer-side validation half.
         # Registering the task itself needs Windows and is exercised on the host.
+        $snapshotOutputRoot = Join-Path $tempRoot 'snapshot-root'
+        New-Item -ItemType Directory -Path $snapshotOutputRoot -Force | Out-Null
+        $gatewaySid = Get-ServiceSid -ServiceName 'LifeOSGateway'
+        Set-BehaviorSnapshotRootSecurity -Path $snapshotOutputRoot -GatewaySid $gatewaySid
         $env:LIFEOS_BEHAVIOR_IDENTITY_JSON = $fixtureIdentity
         [IO.File]::WriteAllText($statePath, $configured, [Text.UTF8Encoding]::new($false))
         $snapshotWriter = Join-Path $deploy 'tailscale_snapshot.ps1'
         Assert-ExistingFile $snapshotWriter 'Tailscale snapshot script'
-        $snapshotFile = Join-Path $tempRoot 'tailscale-state.json'
+        $snapshotFile = Join-Path $snapshotOutputRoot 'tailscale-state.json'
         Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $snapshotFile)) -Quiet | Out-Null
         $identityFacts = Get-TailscaleIdentityFacts $fakeTailscale
         Assert-Behavior ($identityFacts.DnsName -ceq $fixtureDnsName) 'the installer derives the node DNS name from its own Tailscale query.'
@@ -354,13 +505,13 @@ try {
         Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $snapshotFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName 'someone-else@example.com' } 'snapshot login mismatch'
         Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $snapshotFile -ExpectedDnsName 'other.example.ts.net' -ExpectedLoginName $fixtureLogin } 'snapshot DNS mismatch'
         Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $snapshotFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin -MaxAgeSeconds 0 -MaxFutureSeconds 0 } 'stale snapshot'
-        $tamperedFile = Join-Path $tempRoot 'tampered-state.json'
+        $tamperedFile = Join-Path $snapshotOutputRoot 'tampered-state.json'
         $tampered = Get-Content -LiteralPath $snapshotFile -Raw | ConvertFrom-Json
         [void]($tampered | Add-Member -NotePropertyName 'extraField' -NotePropertyValue $true)
         [IO.File]::WriteAllText($tamperedFile, ($tampered | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
         Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $tamperedFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin } 'snapshot with an unexpected field'
         [IO.File]::WriteAllText($statePath, $unrelated, [Text.UTF8Encoding]::new($false))
-        $noRouteFile = Join-Path $tempRoot 'no-route-state.json'
+        $noRouteFile = Join-Path $snapshotOutputRoot 'no-route-state.json'
         Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $noRouteFile)) -Quiet | Out-Null
         Assert-BehaviorThrows { Assert-TailscaleSnapshotFile -Path $noRouteFile -ExpectedDnsName $fixtureDnsName -ExpectedLoginName $fixtureLogin } 'snapshot without the private Serve mapping'
     }
@@ -371,8 +522,8 @@ try {
     # publish nothing.
     [IO.File]::WriteAllText($statePath, $configured, [Text.UTF8Encoding]::new($false))
     $env:LIFEOS_BEHAVIOR_IDENTITY_JSON = '{"BackendState":"NoState","Version":"1.0"}'
-    $noSelfFile = Join-Path $tempRoot 'no-self-state.json'
-    if ($gatewayServicePresent) {
+    $noSelfFile = Join-Path $snapshotOutputRoot 'no-self-state.json'
+    if (-not $gatewayServiceAbsent) {
         Assert-BehaviorThrows { Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $noSelfFile)) -Quiet } 'a Tailscale status carrying no Self node'
         Assert-Behavior (-not (Test-Path -LiteralPath $noSelfFile)) 'a Tailscale status without Self publishes no snapshot file.'
     }
@@ -383,16 +534,16 @@ try {
     # rejected by the reader's re.fullmatch after cutover.
     $env:LIFEOS_BEHAVIOR_IDENTITY_JSON = '{"Self":{"DNSName":"node.example.ts.net.","UserID":"1001"},"User":{"1001":{"LoginName":"operator@example.com\n"}}}'
     Assert-BehaviorThrows { Get-TailscaleIdentityFacts $fakeTailscale } 'a node login with a trailing newline'
-    if ($gatewayServicePresent) {
-        $newlineFile = Join-Path $tempRoot 'newline-login-state.json'
+    if (-not $gatewayServiceAbsent) {
+        $newlineFile = Join-Path $snapshotOutputRoot 'newline-login-state.json'
         Assert-BehaviorThrows { Invoke-NativeChecked -FilePath $snapshotWriter -ArgumentList ([string[]]@('-TailscaleExecutable', $fakeTailscale, '-OutputPath', $newlineFile)) -Quiet } 'a node login with a trailing newline reaching the snapshot'
         Assert-Behavior (-not (Test-Path -LiteralPath $newlineFile)) 'a login with a trailing newline is never published.'
     }
 
     # The launcher compares schemaVersion against the JSON number 1, so this
     # mirror must reject the string "1" instead of coercing it to 1.
-    if ($gatewayServicePresent) {
-        $stringVersionFile = Join-Path $tempRoot 'string-version-state.json'
+    if (-not $gatewayServiceAbsent) {
+        $stringVersionFile = Join-Path $snapshotOutputRoot 'string-version-state.json'
         $stringVersion = Get-Content -LiteralPath $snapshotFile -Raw | ConvertFrom-Json
         $stringVersion.schemaVersion = '1'
         [IO.File]::WriteAllText($stringVersionFile, ($stringVersion | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
@@ -1477,6 +1628,17 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
             units = @($units); unitCount = $UnitCount; treeRoots = @($data); phase = 'artifacts'; progressPath = (Get-RecoveryProgressPath $manifest)
         }
         Write-JsonAtomic (Get-RecoveryJournalPath $manifest) $journal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+        # Seed the disposable progress leaf with the same protected native
+        # descriptor as production. Later append/corruption cases can then
+        # exercise framing behavior without being rejected by the real ACL
+        # boundary before the reader reaches the bytes under test.
+        Initialize-LifeOSRecoveryProgressNative
+        $progressNative = [LifeOSRecoveryProgressNative]::CreateNew(
+            (Get-FullPath (Get-RecoveryProgressPath $manifest)),
+            $true,
+            (New-RecoveryProgressAcl -OperatorSid $manifest.operatorSid).GetSecurityDescriptorBinaryForm())
+        try { }
+        finally { if ($null -ne $progressNative) { $progressNative.Dispose() } }
         for ($index = 0; $index -lt $UnitCount; $index++) {
             $record = New-RecoveryProgressRecord -Manifest $manifest -Journal $journal -UnitIndex $index -Phase 'complete' -Sequence $index -UnitCount $UnitCount
             $frames[$index] = New-RecoveryProgressFrame $record
@@ -1877,17 +2039,28 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
 
         [IO.File]::WriteAllBytes($progressPath, $committedBytes)
         $beforeAcl = [IO.File]::ReadAllBytes($progressPath)
-        $script:terminalProgressAclFailureMode = $true
+        # Make the native descriptor repairable while keeping every ACE inside
+        # the management boundary. Strict completed-journal validation must
+        # reject this unprotected DACL before any legacy ACL adapter runs.
+        $repairableParentAcl = New-LifeOSManagedAcl -OperatorSid $behaviorOperatorSid -IsContainer:$true -InheritToChildren
+        $repairableParentAcl.SetOwner([Security.Principal.SecurityIdentifier]::new($behaviorOperatorSid))
+        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $backup -AclObject $repairableParentAcl
+        $repairableProgressAcl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $progressPath
+        $repairableProgressAcl.SetAccessRuleProtection($false, $false)
+        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $progressPath -AclObject $repairableProgressAcl
+        $script:terminalProgressAclFailureMode = $false
         $script:terminalProgressAclAssertions = 0
         $script:terminalSetAclCalls = 0
         $script:terminalGetAclCalls = 0
-        Assert-BehaviorThrows {
+        $terminalAclError = $null
+        try {
             Invoke-RecoveryStage $manifest 'fixture-stage' $action -ReconcileAction $reconcileAction -Postcondition $postcondition
-        } 'completed recovery rejects a repairable progress ACL before repair'
+        } catch { $terminalAclError = [string]$_.Exception.Message }
+        Assert-Behavior ($terminalAclError -ceq 'Recovery progress ACL is not strictly restricted.') 'completed recovery rejects a repairable progress ACL before repair'
         $afterAcl = [IO.File]::ReadAllBytes($progressPath)
         Assert-Behavior ([Convert]::ToBase64String($afterAcl) -ceq [Convert]::ToBase64String($beforeAcl) -and
             [long]$afterAcl.Length -eq [long]$beforeAcl.Length) 'completed ACL validation leaves progress bytes and length unchanged.'
-        Assert-Behavior ($script:terminalProgressAclAssertions -eq 1 -and
+        Assert-Behavior ($script:terminalProgressAclAssertions -eq 0 -and
             $script:terminalSetAclCalls -eq 0 -and $script:terminalGetAclCalls -eq 0) 'completed ACL validation rejects before Get-Acl or Set-RestrictedAcl repair.'
     } finally {
         if ($null -ne $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue }
@@ -2188,7 +2361,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     $firstBackup = Join-Path $backup 'first.json'; $secondBackup = Join-Path $backup 'second.json'
     foreach ($file in @($first, $second)) { [IO.File]::WriteAllText($file, 'new') }
     foreach ($file in @($firstBackup, $secondBackup)) { [IO.File]::WriteAllText($file, 'old') }
-    $manifest = [pscustomobject]@{ transactionId='fixture'; generation='generation'; operatorSid='fixture'; manifestPath=(Join-Path $backup 'manifest.json'); collectorTransition=$null; paths=[pscustomobject]@{ backupDirectory=$backup; gatewayData=$data; usageHistory=$usage }; backups=@(
+    $manifest = [pscustomobject]@{ transactionId='fixture'; generation='generation'; operatorSid=$behaviorOperatorSid; manifestPath=(Join-Path $backup 'manifest.json'); collectorTransition=$null; paths=[pscustomobject]@{ backupDirectory=$backup; gatewayData=$data; usageHistory=$usage }; backups=@(
         [pscustomobject]@{ destination=$first; backup=$firstBackup; changed=$true; priorExists=$true; phase='complete' },
         [pscustomobject]@{ destination=$second; backup=$secondBackup; changed=$true; priorExists=$true; phase='complete' }
     ) }
@@ -2259,7 +2432,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         [IO.File]::WriteAllText((Join-Path $data ('file-{0:D3}.json' -f $index)), 'stable')
     }
     $manifest = [pscustomobject]@{
-        transactionId = 'expanded-tree-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = (Join-Path $backup 'manifest.json')
+        transactionId = 'expanded-tree-fixture'; generation = 'generation'; operatorSid = $behaviorOperatorSid; manifestPath = (Join-Path $backup 'manifest.json')
         collectorTransition = $null; paths = [pscustomobject]@{ backupDirectory = $backup; gatewayData = $data; usageHistory = $usage }; backups = @()
     }
     $script:inventoryRestoreCalled = $false
@@ -2435,7 +2608,7 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
     function Stop-ScheduledTask { throw 'unexpected mutation' }
     function Stop-Service { throw 'unexpected mutation' }
     function Unregister-ScheduledTask { throw 'unexpected mutation' }
-    $record = [pscustomobject]@{ Name='LifeOSCodexCollector'; Exists=$false; TaskPath='\' }
+    $record = [pscustomobject]@{ Name='LifeOSCodexCollector'; Exists=$false; Enabled=$false; State='Stopped'; TaskPath='\' }
     $manifest = [pscustomobject]@{ codexTask=$record; snapshotTask=[pscustomobject]@{ Name='LifeOSTailscaleSnapshot'; Exists=$false; TaskPath='\' } }
     Stop-DeploymentTaskBarrier $manifest 'unused'
     Stop-LifeOSService 'LifeOSAPI'
@@ -2461,11 +2634,13 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
 
 & {
     $script:restoredTaskEvents = @()
-    function Get-ScheduledTask { return [pscustomobject]@{ TaskName='LifeOSCodexCollector'; TaskPath='\' } }
+    $script:restoredTaskPath = '\'
+    function Get-ScheduledTask { return [pscustomobject]@{ TaskName='LifeOSCodexCollector'; TaskPath=$script:restoredTaskPath; State='Disabled' } }
     function Unregister-ScheduledTask { param($TaskName, $TaskPath, [switch]$Confirm) $script:restoredTaskEvents += 'remove-root' }
-    function Restore-LegacyTask { param($Snapshot, $TaskName) $script:restoredTaskEvents += ('restore-' + $Snapshot.TaskPath) }
-    Restore-CodexCollectorTask ([pscustomobject]@{ Exists=$true; TaskPath='\Previous\' }) 'LifeOSCodexCollector'
+    function Restore-LegacyTask { param($Snapshot, $TaskName) $script:restoredTaskPath = [string]$Snapshot.TaskPath; $script:restoredTaskEvents += ('restore-' + $Snapshot.TaskPath) }
+    Restore-CodexCollectorTask ([pscustomobject]@{ Exists=$true; Enabled=$false; State='Stopped'; TaskPath='\Previous\'; Xml='<Task />' }) 'LifeOSCodexCollector'
     Assert-Behavior (($script:restoredTaskEvents -join ',') -eq 'remove-root,restore-\Previous\') 'collector rollback removes the replacement at root before restoring the prior folder'
+    Remove-Variable -Name restoredTaskPath -Scope Script
 }
 
 & {
@@ -2477,7 +2652,7 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
     $code = Join-Path $temp 'code.js'; $codeBackup = Join-Path $temp 'previous-code.js'
     [IO.File]::WriteAllText($code, 'new-code'); [IO.File]::WriteAllText($codeBackup, 'prior-code')
     $script:unexpectedRecoveryAction = $false
-    $manifest = [pscustomobject]@{ transactionId='receipt-fixture'; generation='generation'; operatorSid='fixture'; manifestPath=$manifestPath; collectorTransition=[pscustomobject]@{ phase='running'; usageBefore='absent'; startedAtUtc='fixture-run' }; paths=[pscustomobject]@{ backupDirectory=$temp; gatewayData=$data; usageHistory=$usage }; backups=@([pscustomobject]@{ destination=$code; backup=$codeBackup; priorExists=$true; changed=$true; phase='complete' }) }
+    $manifest = [pscustomobject]@{ transactionId='receipt-fixture'; generation='generation'; operatorSid=$behaviorOperatorSid; manifestPath=$manifestPath; collectorTransition=[pscustomobject]@{ phase='running'; usageBefore='absent'; startedAtUtc='fixture-run' }; paths=[pscustomobject]@{ backupDirectory=$temp; gatewayData=$data; usageHistory=$usage }; backups=@([pscustomobject]@{ destination=$code; backup=$codeBackup; priorExists=$true; changed=$true; phase='complete' }) }
     function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
     function Set-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$File, [switch]$SkipSnapshot, [string[]]$AllowedOwnerSids, [switch]$InheritableSystemFullControl) }
     try {
@@ -2761,7 +2936,7 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
     Ensure-Directory $temp
     $data = Join-Path $temp 'data'; Ensure-Directory $data
     $usage = Join-Path $temp 'usage.jsonl'
-    $manifest = [pscustomobject]@{ transactionId='absent'; generation='generation'; operatorSid='fixture'; manifestPath=(Join-Path $temp 'manifest.json'); collectorTransition=$null; paths=[pscustomobject]@{ backupDirectory=$temp; gatewayData=$data; usageHistory=$usage }; backups=@() }
+    $manifest = [pscustomobject]@{ transactionId='absent'; generation='generation'; operatorSid=$behaviorOperatorSid; manifestPath=(Join-Path $temp 'manifest.json'); collectorTransition=$null; paths=[pscustomobject]@{ backupDirectory=$temp; gatewayData=$data; usageHistory=$usage }; backups=@() }
     function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
     function Set-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$File, [switch]$SkipSnapshot, [string[]]$AllowedOwnerSids, [switch]$InheritableSystemFullControl) }
     try {

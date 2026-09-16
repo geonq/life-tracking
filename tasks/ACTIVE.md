@@ -1,7 +1,7 @@
 # Active LifeOS full-design execution
 
 Status: IN PROGRESS
-Updated: 2026-09-15
+Updated: 2026-09-16
 Mode: prospective implementation of the complete LifeOS design plan; one verified, publishable tranche at a time.
 
 ## Goal and measurement
@@ -27,7 +27,6 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 - Windows PC/Tailscale is the private structured-data and document-service boundary.
 - Apple Reminders owns actionable task state; Calendar owns time commitments; Obsidian owns durable knowledge/plans; HealthKit transports health samples with Helio Strap/Zepp provenance; the private LifeOS ledger owns financial/tax evidence.
 - No production fixture fallback. Missing live values remain unavailable.
-
 ## Implemented source and scoped evidence
 - Figma-led four-row Overview and Usage detail surfaces.
 - Native Calendar week/month/three-day layouts, event editor/status/icons, holidays, and widgets.
@@ -35,9 +34,10 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint is `f6a848a`, pushed on `main` with
-  zero local/remote divergence. A1.2 is the current checkpoint; PR #1 is
-  merged and GitHub issues #2, #3, and #4 are closed; no open issues remain.
+- Current application source checkpoint is `a6020d0` plus the uncommitted
+  Windows snapshot/storage candidate; local `main` is one commit ahead of
+  `origin/main`. PR #1 is merged and GitHub issues #2, #3, and #4 are closed;
+  verify issue/PR state before the next push.
   The verified Windows candidate is `6baa1f3`; current read-only observation
   has BitLocker protection, stopped `LifeOSAPI`, absent `LifeOSGateway`, and an
   active marker without current stage/recovery/progress at the default backup
@@ -85,15 +85,16 @@ name the concrete gate moved, the evidence produced, and the next dependency.
   and a standalone Berlin DST/month-end behavior probe.
   Bounded recovery diagnostics are committed at `14a3b7f`; strict progress
   validation is committed at `4e14e38`; strict journal observation is committed
-  at `9e43dd7`. Bounded phase telemetry is committed at `0a8d5b6`; the current
-  historical telemetry coordination receipt is `056c1b4`, not the current
-  source checkpoint. Native Windows PowerShell 5.1 static,
+  at `9e43dd7`; bounded phase telemetry is committed at `0a8d5b6`. The current
+  historical telemetry coordination receipt is `056c1b4`, not the source
+  checkpoint. Native Windows PowerShell 5.1 static,
   behavior, failure-parity, and legacy Serve suites passed with exit 0 for the
   latest slice, and Astra Medium reviewed all four slices GREEN; the canonical
   transaction remains untouched. The public CalendarStore merge boundary is
-  hardened at `e07a0a4`, with an Astra Medium **GREEN** review and a focused
-  iPhone 17 receipt is 96/96 with 0 failures.
-
+  hardened at `e07a0a4`, with an Astra Medium **GREEN** review; focused iPhone
+  17 receipt is 96/96 with 0 failures.
+- macOS storage guard: report/dry-run, scoped `--apply`, fail-closed probe,
+  per-lane checks, 7/7 tests plus 2 probe subtests.
 ## Current dispatch
 
 - A1.2 checkpoint `29bbbde` contains the retained artifact capability,
@@ -128,7 +129,6 @@ name the concrete gate moved, the evidence produced, and the next dependency.
   canonical recovery evidence, then D4/D5; A1.4 truthfulness is `9539841`.
   The calendar reconciliation receipt is at
   `artifacts/final/T0/calendar-security-reconciliation.md`.
-
 ## Execution phases
 
 ### Phase 1 — Finance native surface and truthful connection readiness [IN PROGRESS]
@@ -145,9 +145,9 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 - [ ] Shared Account, Transaction, Category, Rule, ImportBatch, and SyncHistory models with provenance and audit links.
 - [ ] Manual Cash/Custom balance adjustments as auditable transactions.
 - [ ] Unified transaction review/search/filter/inspector UI.
-- [ ] CSV/PDF import adapters only after representative user-source samples are available; preserve originals and reject ambiguous duplicates.
-- [ ] Budgets, cash flow, income/expenses, recurring/subscriptions/bills/goals.
-- [ ] Net worth/reports only from verified source records.
+- [ ] CSV/PDF import adapters after representative samples; classify known institutions from headers/format fingerprints, preserve originals, and require explicit mapping for unknown formats.
+- [ ] Budgets, cash flow, income/expenses, recurring/subscriptions/bills/goals; detect recurring candidates and provide a provenance-backed Manage Payment override for weekly/monthly/yearly cadence.
+- [ ] Net worth/reports only from verified source records; keep Robinhood investments visibly separate from bank transactions while including verified holdings/cash, with NextSemis as an optional final integration gate.
 
 ### Phase 3 — Tax and Documents completion
 - [ ] Shared document metadata/merge strategy including `updatedAt` and conflict semantics.
@@ -165,7 +165,7 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 - [ ] No Clipper workflow duplication; Clipper remains an external read-only source.
 
 ### Phase 5 — Investments
-- [ ] Trade Republic import-only path unless an official/regulated connector becomes available.
+- [ ] Trade Republic import-only path unless an official/regulated connector becomes available; support Robinhood investment imports with the same provenance and net-worth reconciliation rules.
 - [ ] Holdings, lots, dividends, interest, performance, allocation, capital gains, reports.
 - [ ] Original document provenance and safe tax linkage.
 

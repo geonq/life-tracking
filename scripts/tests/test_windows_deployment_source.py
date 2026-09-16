@@ -573,20 +573,96 @@ def test_tailscale_snapshot_writer_has_native_atomic_and_bounded_boundaries() ->
     native_tests = read("tests/Deployment.Snapshot.Native.Tests.ps1")
 
     for marker in (
+        "using System.Diagnostics;",
         "CreateExclusiveForWrite",
+        "CreateFileWithSecurity",
+        "ConvertStringSecurityDescriptorToSecurityDescriptor",
         "RenameWithHeldParent",
+        "ReplaceFileAtomically",
+        "ReplaceFileW",
+        "OpenExistingForRename",
+        "OpenExistingForDelete",
         "DeleteByHandle",
         "ReadBounded",
+        "DuplicateHandle",
+        "ReadFile",
+        "CreateJobObject",
+        "SetInformationJobObject",
+        "AssignProcessToJobObject",
+        "TerminateJobObject",
+        "CreateProcess",
+        "InitializeProcThreadAttributeList",
+        "UpdateProcThreadAttribute",
+        "DeleteProcThreadAttributeList",
         "SetFileInformationByHandle",
         "Task.WaitAll",
     ):
         assert marker in native
+    assert "private static long CreateDeadline" in native
+    assert "private static uint RemainingMilliseconds(long deadline)" in native
+    assert "Stopwatch.GetTimestamp()" in native
+    assert "DateTime.UtcNow" not in native
+    assert "WaitForJobToEmpty(job, settleDeadline)" in native
+    assert "long cleanupDeadline = CreateDeadline(CleanupTimeoutMilliseconds)" in native
+    assert "TerminateJobAndWait(job, processHandle, cleanupDeadline)" in native
+    assert "TerminateProcessAndWait(processHandle, cleanupDeadline)" in native
+    assert "Task.WaitAll(readers, 2000)" not in native
+    # These native failure branches are deliberately covered here by source
+    # assertions because the production P/Invoke methods have no safe runtime
+    # fault-injection hook. The colocated Windows suite covers the real process
+    # and cleanup paths plus the publication seam below.
+    for marker in (
+        "if (!AssignProcessToJobObject(job, processHandle))",
+        "if (ResumeThread(threadHandle) == UInt32.MaxValue)",
+        "TerminateProcess(process, 1u)",
+        "WaitForSingleObject(process, RemainingMilliseconds(deadline))",
+        "QueryInformationJobObject(",
+        "WaitForJobToEmpty(job, deadline)",
+    ):
+        assert marker in native
     assert "FileFlagOpenReparsePoint" in native
+    assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in native
+    assert "CREATE_SUSPENDED" in native
+    assert "ExtendedStartupInfoPresent" in native
+    assert "ProcThreadAttributeHandleList" in native
+    assert "StartupInfoEx" in native
+    assert "new FileStream(handle" not in native
+    assert "Process.Kill" not in native
+    assert "taskkill" not in writer.lower()
+    assert "O:SYD:P" in native
+    assert "A;;FA;;;SY" in native
+    assert "A;;FA;;;BA" in native
+    assert "A;;FR;;;" in native
     assert "NT SERVICE\\LifeOSGateway" in writer
     assert "Set-SnapshotRestrictedFileSecurity" in writer
     assert "Assert-SnapshotIdentityChain" in writer
     assert "Move-Item" not in writer
     assert "WriteAllBytes" not in writer
+    owner_source = writer.split("function Get-SnapshotAllowedOwnerSids", 1)[1].split(
+        "function Assert-SnapshotReaderAccess", 1
+    )[0]
+    assert "$GatewaySid" not in owner_source
+    assert "Get-SnapshotAllowedOwnerSids -GatewaySid" not in writer
+    assert "$trustedWriterSids = @('S-1-5-18', 'S-1-5-32-544')" in writer
+    for marker in (
+        "function Get-SnapshotFileObservation",
+        "function Recover-SnapshotReplacementFailure",
+    ):
+        assert marker in writer
+    publication = writer.split("function Invoke-SnapshotPublication", 1)[1]
+    for marker in (
+        "$rollbackPath",
+        "$previousHandle",
+        "$previousMoved",
+        "$PostPublicationVerification",
+        "$TestReplaceFileOperation",
+        "$TestAfterReplaceOperation",
+        "DeleteByHandle($tempHandle)",
+        "OpenExistingForDelete($temp)",
+        "RenameWithHeldParent(",
+    ):
+        assert marker in publication
+    assert "Remove-Item" not in publication
     for marker in (
         "repeated replacement updates the destination",
         "exclusive temporary creation rejects a colliding path",
@@ -594,6 +670,41 @@ def test_tailscale_snapshot_writer_has_native_atomic_and_bounded_boundaries() ->
         "held ancestor prevents pathname replacement",
         "native process reader enforces a total timeout",
         "native process reader enforces an output bound",
+        "native process reader enforces a separate stderr output bound",
+        "native process job removes descendants on output overflow",
+        "native process child receives only listed stdio handles",
+        "positive inheritance control reads the sentinel",
+        "native process reader preserves ordinary successful commands",
+        "native process reader rejects a successful parent with an active closed-output descendant",
+        "accounting failure cleanup removes the closed-output descendant",
+        "native process job terminates descendants on timeout",
+        "native bounded read leaves the caller SafeFileHandle valid while the writer stream is in scope",
+        "create-time snapshot ACL assigns SYSTEM as owner before pathname hardening",
+        "Gateway SID is excluded from allowed snapshot owners",
+        "Gateway-owned snapshot object is rejected",
+        "post-publication failure restores the previous snapshot identity",
+        "post-publication failure restores the previous snapshot bytes",
+        "post-publication rollback leaves no rollback artifact",
+        "post-publication callback observed the replacement before failure",
+        "post-publication callback read the replacement bytes",
+        "partial ReplaceFileW state restores by identity",
+        "partial ReplaceFileW state restores the original identity",
+        "partial ReplaceFileW state restores the original bytes",
+        "partial ReplaceFileW state leaves no orphan paths",
+        "injected ReplaceFileW partial failure reached the native catch path",
+        "injected ReplaceFileW partial failure restores the original identity",
+        "publication invoked the ReplaceFileW injection seam for",
+        "ReplaceFileW state " ,
+        "publication failure diagnostics report zero preserved paths",
+        "publication failure diagnostics report exactly one preserved path",
+        "publication failure diagnostics report multiple preserved paths in candidate order",
+        "post-swap reopen leaves the unexpected destination untouched",
+        "post-swap reopen retains the rollback artifact",
+        "failed restoration retains one rollback artifact",
+        "retained rollback preserves the original identity",
+        "retained rollback preserves the original bytes",
+        "no-prior post-publication callback was reached before failure",
+        "failed publication without a prior snapshot removes the new file by handle",
         "hardlink ambiguity is observable before publication",
         "reparse ambiguity is observable before publication",
     ):
@@ -3148,6 +3259,13 @@ def test_windows_behavior_suite_exercises_failure_and_service_identity_adapters(
                  'service ownership is rejected on protected secrets',
                  'service ownership is rejected on authenticated backups'):
         assert case in behavior
+    assert 'function Test-LifeOSGatewayServiceAbsent' in behavior
+    assert 'Get-Service -Name $ServiceName -ErrorAction Stop' in behavior
+    assert 'NoServiceFoundForGivenName,Microsoft.PowerShell.Commands.GetServiceCommand' in behavior
+    assert 'if ($confirmedAbsent) { return $true }' in behavior
+    assert '$gatewayServiceAbsent = Test-LifeOSGatewayServiceAbsent' in behavior
+    assert "Get-Service -Name 'LifeOSGateway' -ErrorAction SilentlyContinue" not in behavior
+    assert '$gatewayServicePresent' not in behavior
     assert '$script:aclOwner' in behavior
     assert 'Owner=$script:aclOwner' in behavior
 

@@ -35,6 +35,8 @@ for command_name in xcodebuild xcrun python3; do
   }
 done
 
+"$ROOT/scripts/maintain_macos_storage.sh" --check
+
 if ! command -v xcodegen >/dev/null; then
   echo "Missing XcodeGen ${XCODEGEN_VERSION}; install that exact upstream release before running this script." >&2
   echo "https://github.com/yonaskolb/XcodeGen/releases/tag/${XCODEGEN_VERSION}" >&2
@@ -116,6 +118,7 @@ xcrun simctl bootstatus "$UDID" -b
 run_ios_lane() {
   local lane_id="$1"
   local scheme test_plan configuration test_target minimum_tests artifact_name
+  "$ROOT/scripts/maintain_macos_storage.sh" --check
   scheme="$(manifest_value "$lane_id" scheme)"
   test_plan="$(manifest_value "$lane_id" test_plan)"
   configuration="$(manifest_value "$lane_id" configuration)"
@@ -135,6 +138,7 @@ run_ios_lane() {
     -configuration "$configuration" \
     -destination "id=$UDID" \
     -derivedDataPath "$derived_data_path" \
+    -jobs 1 \
     -parallel-testing-enabled NO \
     -resultBundlePath "$result_path" \
     "-only-testing:$test_target" \
@@ -158,6 +162,7 @@ run_ios_lane() {
 run_mac_lane() {
   local lane_id="$1"
   local scheme test_plan configuration test_target minimum_tests artifact_name
+  "$ROOT/scripts/maintain_macos_storage.sh" --check
   scheme="$(manifest_value "$lane_id" scheme)"
   test_plan="$(manifest_value "$lane_id" test_plan)"
   configuration="$(manifest_value "$lane_id" configuration)"
@@ -177,6 +182,7 @@ run_mac_lane() {
     -configuration "$configuration" \
     -destination 'platform=macOS' \
     -derivedDataPath "$derived_data_path" \
+    -jobs 1 \
     -parallel-testing-enabled NO \
     -resultBundlePath "$result_path" \
     "-only-testing:$test_target" \

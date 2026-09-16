@@ -1,109 +1,56 @@
-# DECISIONS — LifeOS native app
+# LifeOS decisions
 
-Updated 2026-09-14 Europe/Berlin.
+Updated 2026-09-16 Europe/Berlin.
 
-## Product and design
+## Product boundary
 
-- Use the native SF Pro/system facade, compact hierarchy, 4/8/12/16/24/32/48
-  spacing, 12pt Home/Usage cards, semantic SF Symbols, and distinct palette
-  values from `colors.md`. Estimates are green; calories are orange.
-- Home shows one compact Usage lead surface and avoids duplicate provider
-  rings. Usage is an operational monitoring surface with truthful live or
-  explicit fixture provenance.
-- Calendar owns iPhone vertical scrolling and Mac trackpad magnification.
-  Paging, editing, and zoom must not compete for the same gesture. Its
-  density contract is 40 pt minimum, 64 pt default, and 120 pt maximum; Mac
-  pinch is primary and the secondary preset menu has no slider or dotted
-  track.
-- Use direct user motion and restrained transitions. Rapid route reversal must
-  start from the currently visible state.
-- The macOS shell uses one value-driven Home `NavigationStack` with a bounded
-  typed path and mount-generation guarded one-shot Calendar commands. This
-  supersedes the AppKit route-host/raster-compositor proposal in the route
-  repair plan; do not reintroduce a second navigation authority.
-- Generic conversational assistant/advisor/AI is removed from every product
-  layer. Calorie-photo tracking is the only permitted in-app AI behavior.
-- The shared foundation is reviewed GREEN at `6751bb5`. Both responsive
-  containers route unrestricted builders through one owning VStack, and the
-  iPhone suite measures sibling and ForEach rows in a mounted window. Screen
-  work proceeds in bounded tranches; actual Mac sheet resizing remains a
-  runtime acceptance item.
-- The Usage chart tranche is reviewed GREEN at `6713de1`. Normalize and
-  coalesce source dates once per revision with last-source authority; split
-  observed cadence gaps before the 240-point render budget; keep estimate and
-  target guides continuous; use cached binary-search selection; retain whole
-  segment endpoints and visible singleton observations.
-- The compact empty-state/icon/tax tranche is reviewed GREEN at `82b4eb1`.
-  Amount values and evidence preserve only validated monetary intersections;
-  known identifiers in labels and non-monetary fragments are masked. Fitness
-  uses the ECG waveform symbol, with platform-specific boxes and glyphs
-  asserted in the design contract.
-- Finance responsive composition derives usable width from its enclosing
-  viewport and shared gutters. Do not reintroduce a stored width preference or
-  a seeded desktop branch; it caused a first-frame/zero-width feedback loop.
-  The hero renders one explicit composition with bounded history and facts in
-  a single wide row. The correction is `fd8ccfb`.
+- Native SwiftUI/WidgetKit on the Mac and iPhone is the product. Windows over
+  Tailscale is the private structured-data/document boundary.
+- Use truthful live data. Missing provider/device data stays unavailable; no
+  silent fixtures in production.
+- Calendar, Reminders, Obsidian, HealthKit/Zepp, and the private finance/tax
+  ledger retain their own authority. Do not duplicate mutable ownership.
+- No generic advisor or in-app conversational AI. Calorie-photo estimation is
+  the only permitted AI flow.
 
-## State and data boundaries
+## Design
 
-- Scene-owned state retains Calendar position, Finance chart/detail choices,
-  Fitness section, and Usage provider/graph/range across route replacement.
-- Python remains Calendar authority. Local edits persist an outbox receipt
-  before sync; missing records never imply deletion.
-- Enable Banking is the live bank path; Trade Republic remains a manual
-  import. Production paths must use real data and truthful unavailable states.
-- LifeOS owns workout templates, exercises, sessions, sets, history, PRs, and
-  reports. Zepp is a read-only sync source; unsupported fields remain
-  unavailable until evidence supports them.
-- Obsidian integration remains a feasibility item in issue #2. Markdown/YAML
-  links are semantic source; Canvas coordinates are presentation metadata.
+- SF Pro/system typography, compact 4/8/12/16/24/32/48 spacing, semantic SF
+  Symbols, distinct palette values from `colors.md`, green estimates, orange
+  calories, restrained opacity/matched motion, and direct manipulation.
+- Calendar owns iPhone vertical scrolling and Mac trackpad pinch zoom. Gesture
+  ownership must remain separate from paging/editing.
+- Route state has one native NavigationStack authority; do not reintroduce an
+  AppKit raster/route host.
 
-## Security and runtime
+## Data and features
 
-- Windows gateway access remains fail-closed with scoped credentials, protected
-  snapshots, atomic recovery, identity-bound bounded reads, ACL checks, and
-  journal-bound Node staging. `6baa1f3` passed source/candidate/static/behavior;
-  diagnostics at `14a3b7f`, strict progress validation at `4e14e38`, strict
-  journal observation at `9e43dd7`, and bounded phase telemetry at `0a8d5b6`
-  are Astra-reviewed GREEN and were validated only in disposable Windows
-  copies;
-  Astra rejected a mutating reconcile-only path and TOCTOU optimization; do
-  not merge it.
-- Gateway and native calendar limits are both 1,024. Oversized incoming or
-  persisted state fails closed without destructive truncation.
-- Calendar icon publication must perform bounded PNG/JPEG structure and CRC
-  validation before persistence, so a signature-only or corrupted image
-  cannot pass the gateway while failing native decoding.
-- Tax document publication follows the native-shaped `TaxDocument` schema,
-  rejects raw page payloads, validates stored index entries, and returns only
-  privacy-safe metadata. The gateway must not become a raw-page sync path.
-- Usage idempotency is a bounded replay journal: retained keys preserve
-  replay and fingerprint-reuse behavior, while the oldest keys are retired so
-  ingestion does not permanently stop at the capacity limit. Presentation
-  authority is per provider/window; a valid complete connector payload marks
-  every omitted supported scope authoritative-empty, cached history cannot
-  resurrect it, and failed archive writes remain pending for retry.
-- The current native sync boundary is Tailscale connection identity plus an
-  edge capability. The app does not persist that bearer token; do not document
-  it as a Keychain-stored sync token. Legacy credential cleanup and physical
-  transport remain verification items.
-- Keep secrets out of source, prompts, logs, and archives. Do not claim
-  provider, Windows-native, physical-device, or visual evidence from source
-  checks alone. The recorded Astra Medium source review at `eb9ca620…` is
-  scoped GREEN, not integrated operational/security acceptance; operational and
-  device gates remain open.
-- Native Shortcuts may open Zepp and report LifeOS refresh/status; public Zepp API is not assumed; Personal Team signing and seven-day renewal remain platform-managed.
+- Enable Banking is the live bank path; Trade Republic is manual import.
+  Institution-aware CSV classification and explicit unknown-format mapping are
+  required. Recurring candidates are deterministic; uncertain items expose
+  auditable weekly/monthly/yearly Manage Payment controls.
+- Robinhood investments remain separate from bank transactions while verified
+  holdings/cash contribute to net worth. NextSemis is optional after the direct
+  import path is stable.
+- LifeOS owns workout templates/history/reports; Zepp is a read-only source.
+  Unsupported fields stay unavailable until evidence exists.
+- Obsidian Canvas uses Markdown/YAML links as semantic authority and Canvas
+  coordinates as presentation metadata; round-trip proof remains open.
+
+## Security and operations
+
+- Windows snapshots use protected ACLs, native identity-bound handles, bounded
+  process I/O, job-tree cleanup, monotonic deadlines, and atomic publication.
+  Disposable tests are evidence; canonical install is separate.
+- Reader limits are bounded; errors preserve the primary failure and retain
+  recovery artifacts when clean rollback cannot be proven.
+- Apple build lanes are serialized, use owned DerivedData, shut down their
+  simulator on exit, and run the storage floor guard before each lane.
+- Storage cleanup is explicit and scoped; never delete source, personal data,
+  final evidence, or a booted simulator. No background scheduler is used.
 
 ## Workflow
 
-- Use Luna Max for bounded implementation and Astra Medium for batched review;
-  keep write scopes disjoint, native builds serialized with `-jobs 1`, and
-  close completed workers and processes immediately.
-- Keep coordination files below 200 lines; use live production
-  reads, isolate fixtures, and treat subagent reports as hypotheses until the
-  parent reviews the diff and runs relevant checks.
-- Do not add a Claude usage-limit watcher, overnight supervisor, demo fallback,
-  generic assistant, or unrelated conversational AI. geonq has authorized
-  merging this personal checkpoint into `main` as an integration action; that
-  merge does not close Windows, provider, physical-device, visual, or release
-  gates, and must not be described as product acceptance.
+- Luna Max handles bounded implementation with exact file scope; Astra Medium
+  reviews batches. Close workers/processes after use. Commit and push verified
+  slices. Never promote source/disposable evidence to release acceptance.

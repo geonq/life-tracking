@@ -19,6 +19,8 @@ if [[ ! -d "$PROJECT" ]]; then
   exit 2
 fi
 
+"$ROOT/scripts/maintain_macos_storage.sh" --check
+
 ARTIFACT_DIR="${LIFEOS_PRERELEASE_ARTIFACT_DIR:-$ROOT/artifacts/apple-prerelease}"
 DERIVED_DATA_ROOT="${LIFEOS_PRERELEASE_DERIVED_DATA_PATH:-$ARTIFACT_DIR/DerivedData}"
 mkdir -p "$ARTIFACT_DIR" "$DERIVED_DATA_ROOT"
@@ -57,6 +59,7 @@ run_lane() {
   local lane_id="$1"
   local scheme configuration test_plan platform destination only_testing_csv
   local result_name log_name derived_name result_path log_path derived_data_path
+  "$ROOT/scripts/maintain_macos_storage.sh" --check
   scheme="$(manifest_value "$lane_id" scheme)"
   configuration="$(manifest_value "$lane_id" configuration)"
   test_plan="$(manifest_value "$lane_id" test_plan)"
@@ -84,6 +87,7 @@ run_lane() {
     -configuration "$configuration"
     -destination "$destination"
     -derivedDataPath "$derived_data_path"
+    -jobs 1
     -parallel-testing-enabled NO
     CODE_SIGNING_ALLOWED=NO
   )

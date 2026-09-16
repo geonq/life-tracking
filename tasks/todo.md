@@ -1,8 +1,9 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-15 Europe/Berlin. Release: **NO-GO**. Local `main` contains
-source checkpoint `f6a848a`, pushed with zero divergence; coordination docs
-still need their matching checkpoint. Track completion separately as
+Updated 2026-09-16 Europe/Berlin. Release: **NO-GO**. Local `main` contains
+source checkpoint `a6020d0` plus the uncommitted Windows/storage candidate and
+is one commit ahead of `origin/main`; coordination docs are refreshed locally.
+Track completion separately as
 approximately **70–75% implemented** and **35–45% release-ready**. T12c and
 D1/D2 have Astra Medium source **MERGE** reviews.
 
@@ -29,18 +30,24 @@ D1/D2 have Astra Medium source **MERGE** reviews.
    unit 31,400 but stopped after 45 minutes without a stage checkpoint; design
    and review non-mutating validation before retrying. Diagnostics at `14a3b7f`
    and phase telemetry at `0a8d5b6` passed native Windows PowerShell 5.1
-   failure-parity and cleanup checks.
+   failure-parity and cleanup checks. The current snapshot publication
+   candidate also passes disposable native/behavior lanes and Astra Medium
+   MERGE review. Keep canonical installation separate.
 4. Verify iPhone install, App Group/HealthKit, personal signing renewal, and
    the native Shortcut flows.
 5. Resolve Zepp/workout evidence and implement the Obsidian Canvas mind-map
-   plan. GitHub issue #2 is closed as the notification thread; its product
-   scope remains in the plan.
+   plan. Finance must follow market-leader recurring-payment and institution-
+   detection patterns; Robinhood imports must stay separate while feeding
+   verified net worth, with NextSemis as an optional final gate. GitHub issue
+   #2 is closed as the notification thread; its product scope remains in the
+   plan. Use `tasks/finance-execution-plan.md` for the bounded finance packet.
 6. Run the batched Astra security/product review and close every acceptance
    registry row before changing the release verdict.
 
 ## Verified checkpoint
 
-`f6a848a` is pushed; its A1.3 recovery candidate is Astra Medium
+`a6020d0` is the last pushed source checkpoint before the current candidate;
+its A1.3 recovery candidate is Astra Medium
 **MERGE** with 73 local source checks (three environment skips) and passing
 disposable Windows PowerShell 5.1 static, behavior, legacy Serve, and native
 recovery suites. `29bbbde` remains the complete A1.2 authority/artifact
@@ -72,11 +79,17 @@ is not claimed as a sign-off. T12c is pushed at `fc1b3c1`; its frontend parses
 pass, the Mac build-for-testing exits 0, and the iOS lane is blocked at actool
 by the missing simulator runtime.
 The D1 store-bound repair is pushed at `16e0855`; D2a/D2b is locally merged at
-`f0d59a5` with normalized revision ceilings and synced one-item undo
-compensation. Mac build-for-testing passes; the latest iOS lane is blocked at
+  `f0d59a5` with normalized revision ceilings and synced one-item undo
+  compensation. Mac build-for-testing passes; the latest iOS lane is blocked at
 actool by the missing simulator runtime. These results
 do not prove live, runtime, device, visual, or operational
 completion.
+
+The current macOS storage guard has 7 passing tests plus 2 process-probe
+subtests, refuses active/uncheckable cleanup, preserves the kept iPhone 17 and
+booted simulators, and enforces a 15 GiB free-space floor before every Apple
+lane. No scheduler or automatic deletion of source/personal/final evidence was
+added.
 
 The frozen registry is structurally valid but has 0 accepted leaves; do not use
 the earlier 60% estimate as release progress. Acceptance must be earned with
