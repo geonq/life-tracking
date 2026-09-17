@@ -86,15 +86,19 @@ struct UsageView: View {
     let refreshAction: (() async -> Void)?
     private let onBack: (() -> Void)?
     private let onOpenSettings: (() -> Void)?
+    private let onManageConnections: (() -> Void)?
     private let analytics: [UsageAnalyticsSnapshot]
     private let presentationPacket: UsagePresentationPacket?
     private let presentationAuthorities: [UsagePresentationScope: UsagePresentationAuthority]
+    private let registryPresentation: UsageRegistryPresentation
 
     // These selections belong to the scene, not to one mounted copy of the
     // screen. Route changes can replace UsageView, but they must not reset the
     // provider/window the user was inspecting.
     @SceneStorage("LifeOS.usage.selectedProvider.v1") private var selectedProviderIdentifier = Provider.codex.rawValue
     @SceneStorage("LifeOS.usage.selectedRange.v1") private var selectedRangeIdentifier = UsageRange.fiveHour.rawValue
+    @SceneStorage("LifeOS.usage.selectedConnection.v2") private var selectedConnectionIdentifier = ""
+    @SceneStorage("LifeOS.usage.selectedWindow.v2") private var selectedWindowIdentifier = ""
     @Environment(\.dismiss) private var dismiss
 
     init(
@@ -104,6 +108,7 @@ struct UsageView: View {
         refreshAction: (() async -> Void)? = nil,
         onBack: (() -> Void)? = nil,
         onOpenSettings: (() -> Void)? = nil,
+        onManageConnections: (() -> Void)? = nil,
         presentationPacket: UsagePresentationPacket? = nil
     ) {
         self.snapshots = presentationPacket?.providers ?? snapshots
@@ -111,14 +116,43 @@ struct UsageView: View {
         self.refreshAction = refreshAction
         self.onBack = onBack
         self.onOpenSettings = onOpenSettings
+        self.onManageConnections = onManageConnections
         self.analytics = presentationPacket?.analytics ?? analytics
         self.presentationPacket = presentationPacket
         self.presentationAuthorities = presentationPacket?.presentationAuthorities ?? [:]
+        if let presentationPacket {
+            // A packet is the coordinator's authoritative handoff. An empty
+            // or failed registry is meaningful state and must remain visible;
+            // reconstructing a fixture here can erase its failure semantics.
+            self.registryPresentation = presentationPacket.registryPresentation
+        } else {
+            self.registryPresentation = Self.fixtureRegistry(snapshots: snapshots, analytics: analytics)
+        }
     }
 
-    private var selectedProvider: Provider {
-        get { Provider(rawValue: selectedProviderIdentifier) ?? .codex }
-        nonmutating set { selectedProviderIdentifier = newValue.rawValue }
+    private static func fixtureRegistry(
+        snapshots: [ProviderSnapshot],
+        analytics: [UsageAnalyticsSnapshot]
+    ) -> UsageRegistryPresentation {
+        let mapping = UsageRegistryAdapter.legacyMapping(providers: snapshots, analytics: analytics)
+        do {
+            return try UsageRegistryAdapter.fromLegacy(
+                mapping: mapping,
+                generatedAt: snapshots.map(\.provenance.observedAt).max()
+            )
+        } catch {
+            return .empty.withFailure(.registryConversion)
+        }
+    }
+
+    private var selectedConnectionID: UsageConnectionID? {
+        get { try? UsageConnectionID(selectedConnectionIdentifier) }
+        nonmutating set { selectedConnectionIdentifier = newValue?.rawValue ?? "" }
+    }
+
+    private var selectedWindowID: UsageWindowID? {
+        get { try? UsageWindowID(selectedWindowIdentifier) }
+        nonmutating set { selectedWindowIdentifier = newValue?.rawValue ?? "" }
     }
 
     private var selectedRange: UsageRange {
@@ -126,29 +160,47 @@ struct UsageView: View {
         nonmutating set { selectedRangeIdentifier = newValue.rawValue }
     }
 
-    private var selectedProviderBinding: Binding<Provider> {
-        Binding(
-            get: { selectedProvider },
-            set: { selectedProvider = $0 }
+    private var selectedConnectionBinding: Binding<UsageConnectionID>? {
+        let visible = registryPresentation.visibleConnections
+        guard let fallback = visible.first?.connectionID else { return nil }
+        return Binding(
+            get: {
+                guard let selected = selectedConnectionID,
+                      visible.contains(where: { $0.connectionID == selected }) else {
+                    return fallback
+                }
+                return selected
+            },
+            set: { selectedConnectionID = $0 }
         )
     }
 
-    private var selectedRangeBinding: Binding<UsageRange> {
-        Binding(
-            get: { selectedRange },
-            set: { selectedRange = $0 }
-        )
+    private var activeConnection: UsageRegistryConnection? {
+        registryPresentation.connection(id: selectedConnectionID)
+    }
+
+    private var activeSelection: UsageRegistrySelection? {
+        guard let connection = activeConnection else { return nil }
+        let window = registryPresentation.windows(for: connection.connectionID)
+            .first { $0.id == selectedWindowID } ?? registryPresentation.windows(for: connection.connectionID).first
+        guard let window else { return nil }
+        return UsageRegistrySelection(connectionID: connection.connectionID, windowID: window.id, dimension: window.dimension)
+    }
+
+    private var activeLegacyDetail: UsageLegacyDetailReference? {
+        registryPresentation.legacyDetail(for: activeSelection)
     }
 
     private var activeSnapshot: ProviderSnapshot? {
         // Do not fall back to another provider: an unavailable selected identity
         // must never render a different provider's observed numbers or analytics.
-        snapshots.first { $0.provider == selectedProvider }
+        guard let activeLegacyDetail else { return nil }
+        return snapshots.first { $0.provider == activeLegacyDetail.provider }
     }
 
     private var activeAnalytics: UsageAnalyticsSnapshot? {
-        guard let activeSnapshot else { return nil }
-        let sourceIDs = selectedWindow(in: activeSnapshot).map { [$0.id] } ?? selectedRange.sourceWindowIDs
+        guard let activeSnapshot, let activeLegacyDetail else { return nil }
+        let sourceIDs = [activeLegacyDetail.sourceWindowID]
         return analytics.first { candidate in
             candidate.provider == activeSnapshot.provider &&
             sourceIDs.contains(candidate.windowID ?? "") &&
@@ -206,9 +258,7 @@ struct UsageView: View {
 
     private var activePresentationAuthority: UsagePresentationAuthority {
         guard let activeSnapshot else { return .unknown }
-        let windowID = selectedWindow(in: activeSnapshot)?.id
-            ?? activeAnalytics?.windowID
-            ?? selectedRange.sourceWindowIDs.first
+        let windowID = activeLegacyDetail?.sourceWindowID ?? activeAnalytics?.windowID
         guard let windowID,
               let scope = UsagePresentationScope.canonical(
                   provider: activeSnapshot.provider,
@@ -217,24 +267,68 @@ struct UsageView: View {
         return presentationAuthorities[scope] ?? .unknown
     }
 
-    private func reconcileSelectedRange(for snapshot: ProviderSnapshot?) {
-        guard let snapshot else { return }
-        let ranges = availableRangeOrder(for: snapshot)
-        guard !ranges.contains(selectedRange) else { return }
-        selectedRange = ranges.first(where: { $0 == .fiveHour }) ?? ranges.first ?? .fiveHour
-    }
-
-    private func reconcileProviderAndRange(with snapshots: [ProviderSnapshot]) {
-        guard let provider = snapshots.first(where: { $0.provider == selectedProvider })?.provider
-                ?? snapshots.first?.provider else { return }
-        if provider != selectedProvider {
-            selectedProvider = provider
-        }
-        reconcileSelectedRange(for: snapshots.first { $0.provider == provider })
-    }
-
     private func selectedWindow(in snapshot: ProviderSnapshot) -> UsageWindow? {
-        snapshot.windows.first { $0.durationMinutes == selectedRange.durationMinutes }
+        guard let activeLegacyDetail, activeLegacyDetail.provider == snapshot.provider else { return nil }
+        return snapshot.windows.first { $0.id == activeLegacyDetail.sourceWindowID }
+    }
+
+    private func reconcileSelection() {
+        let visible = registryPresentation.visibleConnections
+        guard !visible.isEmpty else {
+            selectedConnectionID = nil
+            selectedWindowID = nil
+            return
+        }
+
+        let currentConnectionIsVisible = selectedConnectionID.map { id in
+            visible.contains { $0.connectionID == id }
+        } ?? false
+        if !currentConnectionIsVisible {
+            let migrated: UsageConnectionID? = if let provider = Provider(rawValue: selectedProviderIdentifier) {
+                try? UsageRegistryLegacyMapping.connectionID(for: provider)
+            } else {
+                nil
+            }
+            selectedConnectionID = visible.first(where: { $0.connectionID == migrated })?.connectionID
+                ?? visible.first?.connectionID
+        }
+
+        guard let connection = activeConnection else { return }
+        let windows = registryPresentation.windows(for: connection.connectionID)
+        if let selectedWindowID, windows.contains(where: { $0.id == selectedWindowID }) {
+            return
+        }
+
+        let migratedWindow: UsageWindowID? = if let provider = Provider(rawValue: selectedProviderIdentifier),
+                                                let sourceWindowID = UsageRange(rawValue: selectedRangeIdentifier)?.sourceWindowIDs.first(where: { sourceID in
+                                                    guard let candidateID = try? UsageRegistryLegacyMapping.windowID(
+                                                        for: provider, sourceWindowID: sourceID
+                                                    ) else { return false }
+                                                    return registryPresentation.legacyDetail(for: UsageRegistrySelection(
+                                                        connectionID: connection.connectionID,
+                                                        windowID: candidateID
+                                                    )) != nil
+                                                }) {
+            try? UsageRegistryLegacyMapping.windowID(for: provider, sourceWindowID: sourceWindowID)
+        } else {
+            nil
+        }
+        selectedWindowID = windows.first(where: { $0.id == migratedWindow })?.id ?? windows.first?.id
+        syncLegacyRangeFromSelection()
+    }
+
+    private func selectWindow(_ id: UsageWindowID) {
+        selectedWindowID = id
+        syncLegacyRangeFromSelection()
+    }
+
+    private func syncLegacyRangeFromSelection() {
+        guard let selection = activeSelection,
+              let legacy = registryPresentation.legacyDetail(for: selection),
+              let snapshot = snapshots.first(where: { $0.provider == legacy.provider }),
+              let window = snapshot.windows.first(where: { $0.id == legacy.sourceWindowID }),
+              let range = UsageRange.matching(durationMinutes: window.durationMinutes) else { return }
+        selectedRange = range
     }
 
     @ViewBuilder
@@ -272,7 +366,7 @@ struct UsageView: View {
 #if os(iOS)
                     backButton
 #endif
-                    if let activeSnapshot {
+                    if let activeSnapshot, activeLegacyDetail != nil {
                         usageHeader(activeSnapshot)
                         if activeSnapshot.provenance.quality == .unavailable {
                             unavailableProviderRow(for: activeSnapshot)
@@ -285,6 +379,14 @@ struct UsageView: View {
                                 UsageAdditionalObservations(analytics: activeAnalytics)
                             }
                         }
+                    } else if let activeConnection {
+                        usageHeader(nil)
+                        UsageRegistryDetailView(
+                            presentation: registryPresentation,
+                            connectionID: activeConnection.connectionID,
+                            selectedWindowID: selectedWindowID,
+                            onSelectWindow: selectWindow
+                        )
                     } else {
                         usageHeader(nil)
                         compactEmptyStateCard(for: nil)
@@ -301,13 +403,16 @@ struct UsageView: View {
         .tint(LifeOSTokens.accent)
         .refreshable { await refreshAction?() }
         .onAppear {
-            reconcileProviderAndRange(with: snapshots)
+            reconcileSelection()
         }
-        .onChange(of: selectedProvider) { _, newProvider in
-            reconcileSelectedRange(for: snapshots.first { $0.provider == newProvider })
+        .onChange(of: selectedConnectionID) { _, _ in
+            reconcileSelection()
         }
-        .onChange(of: snapshots) { _, newSnapshots in
-            reconcileProviderAndRange(with: newSnapshots)
+        .onChange(of: registryPresentation) { _, _ in
+            reconcileSelection()
+        }
+        .onChange(of: snapshots) { _, _ in
+            reconcileSelection()
         }
     }
 
@@ -345,6 +450,8 @@ struct UsageView: View {
                 detail = "The saved usage history could not be read. Retry to request a fresh observation."
             case .transport, .invalidPayload:
                 detail = "The latest provider request failed. Retry from the toolbar or check Settings."
+            case .registryConversion:
+                detail = "The latest source was received, but the local Usage presentation could not be rebuilt. Retry from the toolbar."
             case .none:
                 detail = "The provider did not return a readable usage observation."
             }
@@ -637,22 +744,25 @@ struct UsageView: View {
     ) -> some View {
         let content = UsageWindowSummaryRow(window: window, state: stateFor(window, snapshot: snapshot))
         let range = UsageRange.matching(durationMinutes: window.durationMinutes)
+        let registryWindowID = activeConnection.flatMap { connection in
+            try? UsageRegistryLegacyMapping.windowID(for: snapshot.provider, sourceWindowID: window.id)
+        }
         let accessibilityIdentifier = isSecondary
             ? "usage-secondary-window-\(window.id)"
             : "usage-window-\(window.id)"
 
         return Group {
-            if let range {
+            if range != nil, let registryWindowID {
                 Button {
-                    guard selectedRange != range else { return }
-                    selectedRange = range
+                    guard activeSelection?.windowID != registryWindowID else { return }
+                    selectWindow(registryWindowID)
                 } label: {
                     LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: UsageLayoutContract.cardPadding) {
                         content
                     }
                 }
                 .buttonStyle(.plain)
-                .accessibilityAddTraits(selectedRange == range ? .isSelected : [])
+                .accessibilityAddTraits(activeSelection?.windowID == registryWindowID ? .isSelected : [])
                 .accessibilityIdentifier(accessibilityIdentifier)
             } else {
                 LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: UsageLayoutContract.cardPadding) {
@@ -767,6 +877,16 @@ struct UsageView: View {
 
     private var heroActions: some View {
         HStack(spacing: LifeOSTokens.Space.xs) {
+            if let onManageConnections {
+                LifeOSIconButton(
+                    icon: .views,
+                    accessibilityLabel: "Manage Usage sources",
+                    size: LifeOSTokens.Control.iconButton,
+                    tint: LifeOSTokens.secondaryText,
+                    action: onManageConnections
+                )
+                .accessibilityIdentifier("usage-manage-sources")
+            }
             LifeOSIconButton(
                 icon: .refresh,
                 accessibilityLabel: "Refresh usage data",
@@ -791,19 +911,22 @@ struct UsageView: View {
 
     private var rangeControl: some View {
         Menu {
-            Picker("Range", selection: selectedRangeBinding) {
-                ForEach(UsageRange.allCases, id: \.self) { range in
-                    Text(availableRanges.contains(range) ? range.title : "\(range.title) · Needs more history")
-                        .tag(range)
-                        .disabled(!availableRanges.contains(range))
+            ForEach(registryPresentation.windows(for: activeConnection?.connectionID)) { window in
+                Button {
+                    selectWindow(window.id)
+                } label: {
+                    HStack {
+                        Text(window.label)
+                        if window.id == activeSelection?.windowID { Image(systemName: "checkmark") }
+                    }
                 }
             }
         } label: {
             HStack(spacing: LifeOSTokens.Space.xs) {
                 Text(
-                    availableRanges.contains(selectedRange)
-                        ? (activeSnapshot.flatMap { selectedWindow(in: $0)?.label } ?? selectedRange.title)
-                        : "\(selectedRange.title) · Needs more history"
+                    activeSnapshot.flatMap { selectedWindow(in: $0)?.label }
+                        ?? registryPresentation.windows(for: activeConnection?.connectionID).first { $0.id == selectedWindowID }?.label
+                        ?? "Select window"
                 )
                 .lifeOSTypography(.label, weight: .medium)
                 .foregroundStyle(LifeOSTokens.primaryText)
@@ -824,68 +947,72 @@ struct UsageView: View {
         }
         .foregroundStyle(LifeOSTokens.primaryText)
         .accessibilityLabel("Usage window")
-        .accessibilityValue(activeSnapshot.flatMap { selectedWindow(in: $0)?.label } ?? selectedRange.accessibilityName)
+        .accessibilityValue(
+            activeSnapshot.flatMap { selectedWindow(in: $0)?.label }
+                ?? registryPresentation.windows(for: activeConnection?.connectionID).first { $0.id == selectedWindowID }?.label
+                ?? "Select window"
+        )
     }
 
+    @ViewBuilder
     private var providerSwitcher: some View {
-        Menu {
-            Picker("Provider", selection: selectedProviderBinding) {
-                ForEach(Provider.allCases, id: \.self) { provider in
-                    Text("\(provider.displayName) · \(statusText(for: provider))").tag(provider)
+        if let binding = selectedConnectionBinding {
+            Menu {
+                Picker("Source", selection: binding) {
+                    ForEach(registryPresentation.visibleConnections) { connection in
+                        Text("\(connectionTitle(connection)) · \(statusText(for: connection))")
+                            .tag(connection.connectionID)
+                    }
                 }
+            } label: {
+                HStack(spacing: LifeOSTokens.Space.xs) {
+                    LifeOSIcon(.usage, context: .toolbar)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                    Text(connectionTitle(activeConnection))
+                        .lifeOSTypography(.label, weight: .medium)
+                        .foregroundStyle(LifeOSTokens.primaryText)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, LifeOSTokens.Space.sm)
+                .padding(.vertical, LifeOSTokens.Space.xs)
+                .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+                        .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
+                }
+                .frame(minWidth: 148, minHeight: LifeOSTokens.Control.standardHeight, alignment: .leading)
             }
-        } label: {
-            HStack(spacing: LifeOSTokens.Space.xs) {
-                LifeOSIcon(providerIcon(selectedProvider), context: .toolbar)
-                    .foregroundStyle(LifeOSTokens.secondaryText)
-                Text(selectedProvider.displayName)
-                    .lifeOSTypography(.label, weight: .medium)
-                    .foregroundStyle(LifeOSTokens.primaryText)
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, LifeOSTokens.Space.sm)
-            .padding(.vertical, LifeOSTokens.Space.xs)
-            .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-                    .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
-            }
-            .frame(minWidth: 148, minHeight: LifeOSTokens.Control.standardHeight, alignment: .leading)
-        }
-        // Menus re-tint their label with the system accent; pin neutral chrome (§1).
-        .foregroundStyle(LifeOSTokens.secondaryText)
-        .accessibilityLabel("Provider switcher, currently \(selectedProvider.displayName), \(statusText(for: selectedProvider))")
-    }
-
-    private func providerIcon(_ provider: Provider) -> LifeOSIconName {
-        switch provider {
-        case .codex, .claude, .glm, .deepseek, .googleAIStudio:
-            return .usage
+            // Menus re-tint their label with the system accent; pin neutral chrome (§1).
+            .foregroundStyle(LifeOSTokens.secondaryText)
+            .accessibilityLabel("Usage source switcher, currently \(connectionTitle(activeConnection)), \(statusText(for: activeConnection))")
         }
     }
 
-    private func statusText(for provider: Provider) -> String {
-        guard let snapshot = snapshots.first(where: { $0.provider == provider }) else { return "Not connected" }
-        if let failure = presentationPacket?.failure, failure != .none {
-            return "Refresh failed"
+    private func connectionTitle(_ connection: UsageRegistryConnection?) -> String {
+        guard let connection else { return "Usage sources" }
+        if connection.providerID.rawValue == "gemini_subscription" { return "Google AI Pro" }
+        return connection.label
+    }
+
+    private func statusText(for connection: UsageRegistryConnection?) -> String {
+        guard let connection else { return "No source selected" }
+        switch connection.authState {
+        case .reauthRequired: return "Reauthorization required"
+        case .revoked: return "Access revoked"
+        case .disconnected where connection.availability == .available: return "Cached value"
+        default: break
         }
-        switch snapshot.provenance.quality {
-        case .observed:
-            switch snapshot.provenance.connector {
-            case .healthy:
-                switch snapshot.provenance.freshness() {
-                case .fresh, .aging: return "Connected"
-                case .stale: return "Stale"
-                case .unavailable: return "Unavailable"
-                }
-            case .refreshDue: return "Refresh due"
-            case .reauthRequired: return "Re-auth required"
-            case .rateLimited: return "Rate limited"
-            case .revoked, .disabled, .unavailable, .error: return "Unavailable"
-            }
-        case .demo: return "Demo · not live"
-        case .estimated: return "Estimate · non-official"
-        case .unavailable: return "Unavailable"
+        if registryPresentation.failure != .none, connection.availability == .available {
+            return registryPresentation.failure.label
+        }
+        if connection.providerID.rawValue == "gemini_subscription" { return "Quota unavailable" }
+        if connection.providerID.rawValue == "gemini_api" { return "API / project" }
+        switch connection.availability {
+        case .available:
+            return connection.freshness == .stale ? "Stale" : "Observed"
+        case .unsupported: return "Unavailable"
+        case .disabled: return "Hidden"
+        case .unavailable: return "No data"
         }
     }
 

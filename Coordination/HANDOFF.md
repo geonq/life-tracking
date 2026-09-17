@@ -4,17 +4,25 @@ Updated 2026-09-17 Europe/Berlin.
 
 ## Active task
 
-Continue finance work after the pushed recurring-payment checkpoint.
+Continue after the validated native AI usage watcher registry tranche.
 Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. `main` and `origin/main` are clean and equal at
-  `8c1a225` (`Add finance validation and usage provider registry`).
+- Release is **NO-GO**. `main` and `origin/main` remain at the last pushed
+  checkpoint `8c1a225` (`Add finance validation and usage provider registry`).
+  The 2026-09-17 native usage registry tranche is present in the working tree
+  and intentionally uncommitted/unpushed for this documentation checkpoint.
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
-- No generic advisor, conversational AI, or demo fallback is allowed. Calorie photo tracking is the only in-app AI feature. The Usage module retains the Claude watcher and is being generalized into a truthful provider registry; Gemini subscription tracking starts as manual/unsupported unless Google exposes a documented quota endpoint.
+- No generic advisor, conversational AI, or demo fallback is allowed. Calorie
+  photo tracking is the only in-app AI feature. The Usage module retains the
+  Claude watcher and now has a provider-neutral native registry over the
+  validated v1 transport. Gemini subscription/Google AI Pro and Gemini API
+  are cataloged honestly as manual/unsupported boundary rows with no
+  fabricated quota or observations; automatic Gemini auth/quota transport
+  remains open.
 
 ## Latest evidence
 
@@ -54,6 +62,15 @@ Keep the release verdict honest; do not call the product done.
   an official endpoint exists, and keeps Gemini API usage as a separate
   product; contracts typecheck, build, and pass 212/212 tests. Astra Medium
   final review is **MERGE**.
+- Native AI usage watcher registry tranche validated 2026-09-17: provider-
+  neutral presentation, exact connection/window selection, evidence policy,
+  preference bounds, atomic conversion failure handling, failure retention,
+  and management reset/draft safety are implemented. Legacy GLM/DeepSeek/
+  Google AI Studio observations remain visible as `legacyValidated`
+  nonofficial data. Focused macOS registry/coordinator suite: **14/14
+  passed** in the elevated lane; Mac compile passed; iPhone device SDK build
+  passed. The iOS simulator build is environment-blocked because no runtime
+  is available and `simdiskimaged` is unhealthy.
 
 ## Storage policy
 
@@ -70,20 +87,22 @@ Keep the release verdict honest; do not call the product done.
 ## Open gates
 
 - Live-bank recurring reconciliation, Robinhood/net-worth verification, and
-  provider readback.
+  live provider readback.
+- Automatic Gemini authentication/quota transport and Google AI Pro
+  subscription readback; the native boundary rows intentionally do not claim
+  live quota.
 - Canonical Windows install/listener/health/Serve/Enable Banking readback.
-- Finance live connector/import/recurring/net-worth work; usage provider
-  registry/Gemini watcher; Zepp workouts; Obsidian Canvas round trip; widgets,
-  Shortcuts, signing, physical iPhone.
+- Finance live connector/import/recurring/net-worth work; Zepp workouts;
+  Obsidian Canvas round trip; widgets, Shortcuts, signing, physical iPhone.
 - Whole-app visual/runtime acceptance remains open; current UI slices are
   evidence for those slices only, not product-wide approval.
 
 ## Next action
 
-Dispatch the next bounded finance packet for live recurring reconciliation,
-then integrate the reviewed usage registry into the native watcher and add the
-verified Robinhood/net-worth path. Keep each packet reviewed, committed,
-pushed, and reflected in these short handoff files.
+After this documentation-only checkpoint, commit/push the validated native
+usage registry tranche. Then dispatch the next bounded finance packet for live
+recurring reconciliation and the verified Robinhood/net-worth path. Keep each
+packet reviewed and reflected in these short handoff files.
 
 ## Blockers
 

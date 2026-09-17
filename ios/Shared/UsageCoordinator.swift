@@ -41,6 +41,7 @@ public enum UsageRefreshFailure: String, Codable, Equatable, Sendable {
     case transport
     case invalidPayload
     case historyStorage
+    case registryConversion
 }
 
 public enum UsagePresentationUpdateKind: Equatable, Sendable {
@@ -79,6 +80,7 @@ public struct UsagePresentationPacket: Equatable, Sendable {
     public let failure: UsageRefreshFailure
     public let lastUpdated: Date?
     public let presentationAuthorities: [UsagePresentationScope: UsagePresentationAuthority]
+    public let registryPresentation: UsageRegistryPresentation
     public let updateKind: UsagePresentationUpdateKind
 
     public init(generation: Int,
@@ -88,7 +90,8 @@ public struct UsagePresentationPacket: Equatable, Sendable {
                 failure: UsageRefreshFailure,
                 lastUpdated: Date?,
                 updateKind: UsagePresentationUpdateKind,
-                presentationAuthorities: [UsagePresentationScope: UsagePresentationAuthority] = [:]) {
+                presentationAuthorities: [UsagePresentationScope: UsagePresentationAuthority] = [:],
+                registryPresentation: UsageRegistryPresentation = .empty) {
         self.generation = generation
         self.providers = providers
         self.analytics = analytics
@@ -96,6 +99,7 @@ public struct UsagePresentationPacket: Equatable, Sendable {
         self.failure = failure
         self.lastUpdated = lastUpdated
         self.presentationAuthorities = presentationAuthorities
+        self.registryPresentation = registryPresentation
         self.updateKind = updateKind
     }
 
@@ -174,6 +178,9 @@ public final class UsageCoordinator: ObservableObject {
     @Published public private(set) var failure: UsageRefreshFailure = .none
     @Published public private(set) var historyStatus: UsageHistoryStatus = .empty
     @Published public private(set) var historyErrorMessage: String?
+    @Published public private(set) var registryPresentation: UsageRegistryPresentation
+    @Published public private(set) var registryPreferences: UsageRegistryPreferencesState
+    @Published public private(set) var registryPreferencesError: UsageRegistryPreferencesError?
 
     private let fetchPayload: @Sendable () async throws -> APIUsagePayload
     private var refreshTask: Task<Void, Never>?
@@ -183,6 +190,7 @@ public final class UsageCoordinator: ObservableObject {
     private let snapshotPersistence: UsageWidgetSnapshotPersistence
     private let reloadWidgets: () -> Void
     private let allowsRefresh: Bool
+    private let registryPreferencesStore: UsageRegistryPreferencesPersisting
     private var historyLedger: UsageHistoryLedger
     private var presentationAuthorities: [UsagePresentationScope: UsagePresentationAuthority]
     /// A ledger mutation remains pending until its encoded archive has
@@ -194,7 +202,8 @@ public final class UsageCoordinator: ObservableObject {
                 staleAfter: TimeInterval = 15 * 60,
                 initialProviders: [ProviderSnapshot] = [],
                 initialUpdatedAt: Date? = nil,
-                historyPersistence: UsageHistoryPersistence = UserDefaultsUsageHistoryPersistence()) {
+                historyPersistence: UsageHistoryPersistence = UserDefaultsUsageHistoryPersistence(),
+                registryPreferencesStore: UsageRegistryPreferencesPersisting = UserDefaultsUsageRegistryPreferencesStore()) {
         self.fetchPayload = {
             let data = try await client.fetchUsage()
             return try JSONDecoder.lifeOS.decode(APIUsagePayload.self, from: data)
@@ -204,12 +213,21 @@ public final class UsageCoordinator: ObservableObject {
         self.snapshotPersistence = SharedUsageWidgetSnapshotPersistence()
         self.reloadWidgets = UsageWidgetTimelineReloader.reload
         self.allowsRefresh = true
+        self.registryPreferencesStore = registryPreferencesStore
+        let loadedPreferences: UsageRegistryPreferencesState
+        let preferencesError: UsageRegistryPreferencesError?
+        do {
+            loadedPreferences = try registryPreferencesStore.load()
+            preferencesError = nil
+        } catch {
+            loadedPreferences = .empty
+            preferencesError = error as? UsageRegistryPreferencesError ?? .loadFailed
+        }
         let loadedHistory = Self.loadHistory(from: historyPersistence)
         self.historyLedger = loadedHistory.ledger
         self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
         self.historyErrorMessage = loadedHistory.errorMessage
         let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
-        self.failure = initialFailure
         self.providers = initialProviders
         let initialAuthorities = Self.initialPresentationAuthorities(
             for: initialProviders,
@@ -221,19 +239,35 @@ public final class UsageCoordinator: ObservableObject {
         )
         self.analytics = initialAnalytics
         self.lastUpdated = initialUpdatedAt
+        self.registryPreferences = loadedPreferences
+        self.registryPreferencesError = preferencesError
         let initialState = Self.initialState(
             providers: initialProviders, updatedAt: initialUpdatedAt, staleAfter: staleAfter
         )
+        let initialRegistry = Self.registryPresentation(
+            providers: initialProviders,
+            analytics: initialAnalytics,
+            connectorStates: Self.connectorStates(for: initialProviders),
+            generatedAt: initialUpdatedAt,
+            preferences: loadedPreferences,
+            failure: initialState == .stale ? .restoredStaleCache : .none
+        )
+        self.registryPresentation = initialRegistry
+        let resolvedInitialFailure: UsageRefreshFailure = initialRegistry.failure == .registryConversion
+            ? .registryConversion
+            : initialFailure
+        self.failure = resolvedInitialFailure
         self.state = initialState
         self.presentationPacket = UsagePresentationPacket(
             generation: 0,
             providers: initialProviders,
             analytics: initialAnalytics,
             loadState: initialState,
-            failure: initialFailure,
+            failure: resolvedInitialFailure,
             lastUpdated: initialUpdatedAt,
             updateKind: .initial,
-            presentationAuthorities: initialAuthorities
+            presentationAuthorities: initialAuthorities,
+            registryPresentation: initialRegistry
         )
     }
 
@@ -241,19 +275,29 @@ public final class UsageCoordinator: ObservableObject {
                 staleAfter: TimeInterval = 15 * 60,
                 initialProviders: [ProviderSnapshot] = [],
                 initialUpdatedAt: Date? = nil,
-                historyPersistence: UsageHistoryPersistence = UserDefaultsUsageHistoryPersistence()) {
+                historyPersistence: UsageHistoryPersistence = UserDefaultsUsageHistoryPersistence(),
+                registryPreferencesStore: UsageRegistryPreferencesPersisting = UserDefaultsUsageRegistryPreferencesStore()) {
         self.fetchPayload = fetch
         self.staleAfter = staleAfter
         self.historyPersistence = historyPersistence
         self.snapshotPersistence = SharedUsageWidgetSnapshotPersistence()
         self.reloadWidgets = UsageWidgetTimelineReloader.reload
         self.allowsRefresh = true
+        self.registryPreferencesStore = registryPreferencesStore
+        let loadedPreferences: UsageRegistryPreferencesState
+        let preferencesError: UsageRegistryPreferencesError?
+        do {
+            loadedPreferences = try registryPreferencesStore.load()
+            preferencesError = nil
+        } catch {
+            loadedPreferences = .empty
+            preferencesError = error as? UsageRegistryPreferencesError ?? .loadFailed
+        }
         let loadedHistory = Self.loadHistory(from: historyPersistence)
         self.historyLedger = loadedHistory.ledger
         self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
         self.historyErrorMessage = loadedHistory.errorMessage
         let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
-        self.failure = initialFailure
         self.providers = initialProviders
         let initialAuthorities = Self.initialPresentationAuthorities(
             for: initialProviders,
@@ -265,19 +309,35 @@ public final class UsageCoordinator: ObservableObject {
         )
         self.analytics = initialAnalytics
         self.lastUpdated = initialUpdatedAt
+        self.registryPreferences = loadedPreferences
+        self.registryPreferencesError = preferencesError
         let initialState = Self.initialState(
             providers: initialProviders, updatedAt: initialUpdatedAt, staleAfter: staleAfter
         )
+        let initialRegistry = Self.registryPresentation(
+            providers: initialProviders,
+            analytics: initialAnalytics,
+            connectorStates: Self.connectorStates(for: initialProviders),
+            generatedAt: initialUpdatedAt,
+            preferences: loadedPreferences,
+            failure: initialState == .stale ? .restoredStaleCache : .none
+        )
+        self.registryPresentation = initialRegistry
+        let resolvedInitialFailure: UsageRefreshFailure = initialRegistry.failure == .registryConversion
+            ? .registryConversion
+            : initialFailure
+        self.failure = resolvedInitialFailure
         self.state = initialState
         self.presentationPacket = UsagePresentationPacket(
             generation: 0,
             providers: initialProviders,
             analytics: initialAnalytics,
             loadState: initialState,
-            failure: initialFailure,
+            failure: resolvedInitialFailure,
             lastUpdated: initialUpdatedAt,
             updateKind: .initial,
-            presentationAuthorities: initialAuthorities
+            presentationAuthorities: initialAuthorities,
+            registryPresentation: initialRegistry
         )
     }
 
@@ -323,7 +383,8 @@ public final class UsageCoordinator: ObservableObject {
         historyPersistence: UsageHistoryPersistence,
         snapshotPersistence: UsageWidgetSnapshotPersistence,
         reloadWidgets: @escaping () -> Void,
-        allowsRefresh: Bool
+        allowsRefresh: Bool,
+        registryPreferencesStore: UsageRegistryPreferencesPersisting = UserDefaultsUsageRegistryPreferencesStore()
     ) {
         self.fetchPayload = fetchPayload
         self.staleAfter = staleAfter
@@ -331,12 +392,21 @@ public final class UsageCoordinator: ObservableObject {
         self.snapshotPersistence = snapshotPersistence
         self.reloadWidgets = reloadWidgets
         self.allowsRefresh = allowsRefresh
+        self.registryPreferencesStore = registryPreferencesStore
+        let loadedPreferences: UsageRegistryPreferencesState
+        let preferencesError: UsageRegistryPreferencesError?
+        do {
+            loadedPreferences = try registryPreferencesStore.load()
+            preferencesError = nil
+        } catch {
+            loadedPreferences = .empty
+            preferencesError = error as? UsageRegistryPreferencesError ?? .loadFailed
+        }
         let loadedHistory = Self.loadHistory(from: historyPersistence)
         self.historyLedger = loadedHistory.ledger
         self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
         self.historyErrorMessage = loadedHistory.errorMessage
         let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
-        self.failure = initialFailure
         self.providers = initialProviders
         let initialAuthorities = Self.initialPresentationAuthorities(
             for: initialProviders,
@@ -348,19 +418,35 @@ public final class UsageCoordinator: ObservableObject {
         )
         self.analytics = initialAnalytics
         self.lastUpdated = initialUpdatedAt
+        self.registryPreferences = loadedPreferences
+        self.registryPreferencesError = preferencesError
         let initialState = Self.initialState(
             providers: initialProviders, updatedAt: initialUpdatedAt, staleAfter: staleAfter
         )
+        let initialRegistry = Self.registryPresentation(
+            providers: initialProviders,
+            analytics: initialAnalytics,
+            connectorStates: Self.connectorStates(for: initialProviders),
+            generatedAt: initialUpdatedAt,
+            preferences: loadedPreferences,
+            failure: initialState == .stale ? .restoredStaleCache : .none
+        )
+        self.registryPresentation = initialRegistry
+        let resolvedInitialFailure: UsageRefreshFailure = initialRegistry.failure == .registryConversion
+            ? .registryConversion
+            : initialFailure
+        self.failure = resolvedInitialFailure
         self.state = initialState
         self.presentationPacket = UsagePresentationPacket(
             generation: 0,
             providers: initialProviders,
             analytics: initialAnalytics,
             loadState: initialState,
-            failure: initialFailure,
+            failure: resolvedInitialFailure,
             lastUpdated: initialUpdatedAt,
             updateKind: .initial,
-            presentationAuthorities: initialAuthorities
+            presentationAuthorities: initialAuthorities,
+            registryPresentation: initialRegistry
         )
     }
 
@@ -402,10 +488,47 @@ public final class UsageCoordinator: ObservableObject {
         if generation == refreshGeneration { refreshTask = nil }
     }
 
+    /// Saves display preferences before publishing the new presentation. A
+    /// failed write leaves the prior state active and returns false so the
+    /// management sheet can offer an explicit retry.
+    @discardableResult
+    public func updateUsageRegistryPreferences(_ next: UsageRegistryPreferencesState) -> Bool {
+        do {
+            let rebuilt = try UsageRegistryAdapter.fromLegacy(
+                mapping: currentLegacyMapping,
+                generatedAt: lastUpdated,
+                preferences: next,
+                failure: registryPresentation.failure
+            )
+            // Build first, then persist, then publish. A failed rebuild can
+            // never be reported as a successful preference save.
+            try registryPreferencesStore.save(next)
+            registryPreferences = next
+            registryPreferencesError = nil
+            registryPresentation = rebuilt
+            publishPresentationPacket(
+                generation: refreshGeneration,
+                updateKind: displayOnlyUpdateKind
+            )
+            return true
+        } catch let error as UsageRegistryPreferencesError {
+            registryPreferencesError = error
+            return false
+        } catch is UsageRegistryError {
+            registryPreferencesError = .registryRebuildFailed
+            surfaceRegistryConversionFailure(generation: refreshGeneration)
+            return false
+        } catch {
+            registryPreferencesError = .saveFailed
+            return false
+        }
+    }
+
     public func cancel() {
         refreshGeneration &+= 1
         refreshTask?.cancel()
         state = providers.contains(where: { $0.provenance.quality == .observed }) ? .stale : .unavailable
+        registryPresentation = registryPresentation.withFailure(.cancelled)
         publishPresentationPacket(
             generation: refreshGeneration,
             updateKind: .cancelled
@@ -414,9 +537,24 @@ public final class UsageCoordinator: ObservableObject {
 
     private func apply(_ mapped: UsageMappingResult, generatedAt: Date, generation: Int) {
         guard generation == refreshGeneration else { return }
+        let rebuilt: UsageRegistryPresentation
+        do {
+            // Conversion is the validation boundary. Do it before changing
+            // the provider, connector, or timestamp state so a bad registry
+            // can never leave a half-updated presentation packet.
+            rebuilt = try UsageRegistryAdapter.fromLegacy(
+                mapping: mapped,
+                generatedAt: generatedAt,
+                preferences: registryPreferences
+            )
+        } catch {
+            surfaceRegistryConversionFailure(generation: generation)
+            return
+        }
         providers = mapped.providers
         connectorStates = mapped.connectorStates
         lastUpdated = generatedAt
+        registryPresentation = rebuilt
 
         let incoming = mapped.providers.flatMap { provider in
             provider.windows.compactMap { window -> UsageHistoryEntry? in
@@ -540,16 +678,70 @@ public final class UsageCoordinator: ObservableObject {
 
     private func fail(_ error: Error, generation: Int) {
         guard generation == refreshGeneration else { return }
+        let registryFailure: UsageRegistryPresentationFailure
         if error is UsageIngestionError || error is DecodingError {
             failure = .invalidPayload
             errorMessage = "Usage payload unavailable"
+            registryFailure = .invalidPayload
         } else {
             failure = .transport
             errorMessage = "Usage source unavailable"
+            registryFailure = .transport
         }
+        registryPresentation = registryPresentation.withFailure(registryFailure)
         state = providers.contains(where: { $0.provenance.quality == .observed }) ? .stale : .unavailable
         if !providers.isEmpty { publishSnapshot(providers, generatedAt: lastUpdated ?? .now) }
         publishPresentationPacket(generation: generation, updateKind: .failed)
+    }
+
+    /// Keeps the last coherent v1/registry presentation visible while making
+    /// a local conversion failure observable and retryable.
+    private func surfaceRegistryConversionFailure(generation: Int) {
+        guard generation == refreshGeneration else { return }
+        failure = .registryConversion
+        errorMessage = "Usage presentation could not be rebuilt"
+        registryPresentation = registryPresentation.withFailure(.registryConversion)
+        state = providers.contains(where: { $0.provenance.quality == .observed }) ? .stale : .unavailable
+        publishPresentationPacket(generation: generation, updateKind: .failed)
+    }
+
+    /// Reloads the bounded local preference record without requiring a
+    /// network refresh. A corrupt record stays visible as an error until the
+    /// user explicitly retries or resets it.
+    @discardableResult
+    public func reloadUsageRegistryPreferences() -> Bool {
+        do {
+            let loaded = try registryPreferencesStore.load()
+            let rebuilt = try UsageRegistryAdapter.fromLegacy(
+                mapping: currentLegacyMapping,
+                generatedAt: lastUpdated,
+                preferences: loaded,
+                failure: registryPresentation.failure
+            )
+            registryPreferences = loaded
+            registryPreferencesError = nil
+            registryPresentation = rebuilt
+            publishPresentationPacket(
+                generation: refreshGeneration,
+                updateKind: displayOnlyUpdateKind
+            )
+            return true
+        } catch let error as UsageRegistryPreferencesError {
+            registryPreferencesError = error
+            return false
+        } catch is UsageRegistryError {
+            registryPreferencesError = .registryRebuildFailed
+            surfaceRegistryConversionFailure(generation: refreshGeneration)
+            return false
+        } catch {
+            registryPreferencesError = .loadFailed
+            return false
+        }
+    }
+
+    @discardableResult
+    public func resetUsageRegistryPreferences() -> Bool {
+        updateUsageRegistryPreferences(.empty)
     }
 
     private func publishPresentationPacket(
@@ -565,9 +757,65 @@ public final class UsageCoordinator: ObservableObject {
             failure: failure,
             lastUpdated: lastUpdated,
             updateKind: updateKind,
-            presentationAuthorities: presentationAuthorities
+            presentationAuthorities: presentationAuthorities,
+            registryPresentation: registryPresentation
         )
         presentationPacket = snapshot
+    }
+
+    private var currentLegacyMapping: UsageMappingResult {
+        UsageRegistryAdapter.legacyMapping(
+            providers: providers,
+            analytics: analytics,
+            connectorStates: connectorStates
+        )
+    }
+
+    /// Preference changes are display-only. They must preserve the current
+    /// source outcome so a failed, cancelled, or stale presentation cannot be
+    /// relabeled as a resolved refresh merely because its rows were reordered.
+    private var displayOnlyUpdateKind: UsagePresentationUpdateKind {
+        switch registryPresentation.failure {
+        case .cancelled:
+            return .cancelled
+        case .transport, .invalidPayload, .restoredStaleCache, .registryConversion:
+            return .failed
+        case .none:
+            return failure == .none ? .resolved : .failed
+        }
+    }
+
+    private static func registryPresentation(
+        providers: [ProviderSnapshot],
+        analytics: [UsageAnalyticsSnapshot],
+        connectorStates: [Provider: ConnectorState],
+        generatedAt: Date?,
+        preferences: UsageRegistryPreferencesState,
+        failure: UsageRegistryPresentationFailure = .none
+    ) -> UsageRegistryPresentation {
+        let mapping = UsageRegistryAdapter.legacyMapping(
+            providers: providers,
+            analytics: analytics,
+            connectorStates: connectorStates
+        )
+        do {
+            return try UsageRegistryAdapter.fromLegacy(
+                mapping: mapping,
+                generatedAt: generatedAt,
+                preferences: preferences,
+                failure: failure
+            )
+        } catch {
+            return .empty.withFailure(.registryConversion)
+        }
+    }
+
+    private static func connectorStates(for providers: [ProviderSnapshot]) -> [Provider: ConnectorState] {
+        var states: [Provider: ConnectorState] = [:]
+        for provider in providers {
+            states[provider.provider] = provider.provenance.connector
+        }
+        return states
     }
 
     private static func initialState(

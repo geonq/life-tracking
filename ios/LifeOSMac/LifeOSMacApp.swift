@@ -303,6 +303,7 @@ struct LifeOSMacRootView: View {
     @State private var sidebarWidth: Double = 208
     @State private var hoveredSidebarModule: LifeOSModule?
     @State private var showingCommandPalette = false
+    @State private var showingUsageConnections = false
     @State private var sidebarResizeStart: CGFloat?
     @StateObject private var calendarPresentationState: CalendarPresentationState
     @StateObject private var financePresentationState: FinancePresentationState
@@ -410,6 +411,16 @@ struct LifeOSMacRootView: View {
         .sheet(isPresented: $showingCommandPalette) {
             LifeOSMacCommandPalette(onSelect: { module in select(module) })
                 .frame(width: 560, height: 420)
+        }
+        .sheet(isPresented: $showingUsageConnections) {
+            UsageConnectionsView(
+                presentation: usageCoordinator.presentationPacket.registryPresentation,
+                onSave: { usageCoordinator.updateUsageRegistryPreferences($0) },
+                preferenceError: usageCoordinator.registryPreferencesError,
+                onRetryPreferences: { usageCoordinator.reloadUsageRegistryPreferences() },
+                onResetPreferences: { usageCoordinator.resetUsageRegistryPreferences() }
+            )
+            .frame(minWidth: 520, minHeight: 420)
         }
     }
 
@@ -719,6 +730,7 @@ struct LifeOSMacRootView: View {
             refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() },
             onBack: interactive ? { backHome() } : nil,
             onOpenSettings: interactive ? { navigate(to: .settings) } : nil,
+            onManageConnections: interactive && !usesVisualFixtures ? { showingUsageConnections = true } : nil,
             presentationPacket: usesVisualFixtures ? nil : usagePacket
         )
     }

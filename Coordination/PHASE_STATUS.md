@@ -3,7 +3,9 @@
 Updated 2026-09-17 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Current source: `8c1a225` on clean, equal local/remote `main`.
+- Last pushed source: `8c1a225` on `main`; the validated native usage registry
+  tranche is present locally and remains uncommitted/unpushed for this
+  documentation-only checkpoint.
 - Windows disposable static, legacy Serve, native progress, native snapshot,
   and complete behavior suites pass. Behavior has one installed-service skip;
   canonical deployment remains unverified.
@@ -28,19 +30,29 @@ Updated 2026-09-17 Europe/Berlin.
 - Finance investment validation and the Usage v2 provider-registry contract
   are pushed at `8c1a225`. The focused finance suite passes 21/21; contracts
   typecheck and build cleanly and pass 212/212 tests. Astra Medium returned
-  **MERGE**. Native watcher integration and Gemini subscription readback remain
-  open.
+  **MERGE**. The native AI usage watcher registry tranche is now validated:
+  Claude remains supported; Gemini subscription/Google AI Pro and Gemini API
+  are honest manual/unsupported boundary rows with no fabricated quota or
+  observations; legacy GLM/DeepSeek/Google AI Studio observations remain
+  visible as `legacyValidated` nonofficial data. Exact connection/window
+  selection, evidence policy, bounded preferences, atomic conversion failure,
+  failure retention, and reset/draft safety are covered. Focused macOS
+  registry/coordinator tests pass 14/14 in the elevated lane; Mac compile and
+  iPhone device SDK build pass. iOS simulator build remains environment-
+  blocked because no runtime is available and `simdiskimaged` is unhealthy.
 - Existing reviewed slices cover calendar security, Usage/Finance/Fitness,
   shell/navigation, tax accessibility, installer boundary, and API security.
 - Open: live recurring reconciliation, Robinhood/net-worth, canonical Windows
-  install/readback, live finance/providers, native usage integration/Gemini
-  watcher, workouts, Obsidian Canvas, widgets/Shortcuts/signing, physical iPhone,
-  whole-app visual and runtime acceptance, final security review.
+  install/readback, live finance/providers, automatic Gemini auth/quota
+  transport and subscription readback, workouts, Obsidian Canvas,
+  widgets/Shortcuts/signing, physical iPhone, whole-app visual and runtime
+  acceptance, final security review.
 - Astra Medium reviewed the corrected Windows/storage candidate **MERGE** with
   no blocking source findings. Canonical and concurrent-race evidence remain
   unverified.
-- Next: live recurring reconciliation and verified Robinhood/net-worth work;
-  every Apple lane must retain the storage preflight.
+- Next: commit/push the validated native usage registry tranche, then continue
+  live recurring reconciliation and verified Robinhood/net-worth work. Every
+  Apple lane must retain the storage preflight.
 
 Keep the product boundary: truthful live data, SF Pro, compact Linear/Vercel
 quality, no generic AI, and calorie-photo AI only.

@@ -564,6 +564,7 @@ private struct LifeOSIOSSceneRoot: View {
 
     @State private var selection: LifeOSAppTab = .home
     @State private var showingUsage = false
+    @State private var showingUsageConnections = false
     @State private var requestingNewCalendarEvent = false
     @State private var selectedModuleRoute: LifeOSDeepLink?
     @State private var showingDestinationUnavailable = false
@@ -685,6 +686,16 @@ private struct LifeOSIOSSceneRoot: View {
         .onChange(of: selection) { _, _ in persistSceneState() }
         .onChange(of: selectedModuleRoute) { _, _ in persistSceneState() }
         .onChange(of: showingUsage) { _, _ in persistSceneState() }
+        .sheet(isPresented: $showingUsageConnections) {
+            UsageConnectionsView(
+                presentation: usageCoordinator.presentationPacket.registryPresentation,
+                onSave: { usageCoordinator.updateUsageRegistryPreferences($0) },
+                preferenceError: usageCoordinator.registryPreferencesError,
+                onRetryPreferences: { usageCoordinator.reloadUsageRegistryPreferences() },
+                onResetPreferences: { usageCoordinator.resetUsageRegistryPreferences() }
+            )
+            .presentationDetents([.medium, .large])
+        }
         .onChange(of: requestingNewCalendarEvent) { _, requested in
             guard !requested, selectedModuleRoute == .newCalendarEvent else { return }
             // The calendar consumes this binding immediately. Replace the
@@ -713,6 +724,7 @@ private struct LifeOSIOSSceneRoot: View {
                         }
                     },
                     onOpenSettings: { navigate(.settings) },
+                    onManageConnections: usesVisualFixtures ? nil : { showingUsageConnections = true },
                     presentationPacket: usesVisualFixtures ? nil : usagePacket
                 )
                 .transition(routeTransition)

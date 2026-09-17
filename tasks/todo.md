@@ -1,8 +1,10 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-17 Europe/Berlin. Release: **NO-GO**. Local and remote `main`
-are clean and equal at `2d33ad5`; implementation checkpoint `8c1a225` adds
-the reviewed finance investment validation and Usage v2 provider registry.
+Updated 2026-09-17 Europe/Berlin. Release: **NO-GO**. Last pushed source
+checkpoint is `8c1a225`; the validated native AI usage watcher registry tranche
+is present locally and intentionally uncommitted/unpushed for this
+documentation-only checkpoint. It adds provider-neutral presentation over
+the validated v1 transport while preserving truthful provider boundaries.
 Do not use unverified percentage estimates for completion. Acceptance is
 tracked by registry gates and their required live, runtime, device, visual,
 security, and operator evidence.
@@ -41,7 +43,13 @@ security, and operator evidence.
    Robinhood imports kept separate while feeding verified net worth, with
    NextSemis as an optional final gate. GitHub issue #2 is closed as the
    notification thread; its product scope remains in the plan.
-6. Run the batched Astra security/product review and close every acceptance
+6. Commit/push the validated native AI usage watcher registry tranche. Claude
+   remains supported; Gemini subscription/Google AI Pro and Gemini API remain
+   manual/unsupported boundary rows with no fabricated quota or observations;
+   legacy GLM/DeepSeek/Google AI Studio observations remain visible as
+   `legacyValidated` nonofficial data. Automatic Gemini auth/quota transport
+   and subscription readback remain open.
+7. Run the batched Astra security/product review and close every acceptance
    registry row before changing the release verdict.
 
 ## Verified checkpoint
@@ -54,6 +62,22 @@ preserves the current iPhone 17 simulator, and fails every Apple lane below a
 15 GiB free-space floor. The latest check reported 25.1 GiB free and the
 developer root at 16 GiB. Storage tests are 7 passed plus 2 process-probe
 subtests; the guard and all lane scripts pass `bash -n`.
+
+`8c1a225` is the last pushed source checkpoint. The 2026-09-17 native AI
+usage watcher registry tranche is validated in the working tree and remains
+intentionally uncommitted/unpushed for this documentation-only checkpoint.
+It provides provider-neutral presentation over the validated v1 transport,
+exact connection/window selection, evidence policy, bounded preferences,
+atomic conversion failure handling, failure retention, and management
+reset/draft safety. Claude remains supported. Gemini subscription/Google AI
+Pro and Gemini API are cataloged as manual/unsupported boundary rows with no
+fabricated quota or observations. Legacy GLM/DeepSeek/Google AI Studio
+observations remain visible as `legacyValidated` nonofficial data. The focused
+macOS registry/coordinator suite is 14/14 passed in the elevated lane; Mac
+compile and iPhone device SDK build passed. The iOS simulator build is
+environment-blocked because no runtime is available and `simdiskimaged` is
+unhealthy. Automatic Gemini auth/quota transport and subscription readback
+remain open.
 
 `a6020d0` was the prior source checkpoint before the candidate;
 its A1.3 recovery candidate is Astra Medium
@@ -96,11 +120,10 @@ do not prove live, runtime, device, visual, or operational
 completion.
 
 The Robinhood investment packet is strict and separate from bank transactions;
-its focused macOS suite passes 21/21. Usage v2 retains Claude, keeps Gemini
-subscription usage manual/unsupported without an official quota endpoint, and
-keeps Gemini API usage separate; its contracts pass 212/212 with typecheck and
-build. Both packets received final Astra Medium **MERGE** reviews. Native
-watcher integration remains open.
+its focused macOS suite passes 21/21. The Usage v2 provider-registry contract
+passes 212/212 with typecheck and build, and the native registry tranche has a
+final Astra Medium **MERGE** review. Automatic Gemini auth/quota transport and
+subscription readback remain open.
 
 No scheduler or automatic deletion of source/personal/final evidence was
 added. Future Apple work must use the guard and owned per-lane DerivedData;
@@ -110,8 +133,7 @@ The frozen registry is structurally valid but has 0 accepted leaves; do not use
 the earlier 60% estimate as release progress. Acceptance must be earned with
 the required live, runtime, device, visual, and operator evidence.
 
-Keep the generic advisor/conversational AI out of the product. The reviewed
-Usage v2 provider registry is pushed at `8c1a225`; native watcher integration
-still has to use its truthful boundaries. Retain the Claude watcher, represent
-Gemini subscription usage as manual/unsupported until an official quota
-endpoint is verified, and keep Gemini API usage separate.
+Keep the generic advisor/conversational AI out of the product. Retain the
+Claude watcher, represent Gemini subscription usage as manual/unsupported
+until an official quota endpoint is verified, and keep Gemini API usage
+separate. Do not fabricate quota or observations for either Gemini boundary.
