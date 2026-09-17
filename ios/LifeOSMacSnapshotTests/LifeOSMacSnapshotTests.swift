@@ -1049,6 +1049,43 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         render(TaxDocumentsView(), named: "TaxDocumentsView-dark", colorScheme: .dark)
     }
 
+    func testFinanceRecurringPaymentsCardSnapshot() throws {
+        let url = FinanceRecurringTestFixtures.temporaryURL("snapshot")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let viewModel = FinanceRecurringPaymentsViewModel(
+            store: try FinanceRecurringPaymentStore(url: url)
+        )
+        render(
+            FinanceRecurringPaymentsView(viewModel: viewModel),
+            named: "FinanceRecurringPaymentsView-empty-dark",
+            frameSize: CGSize(width: 760, height: 360),
+            colorScheme: .dark,
+            reduceMotion: true,
+            settleInterval: 0.1
+        )
+    }
+
+    func testManagePaymentUsesOwnerSpecificSheetBindings() throws {
+        let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let recurringSource = try String(
+            contentsOf: testDirectory
+                .deletingLastPathComponent()
+                .appendingPathComponent("LifeOS/Modules/Finance/FinanceRecurringPaymentsView.swift"),
+            encoding: .utf8
+        )
+        let importSource = try String(
+            contentsOf: testDirectory
+                .deletingLastPathComponent()
+                .appendingPathComponent("LifeOS/Modules/Finance/FinanceImportView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(recurringSource.contains(".sheet(item: viewModel.editorBinding(for: .recurringCard))"))
+        XCTAssertTrue(importSource.contains(".sheet(item: recurringViewModel.editorBinding(for: .importedTransactions))"))
+        XCTAssertFalse(recurringSource.contains(".sheet(item: $viewModel.editingRow)"))
+        XCTAssertFalse(importSource.contains(".sheet(item: $recurringViewModel.editingRow)"))
+    }
+
     private var visualFixtureCalendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.locale = Locale(identifier: "en_US")

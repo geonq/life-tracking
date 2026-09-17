@@ -213,6 +213,25 @@ final class FinanceImportViewModelSyncTests: XCTestCase {
         XCTAssertEqual(model.savedTransactions.count, preview.transactions.count)
     }
 
+    func testImportedMutationsNotifyDerivedRecurringConsumers() async throws {
+        let (store, url) = try temporaryStore()
+        defer { removeStore(at: url) }
+        let statementURL = try temporaryCSV(knownTradeRepublicCSV)
+        defer { removeCSV(at: statementURL) }
+
+        let model = FinanceImportViewModel(store: store)
+        var callbackCount = 0
+        model.onImportedStateChanged = { callbackCount += 1 }
+
+        let preview = try prepareKnownPreview(for: model, at: statementURL)
+        let confirmation = await model.confirmImport(preview.transactions)
+        XCTAssertEqual(confirmation, .saved)
+        XCTAssertEqual(callbackCount, 1)
+
+        model.clearAll()
+        XCTAssertEqual(callbackCount, 2)
+    }
+
     func testOversizedPickedCSVIsRejectedBeforeAnyPreviewIsCreated() throws {
         let (store, storeURL) = try temporaryStore()
         defer { removeStore(at: storeURL) }

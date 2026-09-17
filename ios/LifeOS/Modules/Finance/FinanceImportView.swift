@@ -92,6 +92,11 @@ final class FinanceImportViewModel: ObservableObject {
     @Published private(set) var isImporting = false
     @Published private(set) var availableAccountChoices: [FinanceImportAccountChoice] = []
 
+    /// Card-state callback for derived local recurring-payment assessment.
+    /// The recurring view receives snapshots; it never mutates this model's
+    /// transaction store.
+    var onImportedStateChanged: (() -> Void)?
+
     private let store: FinanceImportedTransactionStore?
     private let syncOperation: SyncOperation
     private let preparedImportOperation: PreparedImportOperation
@@ -630,9 +635,15 @@ final class FinanceImportViewModel: ObservableObject {
                 } else {
                     syncMessage = "The gateway confirmed revision \(result.snapshot.revision)."
                 }
+                onImportedStateChanged?()
             } catch {
                 syncState = .error
                 syncMessage = "The gateway replied, but imported Finance data could not be refreshed."
+                // Synchronization succeeded, but the authoritative local
+                // snapshot could not be read. Notify derived consumers once
+                // so they clear current evidence instead of retaining an old
+                // recurring assessment as fresh.
+                onImportedStateChanged?()
             }
         } catch is CancellationError {
             guard generation == syncGeneration else { return }
@@ -672,12 +683,28 @@ final class FinanceImportViewModel: ObservableObject {
             availableAccountChoices = Self.accountChoices(from: mappings, transactions: transactions)
             currentSyncStatus = status
             syncState = isSynchronizing ? .syncing : Self.presentationState(for: status)
+            onImportedStateChanged?()
         } catch {
             currentSyncStatus = nil
             syncState = .error
             syncMessage = "Imported Finance data could not be refreshed."
             errorMessage = Self.localErrorMessage(for: error)
+            // A failed refresh invalidates every consumer of the imported
+            // snapshot. The recurring view must clear current evidence and
+            // expose its durable overrides as stale instead of retaining the
+            // previous assessment as if it were still current.
+            onImportedStateChanged?()
         }
+    }
+
+    func recurringSnapshot() throws -> (
+        transactions: [FinanceImportedTransaction],
+        batches: [FinanceImportBatchProvenance]
+    ) {
+        guard let store else {
+            throw FinanceImportedTransactionStoreError.applicationSupportUnavailable
+        }
+        return (try store.all(), try store.importBatches())
     }
 
     private static func accountChoices(
@@ -810,6 +837,7 @@ final class FinanceImportViewModel: ObservableObject {
 struct FinanceImportPersistenceConfiguration {
     let importedTransactionStore: FinanceImportedTransactionStore?
     let budgetStore: FinanceBudgetStore?
+    let recurringPaymentStore: FinanceRecurringPaymentStore?
     let directoryURL: URL?
     let syncOperation: FinanceImportViewModel.SyncOperation
 
@@ -826,12 +854,18 @@ struct FinanceImportPersistenceConfiguration {
             FinanceBudgetStore.fileName,
             isDirectory: false
         )
+        let recurringURL = directory.appendingPathComponent(
+            FinanceRecurringPaymentStore.fileName,
+            isDirectory: false
+        )
         let importedStore = try? FinanceImportedTransactionStore(url: importedURL, fileManager: fileManager)
         let budgetStore = try? FinanceBudgetStore(url: budgetURL, fileManager: fileManager)
+        let recurringPaymentStore = try? FinanceRecurringPaymentStore(url: recurringURL, fileManager: fileManager)
 
         return Self(
             importedTransactionStore: importedStore,
             budgetStore: budgetStore,
+            recurringPaymentStore: recurringPaymentStore,
             directoryURL: directory,
             syncOperation: { _ in
                 // A visual fixture can exercise the sync button's failure
@@ -855,6 +889,7 @@ final class FinanceImportCardState: ObservableObject {
     let usesVisualFixtures: Bool
     let persistence: FinanceImportPersistenceConfiguration?
     let model: FinanceImportViewModel
+    let recurringPayments: FinanceRecurringPaymentsViewModel
     private var modelObservation: AnyCancellable?
 
     init(usesVisualFixtures: Bool) {
@@ -866,16 +901,31 @@ final class FinanceImportCardState: ObservableObject {
                 store: configuration.importedTransactionStore,
                 syncOperation: configuration.syncOperation
             )
+            recurringPayments = FinanceRecurringPaymentsViewModel(store: configuration.recurringPaymentStore)
         } else {
             persistence = nil
             // Preserve the existing production defaults exactly: the model
             // resolves the Application Support store and live sync operation
             // through its zero-argument initializer.
             model = FinanceImportViewModel()
+            recurringPayments = FinanceRecurringPaymentsViewModel(store: try? FinanceRecurringPaymentStore())
         }
 
         modelObservation = model.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
+        }
+        model.onImportedStateChanged = { [weak self] in
+            self?.refreshRecurringPayments()
+        }
+        refreshRecurringPayments()
+    }
+
+    private func refreshRecurringPayments() {
+        do {
+            let snapshot = try model.recurringSnapshot()
+            recurringPayments.refresh(transactions: snapshot.transactions, batches: snapshot.batches)
+        } catch {
+            recurringPayments.presentSnapshotReadError(error)
         }
     }
 }
@@ -950,6 +1000,8 @@ struct FinanceImportCard: View {
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
 
+            FinanceRecurringPaymentsView(viewModel: state.recurringPayments)
+
             if !model.savedTransactions.isEmpty {
                 DisclosureGroup(isExpanded: $isShowingImportedDetails) {
                     VStack(alignment: .leading, spacing: 12) {
@@ -1006,8 +1058,11 @@ struct FinanceImportCard: View {
                 onCancel: model.discardPending
             )
         }
-        .sheet(isPresented: $isShowingImportedList) {
-            FinanceImportedTransactionsListView(model: model)
+            .sheet(isPresented: $isShowingImportedList) {
+            FinanceImportedTransactionsListView(
+                model: model,
+                recurringViewModel: state.recurringPayments
+            )
         }
         .alert("Import statement", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -1911,6 +1966,7 @@ private struct FinanceImportPreviewRow: View {
     let transaction: FinanceImportedTransaction
     var isDisabled = false
     var onCategoryChange: ((FinanceTransactionCategory?) -> Void)? = nil
+    var onManagePayment: (() -> Void)? = nil
 
     private var effectiveCategory: FinanceTransactionCategory {
         FinanceCategorizer.category(for: transaction)
@@ -1969,6 +2025,18 @@ private struct FinanceImportPreviewRow: View {
                 .accessibilityIdentifier("finance-import-category-\(transaction.id.uuidString)")
                 .disabled(isDisabled)
             }
+            if let onManagePayment {
+                Button {
+                    onManagePayment()
+                } label: {
+                    LifeOSIcon(.refresh, context: .toolbar)
+                        .foregroundStyle(LifeOSTokens.Module.finance)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Manage Payment")
+                .accessibilityIdentifier("finance-manage-payment-\(transaction.id.uuidString)")
+                .disabled(isDisabled)
+            }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilitySummary)
@@ -1994,6 +2062,7 @@ private struct FinanceImportPreviewRow: View {
 /// all. Honest empty state when the store has nothing in it.
 private struct FinanceImportedTransactionsListView: View {
     @ObservedObject var model: FinanceImportViewModel
+    @ObservedObject var recurringViewModel: FinanceRecurringPaymentsViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var isShowingClearConfirmation = false
 
@@ -2021,7 +2090,10 @@ private struct FinanceImportedTransactionsListView: View {
                                         transaction: transaction,
                                         onCategoryChange: { category in
                                             model.setCategory(category, for: transaction.id)
-                                        }
+                                        },
+                                        onManagePayment: recurringViewModel.hasManagedRow(for: transaction.id)
+                                            ? { recurringViewModel.beginManage(transactionID: transaction.id) }
+                                            : nil
                                     )
                                 }
                                 .onDelete { offsets in
@@ -2059,6 +2131,21 @@ private struct FinanceImportedTransactionsListView: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text(FinanceImportCopy.clearAllConfirmation)
+            }
+            // This list is the visible presentation owner while the
+            // imported-transactions sheet is open. The recurring card's
+            // sheet modifier is underneath that presentation and therefore
+            // cannot reliably present this editor itself.
+            .sheet(item: recurringViewModel.editorBinding(for: .importedTransactions)) { row in
+                FinanceRecurringPaymentManageSheet(
+                    row: row,
+                    timeZoneIdentifier: recurringViewModel.timeZoneIdentifier,
+                    errorMessage: recurringViewModel.errorMessage,
+                    onSave: { cadence, status, anchorDate in
+                        recurringViewModel.save(row: row, cadence: cadence, status: status, anchorDate: anchorDate)
+                    },
+                    onReset: { recurringViewModel.resetAutomatic(for: row) }
+                )
             }
         }
     }
