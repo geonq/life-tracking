@@ -1,13 +1,13 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-15; source checkpoint `f6a848a`; local `main`
+Planning baseline: 2026-09-17; source checkpoint `c871339`; local `main`
 matches `origin/main` with zero divergence. D2a/D2b/D3/A1.1 are Astra Medium
 **MERGE**. Approved documentation-only plan; Windows facts are read-only; release is NO-GO.
 Progress is **70–75% implemented** / **35–45% release-ready**, kept separate.
 ## 1. Current truth and explicit gates
-- **NO-GO.** The current checkpoint is `f6a848a`, including the reviewed
+- **NO-GO.** The current checkpoint is `c871339`, including the reviewed
   dashboard refinement at `0d094ee`, calendar zoom safety, the T12b calendar
   viewport/midnight correction, T13a bounded widget snapshot I/O, visual
-  foundation at `5b90539`, and the clean production dependency audit.
+  foundation at `5b90539`, the clean production dependency audit, and the Astra-reviewed finance importer provenance/recovery slice.
   GitHub CLI reports PR #1 MERGED into `main` and no open PR; no source
   acceptance or release readiness is implied. A serialized Mac Usage build succeeded; the
   focused XCTest command compiled but the sandbox blocked `testmanagerd` before

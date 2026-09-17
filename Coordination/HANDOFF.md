@@ -1,17 +1,16 @@
 # HANDOFF — LifeOS native app
 
-Updated 2026-09-16 Europe/Berlin.
+Updated 2026-09-17 Europe/Berlin.
 
 ## Active task
 
-Continue the finance institution-detection tranche after the verified Windows
-publication/security and macOS storage checkpoint. Keep the release verdict
-honest; do not call the product done.
+Continue finance work after the pushed institution-detection/importer
+checkpoint. Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
 - Release is **NO-GO**. `main` and `origin/main` are clean and equal at
-  `8fde743` (`Harden Windows publication and bound Apple build storage`).
+  `c871339` (`Harden finance import provenance and CSV recovery`).
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
@@ -29,8 +28,12 @@ honest; do not call the product done.
 - Local deployment source harness: 75 passed, 2 environment skips. Native C#
   extraction/build: 0 errors, 31 nullable/platform warnings.
 - Storage tests: 7 passed, 2 subtests. `bash -n` passes. Storage check reports
-  28.8 GiB free, 16 GiB Developer root, 11 GiB device support, and one kept
+  25.1 GiB free, 16 GiB Developer root, 11 GiB device support, and one kept
   shutdown iPhone 17 simulator.
+- Finance detector/importer: focused Astra Medium review **MERGE**; optimized
+  DEBUG harnesses cover recovery, EOF, escaped quotes, Unicode whitespace,
+  and 256/1024/3000-row scan bounds. Mac logic lane: 55/55 tests passed. The
+  generic iOS test build succeeded; simulator execution remains unavailable.
 
 ## Storage policy
 
@@ -46,8 +49,8 @@ honest; do not call the product done.
 
 ## Open gates
 
-- Finance institution-detection plan, implementation, focused tests, Astra
-  review, then commit and push to `main`.
+- Finance user mapping, recurring-payment management, Robinhood/net-worth
+  verification, and live reconciliation.
 - Canonical Windows install/listener/health/Serve/Enable Banking readback.
 - Finance live connector/import/recurring/net-worth work; Zepp workouts;
   Obsidian Canvas round trip; widgets, Shortcuts, signing, physical iPhone.
@@ -56,10 +59,9 @@ honest; do not call the product done.
 
 ## Next action
 
-Reconcile the current Astra finance plan, dispatch only its bounded Luna patch,
-run focused tests and a batched Astra review, then refresh coordination,
-commit specific files, push, and verify local/remote parity plus open GitHub
-issues/PRs.
+Dispatch the next bounded finance packet for explicit mapping and recurring
+payments, then add the verified Robinhood/net-worth path. Keep each packet
+reviewed, committed, pushed, and reflected in these short handoff files.
 
 ## Blockers
 

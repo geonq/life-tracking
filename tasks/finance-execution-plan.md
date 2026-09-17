@@ -1,119 +1,188 @@
 # Finance execution packet
 
-Updated 2026-09-16 Europe/Berlin. This packet records the current gap and the
-implementation order for the new finance requirements. It is subordinate to
-the main release plan and remains a NO-GO until live-data and runtime evidence
-exists.
+Updated 2026-09-17 Europe/Berlin. Source checkpoint: `c871339` on
+`main` / `origin/main`. Subordinate to the main release plan; release remains
+**NO-GO** until deployment, live-data, and runtime gates have evidence.
+Execute stages 1–5 in order; stage 5 defines evidence required at every gate.
 
-## Current gap
+## Shipped baseline — preserve, do not rebuild
 
-- `FinanceDomain` has Sparkasse, Revolut, and Trade Republic connectors, but no
-  Robinhood source or bank/investment account discriminator.
-- `FinanceStatementImporter` treats a broad `Datum` + `Betrag` header match as
-  Trade Republic and accepts other valid layouts as generic CSV without an
-  explicit mapping step.
-- `FinanceImportedTransaction` keeps Trade Republic orders in the imported
-  transaction type; there is no separate investment activity/holding ledger.
-- `fixedCosts` and merchant categorization are not recurring-payment
-  detection. No durable candidate, cadence override, evidence, or Manage
-  Payment flow exists.
-- Production net worth currently uses observed bank balances only. Imported
-  activity must never become a valuation by inference.
-- `thenextsemis.vercel.app` remains optional and deferred until the direct path
-  is stable.
+- `ios/Shared/FinanceInstitutionDetector.swift` contains the versioned,
+  deterministic registry: enabled Trade Republic English 23-column comma and
+  German legacy/security semicolon profiles; disabled Robinhood, Sparkasse,
+  and Revolut markers; near-match/duplicate/unknown fail-closed states; and
+  content-free, versioned detection provenance. Do not add a parallel registry.
+- `ios/Shared/FinanceStatementImporter.swift` separates institution metadata
+  from `FinanceImportSource`. Historical UUID/hash inputs and legacy column
+  precedence, including `Datum` + `Betrag` identity behavior, are preserved.
+  Do not remove that compatibility path or interpret it as institution proof.
+- BOM, CR/CRLF, UTF-16, bounded delimiter probing, cached linear quote
+  boundaries, malformed-row recovery into later unquoted/quoted rows and EOF
+  replay, and exact currency behavior are shipped. Preserve these guarantees.
+- Focused detector/importer tests and historical UUID goldens shipped;
+  Astra Medium review: **MERGE**. Mac logic: **55/55 passed**; generic iOS
+  test build succeeded. Simulator service/runtime was unavailable, so this
+  is not simulator execution evidence. Required storage guard passes.
+- `ios/Shared/FinanceImportedTransaction.swift` and
+  `ios/Shared/FinanceImportedTransactionStore.swift` remain the cash/investment-
+  order import model and sync store. `ios/Shared/FinanceDomain.swift` has
+  observed accounts/wealth, not a verified Robinhood or recurring-payment model.
+- Enable Banking historical proof exists; deployed/native live readback is
+  a separate gate. Trade Republic remains manual import. PayPal is out of scope.
 
-## Data and provenance
+## Current gap and worker contract
 
-Add `ios/Shared/FinanceImportProvenance.swift` with versioned detection state
-(`known`, `unknown`, `ambiguous`, `userMapped`), canonical column mapping,
-batch ID, SHA-256, byte count, normalized-header fingerprint, detector/mapping
-versions, source row numbers, and import time. Persist provenance metadata;
-never persist raw statement text as the mapping record.
+Unknown/ambiguous CSV needs explicit user mapping and detection-first UI.
+Recurring candidates/overrides, a separate investment ledger, verified net-worth
+composition, and live reconciliation remain open. `fixedCosts` and merchant
+categorization are not recurring detection; activity is not a valuation.
 
-Add `ios/Shared/FinanceImportInstitutionRegistry.swift`. Each known institution
-fingerprint must combine normalized headers, delimiter, column count/order,
-required/forbidden columns, and sample-value validation. A single candidate
-must clear a threshold and deterministic margin. Unknown or ambiguous input
-blocks confirmation until the user selects a known mapping or defines an
-explicit user mapping. A user mapping never claims an institution.
+Dispatch one bounded Luna packet at a time with the stage's exact files and
+acceptance tests; Astra Medium reviews each slice before the next dependency
+opens. Workers report changed files, evidence, and blockers; they do not commit
+or push. Keep scope local through stage 3; do not expand gateway schemas early.
+Use truthful observed data, explicit unavailable/partial states, and no fixtures
+in production. No generic in-app AI/advisor; calorie-photo AI is the only AI flow.
 
-Remove the `Datum` + `Betrag` Trade Republic shortcut from
-`ios/Shared/FinanceStatementImporter.swift`. Existing Trade Republic imports
-remain visible, but legacy rows are marked heuristic/unattributed during
-migration until explicitly confirmed.
+## 1. Next bounded packet — mapping and preview
 
-Keep row IDs, category overrides, amounts, tombstones, and reimport
-deduplication stable. Add batch and source-row provenance without changing the
-meaning of existing bank transactions.
+Existing scope: `ios/Shared/FinanceStatementImporter.swift`,
+`ios/Shared/FinanceInstitutionDetector.swift`,
+`ios/Shared/FinanceImportedTransactionStore.swift`, and
+`ios/LifeOS/Modules/Finance/FinanceImportView.swift` (including its
+`FinanceImportViewModel`). Extend existing detection/provenance types; add only
+`ios/Shared/FinanceImportMapping.swift` for the mapping value/persistence contract.
 
-## Recurring payments
+- Preview must use `FinanceImportResult.institutionDetection`, never infer an
+  institution from `detectedSource`. Show state, profile/version when verified,
+  delimiter, content-free reason/evidence codes, valid/skipped counts and rows.
+- Unknown/ambiguous input cannot confirm until the user explicitly maps columns
+  by index, date format, amount/sign convention, currency and account identity.
+  Validate required fields, duplicate column choices and row values; reparse
+  through the bounded parser. Duplicate headers require index disambiguation.
+- A valid mapping becomes `userMapped` with no claimed institution. Disabled
+  profiles and near matches cannot become known via mapping; unsupported
+  investment exports stay blocked from bank import. Never enable markers here.
+- Enforce the gate in the view model/save path as well as the button. Changing
+  file or mapping invalidates the preview; cancellation/stale confirmation
+  writes nothing. No automatic acceptance of a saved mapping on a new layout.
+- Persist versioned mapping and batch-to-row provenance locally: mapping and
+  detector versions, content-free detection metadata, batch ID, file SHA-256,
+  byte count, header fingerprint, source row numbers and import time. Do not
+  store raw CSV, raw headers or account values in diagnostic provenance/logs.
+- Keep metadata separate from identity/sync payloads. Preserve old UUID/hash
+  inputs, legacy precedence, categories, overrides, amounts, revisions,
+  tombstones and reimport deduplication. Missing historical provenance stays
+  unavailable; do not relabel or re-ID stored legacy rows. Version local
+  persistence only where needed, with backward-compatible decoding.
 
-Add `ios/Shared/FinanceRecurringPayment.swift` and
-`ios/Shared/FinanceRecurringPaymentDetector.swift`.
+Gate: mapping, preview cancellation/staleness, provenance round-trip and old-ID
+regressions pass before recurring work; existing detector profiles stay unchanged.
 
-The detector must:
+## 2. Recurring candidates — domain, detector, store, UI
 
-1. Normalize merchant identity with case/diacritic folding, whitespace and
-   punctuation normalization, preferring provider merchant identity.
-2. Group by source, account, and merchant; exclude income, refunds, typed
-   transfers, investment orders, and rows without reliable provenance.
-3. Sort each group by local finance date and test weekly (6–8 days), monthly
-   (calendar-month match with end-of-month clamping and ±3 days), and yearly
-   (calendar-year match with leap-day normalization and ±3 days).
-4. Require at least three occurrences. Mark high confidence only with four or
-   more consistent occurrences and amount variance within `max(€1, 5%)` of the
-   median. Otherwise mark `needsReview`.
-5. Resolve by match count, then total date deviation, then fixed cadence order;
-   ties remain reviewable. Calculate the next expected date in the persisted
-   finance timezone.
+Add `ios/Shared/FinanceRecurringPayment.swift`,
+`ios/Shared/FinanceRecurringPaymentDetector.swift`, and
+`ios/Shared/FinanceRecurringPaymentStore.swift`. Integrate through existing
+`ios/Shared/FinanceCoordinator.swift`, `ios/LifeOS/Modules/Finance/FinanceView.swift`
+and `ios/LifeOS/Modules/Finance/FinanceImportView.swift`; reuse current stores
+as transaction authorities, not duplicate mutable transaction ownership.
 
-The target is `O(n log n)` time and `O(n)` memory per revision, with cached
-results keyed by transaction revision. Every candidate has Manage Payment.
-The sheet shows evidence transactions, source/batch provenance, confidence,
-next expected date, active/paused/ignored state, and a weekly/monthly/yearly
-cadence picker. A user override is durable and is never replaced by detection.
+- Persist candidate identity from source/account/merchant, evidence row IDs,
+  cadence, confidence/reasons, next date, finance timezone and detector version.
+  Prefer provider merchant ID; otherwise fold case/diacritics, whitespace and
+  punctuation deterministically. Never merge across source/account/currency.
+- Exclude income, refunds, typed transfers, investment orders, duplicates and
+  rows without reliable source/account provenance. Ambiguous cases need review.
+- Sort each group once by local finance date; scan a fixed three cadences:
+  weekly 6–8 calendar days; monthly calendar anchor with month-end clamping
+  ±3 days; yearly calendar anchor with leap-day normalization ±3 days.
+  Persist the timezone and original anchor; never advance via fixed seconds
+  or let February clamping drift subsequent dates. DST must not shift cadence.
+- Require at least three occurrences. High confidence requires four or more
+  consistent occurrences and amounts within `max(EUR 1, 5% of median)`;
+  otherwise `needsReview`. Do not silently apply EUR thresholds to FX rows.
+  Rank by match count, date deviation, then fixed weekly/monthly/yearly order;
+  tied evidence remains reviewable. Show supporting dates/amounts and reasons.
+- Target `O(n log n)` time, `O(n)` memory per revision; no all-pairs/subset
+  search. Cache by transaction revision, timezone and detector version;
+  invalidate on relevant edits/deletes and refresh derived UI on override edits.
+- Every candidate has Manage Payment: evidence/source/batch, confidence, next
+  date, active/paused/ignored state and weekly/monthly/yearly cadence override.
+  Persist overrides separately from recomputed evidence using stable identity;
+  detection, reimport and restart must not overwrite them. Clearing an override
+  explicitly returns to detection. Missing evidence is visible, not fabricated.
 
-## Robinhood and net worth
+Gate: durable overrides and deterministic calendar/evidence/performance tests
+pass; uncertain candidates remain auditable rather than asserted subscriptions.
+
+## 3. Robinhood ledger and verified net worth; then optional NextSemis
 
 Add `ios/Shared/FinanceInvestmentDomain.swift`,
 `ios/Shared/FinanceRobinhoodImporter.swift`, and
-`ios/Shared/FinanceInvestmentActivityStore.swift`.
+`ios/Shared/FinanceInvestmentActivityStore.swift`. Put `FinanceNetWorthBreakdown`
+in the investment domain; integrate observed accounts via
+`ios/Shared/FinanceDomain.swift` / `ios/Shared/FinanceCoordinator.swift` and render
+in `ios/LifeOS/Modules/Finance/FinanceView.swift` and `FinanceAnalyticsView.swift`.
 
-Keep investment activity separate from `FinanceImportedTransaction`. Model
-account snapshots, verified cash, holdings, and activities (buy, sell,
-dividend, interest, fee, deposit, withdrawal, transfer, unknown). Preserve
-quantity and source amounts exactly. Buy/sell rows and transfers are never
-holdings; imported activity alone contributes zero to net worth.
+- Separate account snapshots, holdings, verified cash and activities: buy,
+  sell, dividend, interest, fee, deposit, withdrawal, transfer, unknown.
+  Preserve exact quantities, amounts, currencies and source identity; validate
+  schema/version and idempotent import. Unknown/malformed records fail closed.
+- Validate against geonq's real Robinhood export when available. Until then,
+  label schema support unverified and keep production enablement gated; unit
+  fixtures are test-only. Do not invent supported columns or verified balances.
+- Robinhood activity/holdings/cash never enter `FinanceImportedTransaction`,
+  bank categories, recurring candidates or bank-account totals. Do not migrate
+  existing Trade Republic order IDs as a side effect of this separate ledger.
+- Net-worth breakdown: verified bank cash, investment cash and EUR holding
+  values, each with account/source, observedAt, verification/exclusion reason.
+  Require observed valuation or verified price/FX evidence; absent prices, FX,
+  account identity or verification stays partial/excluded, never a fake zero.
+- Activity alone contributes zero to net worth. Do not count snapshot cash
+  plus activity cash effects, cash twice across linked accounts, or both total
+  account valuation and its holdings/cash components. Reconcile identity first.
+- Show a separate Robinhood account/activity surface and partial-state copy.
+  Only after direct import and verified net-worth tests pass may a separately
+  gated NextSemis adapter be considered; it is not a dependency or proof source.
 
-Add a `FinanceNetWorthBreakdown` consumed by `FinanceView` and
-`FinanceAnalyticsView`: verified bank cash, verified investment cash, and
-verified EUR holding values. Each component carries source, observedAt,
-verification state, and exclusion reason. Missing prices, foreign currency,
-unknown account identity, and unverified values remain visible as partial or
-excluded. Do not double-count an account snapshot and activity cash effects.
+Gate: local ledger/model tests pass; real-export schema and valuation evidence
+are separately required for a verified Robinhood claim.
 
-Add a separate Robinhood account/activity card; it must never enter bank
-transaction categories or bank-account totals. Extend gateway/contracts only
-after the local model is stable, using separate sync schemas rather than
-overloading `/finance/imported`.
+## 4. Stable local models → sync contracts and live reconciliation
 
-## UI, migrations, and gates
+Only after stages 1–3 local models pass review, scope changes to
+`packages/contracts/src/sync.ts`, `packages/contracts/src/sync.test.ts`,
+`services/api/src/` and `services/gateway/` using the actual route owners found
+there. Name exact handler/test files in that later packet before editing.
 
-- `ios/LifeOS/Modules/Finance/FinanceImportView.swift`: detection-first
-  preview, provenance panel, mapping screen, and a disabled confirmation for
-  unknown/ambiguous input.
-- Finance detail UI: recurring candidates with Manage Payment, and a separate
-  Robinhood investment surface with partial-state copy.
-- Bump local/import schemas while preserving IDs, overrides, revisions, and
-  tombstones. Keep legacy data visibly legacy until reviewed.
-- Add focused tests for institution fingerprints, unknown/ambiguous mapping,
-  provenance/reimport, weekly/monthly/yearly recurrence, DST/month-end/leap
-  years, cadence overrides, Robinhood activity classification, malformed rows,
-  verified/unverified valuation, no double counting, and sync rejection.
-- Add gateway/contract tests only when the local schemas are final. Validate
-  the real Robinhood export supplied by geonq; do not fabricate fixtures as
-  production data.
-- Consider `thenextsemis.vercel.app` only as a separate adapter/feature gate
-  after direct Robinhood import and verified net-worth paths pass all tests.
-- Preserve the product AI boundary: no advisor or generic conversational AI;
-  calorie-photo tracking remains the only in-app AI.
+- Define versioned recurring-override and investment sync schemas separately;
+  do not overload `/finance/imported` or break its historical identities.
+  Specify validation, revision/conflict policy, retries/idempotence, tombstones,
+  backward compatibility and reconciliation of source/account identities.
+- Prove local → gateway → fresh local readback, duplicate/retry behavior,
+  overrides across devices, rejection of invalid payloads and no double count.
+- Reconcile actual Enable Banking account/transaction observations and freshness
+  with native display. Historical proof does not satisfy current deployment,
+  provider consent/health or native live readback; record those gates separately.
+
+## 5. Tests, evidence and dependency gates
+
+- Extend existing `ios/LifeOSTests/FinanceInstitutionDetectorTests.swift`,
+  `FinanceStatementImporterTests.swift`, `FinanceImportedTransactionStoreTests.swift`,
+  `FinanceImportViewModelSyncTests.swift` and
+  `FinanceTradeRepublicImportIntegrationTests.swift` for stage 1 and regressions.
+  Keep UUID goldens, currency, encoding, malformed-row/EOF and scan-bound coverage.
+- Add focused recurring detector/store tests for exclusions, grouping, ties,
+  weekly/monthly/yearly cadence, DST/month-end/leap years, scale and durable
+  overrides after restart/reimport/deletion. Test Manage Payment interactions.
+- Add investment importer/store/breakdown tests for schema rejection, exact
+  values, activity classification, reimport, partial valuation and double count;
+  extend `ios/LifeOSTests/FinanceDomainTests.swift` for observed integration.
+- Stage 4 adds contract/API/gateway validation and real reconciliation evidence.
+  For each packet report commands, counts, review verdict and explicit skips;
+  earlier 55/55/build evidence is baseline, not proof for new code.
+- Future Apple lanes require `scripts/maintain_macos_storage.sh` preflight and
+  serialized `xcodebuild -jobs 1` via existing validation lanes. Simulator
+  runtime, physical iPhone, signing and live-provider checks remain separate
+  until observed. This documentation-only update runs no native builds.

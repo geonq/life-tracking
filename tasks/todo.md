@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-16 Europe/Berlin. Release: **NO-GO**. Local and remote `main`
-are clean and equal at `8fde743`; coordination docs record the storage guard
+Updated 2026-09-17 Europe/Berlin. Release: **NO-GO**. Local and remote `main`
+are clean and equal at `c871339`; coordination docs record the storage guard
 and the next finance tranche.
 Track completion separately as
 approximately **70–75% implemented** and **35–45% release-ready**. T12c and
@@ -36,21 +36,22 @@ D1/D2 have Astra Medium source **MERGE** reviews.
 4. Verify iPhone install, App Group/HealthKit, personal signing renewal, and
    the native Shortcut flows.
 5. Resolve Zepp/workout evidence and implement the Obsidian Canvas mind-map
-   plan. Finance must follow market-leader recurring-payment and institution-
-   detection patterns; Robinhood imports must stay separate while feeding
-   verified net worth, with NextSemis as an optional final gate. GitHub issue
-   #2 is closed as the notification thread; its product scope remains in the
-   plan. Use `tasks/finance-execution-plan.md` for the bounded finance packet.
+   plan. The institution-aware finance importer is pushed at `c871339`; next
+   are explicit mapping, market-leader recurring-payment controls, and
+   Robinhood imports kept separate while feeding verified net worth, with
+   NextSemis as an optional final gate. GitHub issue #2 is closed as the
+   notification thread; its product scope remains in the plan.
 6. Run the batched Astra security/product review and close every acceptance
    registry row before changing the release verdict.
 
 ## Verified checkpoint
 
-`8fde743` is the pushed Windows publication/storage checkpoint. The Apple
+`c871339` is the pushed finance provenance/recovery checkpoint after the
+Windows publication/storage checkpoint. The Apple
 storage guard is report/dry-run by default, requires explicit `--apply` for
 deletion, refuses active or uncheckable builds, skips booted simulators,
 preserves the current iPhone 17 simulator, and fails every Apple lane below a
-15 GiB free-space floor. The latest check reported 28.8 GiB free and the
+15 GiB free-space floor. The latest check reported 25.1 GiB free and the
 developer root at 16 GiB. Storage tests are 7 passed plus 2 process-probe
 subtests; the guard and all lane scripts pass `bash -n`.
 

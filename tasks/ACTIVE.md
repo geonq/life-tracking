@@ -1,7 +1,7 @@
 # Active LifeOS full-design execution
 
 Status: IN PROGRESS
-Updated: 2026-09-16
+Updated: 2026-09-17
 Mode: prospective implementation of the complete LifeOS design plan; one verified, publishable tranche at a time.
 
 ## Goal and measurement
@@ -33,11 +33,8 @@ name the concrete gate moved, the evidence produced, and the next dependency.
 - Calendar Tailscale sync/client foundation while preserving peer sync.
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
-- Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint is `a6020d0` plus the uncommitted
-  Windows snapshot/storage candidate; local `main` is one commit ahead of
-  `origin/main`. PR #1 is merged and GitHub issues #2, #3, and #4 are closed;
-  verify issue/PR state before the next push.
+- Fail-closed Finance summary and disabled connector contracts; institution-aware import provenance/recovery is pushed at `c871339`.
+- Current application source checkpoint is `c871339`; local `main` matches `origin/main`. PR #1 is merged and GitHub issues #2, #3, and #4 are closed; verify issue/PR state before the next push.
   The verified Windows candidate is `6baa1f3`; current read-only observation
   has BitLocker protection, stopped `LifeOSAPI`, absent `LifeOSGateway`, and an
   active marker without current stage/recovery/progress at the default backup
@@ -50,7 +47,9 @@ name the concrete gate moved, the evidence produced, and the next dependency.
   macOS snapshot and 1/1 iPhone 17 layout policy test passing.
   Finance responsive hierarchy is committed at `fd8ccfb`, with 16/16 scoped
   Mac snapshots, responsive captures at 900/1200/1512/1800, focused iPhone 17
-  contracts, and an Astra Medium GREEN review.
+  contracts, and an Astra Medium GREEN review. Import provenance/recovery is at
+  `c871339`, with 55/55 Mac logic tests and a successful generic iOS test build
+  after Astra Medium **MERGE** review.
   Shared visual foundation is committed at `5b90539`, with the current compact
   SF Pro/neutral token contract, flat card treatment, composed secondary-control
   contrast checks, settled chart/ring geometry, a successful serialized Mac

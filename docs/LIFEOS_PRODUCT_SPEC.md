@@ -1,6 +1,6 @@
 # LifeOS product and design specification
 
-Updated 2026-09-16 Europe/Berlin. This is the product-level inventory for the
+Updated 2026-09-17 Europe/Berlin. This is the product-level inventory for the
 personal LifeOS installation. It records requested behavior, design decisions,
 security boundaries, and the evidence still required. Implementation details
 and acceptance receipts remain in `tasks/`, `Coordination/`, and
@@ -8,9 +8,9 @@ and acceptance receipts remain in `tasks/`, `Coordination/`, and
 
 ## Release truth
 
-- Release is **NO-GO**. The last pushed checkpoint is `29f8711`; the current
-  finance detector candidate is deliberately unmerged until it compiles,
-  passes focused tests, receives Astra Medium review, and is pushed.
+- Release is **NO-GO**. The last pushed checkpoint is `c871339`; the finance
+  institution detector/importer slice is now pushed after focused tests,
+  serialized native verification, and Astra Medium **MERGE** review.
 - Source, tested, visual, interaction, live-data, and physical-device evidence
   are separate claims. A source implementation is not a product sign-off.
 - The personal product is a native SwiftUI/WidgetKit app for this Mac and
@@ -246,8 +246,8 @@ and acceptance receipts remain in `tasks/`, `Coordination/`, and
 
 ## Current open work
 
-1. Repair and test the institution-aware finance importer candidate, then add
-   user mapping, recurring payment management, Robinhood/net-worth flows.
+1. Add explicit user mapping, recurring payment management, and verified
+   Robinhood/net-worth flows on top of the pushed institution-aware importer.
 2. Re-certify canonical Windows install, listener/health/restart/restore, and
    live Enable Banking readback on GEONQSERVER.
 3. Implement and verify Zepp workout reconciliation, Apple Shortcuts, personal

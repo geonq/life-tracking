@@ -1,6 +1,6 @@
 # LifeOS decisions
 
-Updated 2026-09-16 Europe/Berlin.
+Updated 2026-09-17 Europe/Berlin.
 
 ## Product boundary
 
@@ -29,6 +29,11 @@ Updated 2026-09-16 Europe/Berlin.
   Institution-aware CSV classification and explicit unknown-format mapping are
   required. Recurring candidates are deterministic; uncertain items expose
   auditable weekly/monthly/yearly Manage Payment controls.
+- The pushed finance importer checkpoint `c871339` adds versioned institution
+  fingerprints, fail-closed disabled/near-match handling, historical UUID
+  compatibility, bounded multiline recovery, and content-free provenance.
+  User mapping, recurring management, Robinhood/net-worth reconciliation, and
+  live readback remain separate gates.
 - Robinhood investments remain separate from bank transactions while verified
   holdings/cash contribute to net worth. NextSemis is optional after the direct
   import path is stable.
