@@ -9,10 +9,10 @@ Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. `main` and `origin/main` remain at the last pushed
-  checkpoint `8c1a225` (`Add finance validation and usage provider registry`).
-  The 2026-09-17 native usage registry tranche is present in the working tree
-  and intentionally uncommitted/unpushed for this documentation checkpoint.
+- Release is **NO-GO**. `main` and `origin/main` are at the latest pushed
+  checkpoint `273f4dd774dd7ba9dd5669799a1549bb5dd98181` (`Add provider-neutral
+  native usage watcher`). The 2026-09-17 native usage registry tranche is
+  committed and pushed in that checkpoint.
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
@@ -53,8 +53,9 @@ Keep the release verdict honest; do not call the product done.
   failure handling, Manage Payment ownership, and post-import refresh. The
   serial macOS build-for-testing passed; the latest recurring/import suites are
   56/56, and the final Astra Medium review is **MERGE**.
-- Finance investment validation and the usage provider-registry contract are
-  pushed at `8c1a225`. Robinhood activity import is strict and separate from
+- Finance investment validation is pushed at `8c1a225`; the provider-neutral
+  native usage watcher tranche is pushed at `273f4dd`. Robinhood activity import is
+  strict and separate from
   net-worth evidence; stale FX, incomplete coverage, duplicate economic cash,
   linked-cash overlap, and decoded semantic tampering fail closed. The focused
   macOS finance suite is 21/21 with **TEST SUCCEEDED**. The Usage v2 registry
@@ -62,8 +63,8 @@ Keep the release verdict honest; do not call the product done.
   an official endpoint exists, and keeps Gemini API usage as a separate
   product; contracts typecheck, build, and pass 212/212 tests. Astra Medium
   final review is **MERGE**.
-- Native AI usage watcher registry tranche validated 2026-09-17: provider-
-  neutral presentation, exact connection/window selection, evidence policy,
+- Native AI usage watcher registry tranche pushed at `273f4dd` and validated
+  2026-09-17: provider-neutral presentation, exact connection/window selection, evidence policy,
   preference bounds, atomic conversion failure handling, failure retention,
   and management reset/draft safety are implemented. Legacy GLM/DeepSeek/
   Google AI Studio observations remain visible as `legacyValidated`
@@ -99,10 +100,10 @@ Keep the release verdict honest; do not call the product done.
 
 ## Next action
 
-After this documentation-only checkpoint, commit/push the validated native
-usage registry tranche. Then dispatch the next bounded finance packet for live
-recurring reconciliation and the verified Robinhood/net-worth path. Keep each
-packet reviewed and reflected in these short handoff files.
+Use this pushed checkpoint as the source of truth. Dispatch the next bounded
+finance packet for live recurring reconciliation and the verified
+Robinhood/net-worth path. Keep each packet reviewed and reflected in these
+short handoff files.
 
 ## Blockers
 

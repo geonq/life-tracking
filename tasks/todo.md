@@ -1,10 +1,10 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-17 Europe/Berlin. Release: **NO-GO**. Last pushed source
-checkpoint is `8c1a225`; the validated native AI usage watcher registry tranche
-is present locally and intentionally uncommitted/unpushed for this
-documentation-only checkpoint. It adds provider-neutral presentation over
-the validated v1 transport while preserving truthful provider boundaries.
+Updated 2026-09-17 Europe/Berlin. Release: **NO-GO**. Last pushed source/current
+checkpoint is `273f4dd774dd7ba9dd5669799a1549bb5dd98181` (`Add provider-neutral
+native usage watcher`). The validated native AI usage watcher registry tranche
+is committed and pushed there. It adds provider-neutral presentation over the
+validated v1 transport while preserving truthful provider boundaries.
 Do not use unverified percentage estimates for completion. Acceptance is
 tracked by registry gates and their required live, runtime, device, visual,
 security, and operator evidence.
@@ -43,12 +43,12 @@ security, and operator evidence.
    Robinhood imports kept separate while feeding verified net worth, with
    NextSemis as an optional final gate. GitHub issue #2 is closed as the
    notification thread; its product scope remains in the plan.
-6. Commit/push the validated native AI usage watcher registry tranche. Claude
-   remains supported; Gemini subscription/Google AI Pro and Gemini API remain
-   manual/unsupported boundary rows with no fabricated quota or observations;
-   legacy GLM/DeepSeek/Google AI Studio observations remain visible as
-   `legacyValidated` nonofficial data. Automatic Gemini auth/quota transport
-   and subscription readback remain open.
+6. Close the remaining native usage watcher gates. The pushed registry at
+   `273f4dd` retains Claude support; Gemini subscription/Google AI Pro and
+   Gemini API remain manual/unsupported boundary rows with no fabricated quota
+   or observations; legacy GLM/DeepSeek/Google AI Studio observations remain
+   visible as `legacyValidated` nonofficial data. Automatic Gemini auth/quota
+   transport and subscription readback remain open.
 7. Run the batched Astra security/product review and close every acceptance
    registry row before changing the release verdict.
 
@@ -63,9 +63,9 @@ preserves the current iPhone 17 simulator, and fails every Apple lane below a
 developer root at 16 GiB. Storage tests are 7 passed plus 2 process-probe
 subtests; the guard and all lane scripts pass `bash -n`.
 
-`8c1a225` is the last pushed source checkpoint. The 2026-09-17 native AI
-usage watcher registry tranche is validated in the working tree and remains
-intentionally uncommitted/unpushed for this documentation-only checkpoint.
+`273f4dd774dd7ba9dd5669799a1549bb5dd98181` is the current pushed source
+checkpoint. The 2026-09-17 native AI usage watcher registry tranche is
+committed and pushed there.
 It provides provider-neutral presentation over the validated v1 transport,
 exact connection/window selection, evidence policy, bounded preferences,
 atomic conversion failure handling, failure retention, and management

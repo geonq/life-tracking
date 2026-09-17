@@ -3,9 +3,9 @@
 Updated 2026-09-17 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Last pushed source: `8c1a225` on `main`; the validated native usage registry
-  tranche is present locally and remains uncommitted/unpushed for this
-  documentation-only checkpoint.
+- Last pushed source/current checkpoint: `273f4dd774dd7ba9dd5669799a1549bb5dd98181`
+  (`Add provider-neutral native usage watcher`) on `main`; the validated native
+  usage registry tranche is committed and pushed there.
 - Windows disposable static, legacy Serve, native progress, native snapshot,
   and complete behavior suites pass. Behavior has one installed-service skip;
   canonical deployment remains unverified.
@@ -27,10 +27,11 @@ Updated 2026-09-17 Europe/Berlin.
   serial macOS build-for-testing and recurring/import suites pass 56/56;
   final Astra Medium review returned **MERGE**. Live-bank reconciliation is
   still separate.
-- Finance investment validation and the Usage v2 provider-registry contract
-  are pushed at `8c1a225`. The focused finance suite passes 21/21; contracts
-  typecheck and build cleanly and pass 212/212 tests. Astra Medium returned
-  **MERGE**. The native AI usage watcher registry tranche is now validated:
+- Finance investment validation is pushed at `8c1a225`; the provider-neutral
+  native AI usage watcher registry tranche is pushed at `273f4dd`. The focused
+  finance suite passes 21/21; contracts typecheck and build cleanly and pass
+  212/212 tests. Astra Medium returned **MERGE**. The native AI usage watcher
+  registry tranche is now validated:
   Claude remains supported; Gemini subscription/Google AI Pro and Gemini API
   are honest manual/unsupported boundary rows with no fabricated quota or
   observations; legacy GLM/DeepSeek/Google AI Studio observations remain
@@ -50,9 +51,8 @@ Updated 2026-09-17 Europe/Berlin.
 - Astra Medium reviewed the corrected Windows/storage candidate **MERGE** with
   no blocking source findings. Canonical and concurrent-race evidence remain
   unverified.
-- Next: commit/push the validated native usage registry tranche, then continue
-  live recurring reconciliation and verified Robinhood/net-worth work. Every
-  Apple lane must retain the storage preflight.
+- Next: continue live recurring reconciliation and verified Robinhood/net-worth
+  work. Every Apple lane must retain the storage preflight.
 
 Keep the product boundary: truthful live data, SF Pro, compact Linear/Vercel
 quality, no generic AI, and calorie-photo AI only.
