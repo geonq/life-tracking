@@ -1,6 +1,6 @@
 # Finance execution packet
 
-Updated 2026-09-17 Europe/Berlin. Source checkpoint: `c871339` on
+Updated 2026-09-17 Europe/Berlin. Source checkpoint: `5fe26a4` on
 `main` / `origin/main`. Subordinate to the main release plan; release remains
 **NO-GO** until deployment, live-data, and runtime gates have evidence.
 Execute stages 1–5 in order; stage 5 defines evidence required at every gate.
@@ -32,8 +32,10 @@ Execute stages 1–5 in order; stage 5 defines evidence required at every gate.
 
 ## Current gap and worker contract
 
-Unknown/ambiguous CSV needs explicit user mapping and detection-first UI.
-Recurring candidates/overrides, a separate investment ledger, verified net-worth
+Explicit user mapping, detection-first UI, content-free provenance, account and
+configuration identity, cross-device relabeling, legacy attempted-request
+compatibility, and gateway validation are shipped at `5fe26a4`. Recurring
+candidates/overrides, a separate investment ledger, verified net-worth
 composition, and live reconciliation remain open. `fixedCosts` and merchant
 categorization are not recurring detection; activity is not a valuation.
 
@@ -44,14 +46,16 @@ or push. Keep scope local through stage 3; do not expand gateway schemas early.
 Use truthful observed data, explicit unavailable/partial states, and no fixtures
 in production. No generic in-app AI/advisor; calorie-photo AI is the only AI flow.
 
-## 1. Next bounded packet — mapping and preview
+## 1. Completed packet — mapping, preview, provenance, and identity
 
-Existing scope: `ios/Shared/FinanceStatementImporter.swift`,
+Completed scope: `ios/Shared/FinanceStatementImporter.swift`,
 `ios/Shared/FinanceInstitutionDetector.swift`,
 `ios/Shared/FinanceImportedTransactionStore.swift`, and
 `ios/LifeOS/Modules/Finance/FinanceImportView.swift` (including its
-`FinanceImportViewModel`). Extend existing detection/provenance types; add only
-`ios/Shared/FinanceImportMapping.swift` for the mapping value/persistence contract.
+`FinanceImportViewModel`). The packet extended the existing
+detection/provenance types and added
+`ios/Shared/FinanceImportMapping.swift` for the mapping value/persistence
+contract.
 
 - Preview must use `FinanceImportResult.institutionDetection`, never infer an
   institution from `detectedSource`. Show state, profile/version when verified,
@@ -76,8 +80,13 @@ Existing scope: `ios/Shared/FinanceStatementImporter.swift`,
   unavailable; do not relabel or re-ID stored legacy rows. Version local
   persistence only where needed, with backward-compatible decoding.
 
-Gate: mapping, preview cancellation/staleness, provenance round-trip and old-ID
-regressions pass before recurring work; existing detector profiles stay unchanged.
+Gate passed at `5fe26a4`: mapping, preview cancellation/staleness,
+provenance round-trip, mapped-v3 account/configuration identity, synced-only
+account relabeling, duplicate/reimport fences, and legacy attempted-request
+recovery are covered by the 17/17 Mac finance suite. Mac build-for-testing,
+contracts (199/199), contract typecheck, Swift parse, gateway AST, and diff
+checks pass; the final Astra Medium review returned **MERGE**. Existing
+detector profiles remain unchanged.
 
 ## 2. Recurring candidates — domain, detector, store, UI
 

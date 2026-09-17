@@ -4,13 +4,13 @@ Updated 2026-09-17 Europe/Berlin.
 
 ## Active task
 
-Continue finance work after the pushed institution-detection/importer
-checkpoint. Keep the release verdict honest; do not call the product done.
+Continue finance work after the pushed mapping/identity/recovery checkpoint.
+Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
 - Release is **NO-GO**. `main` and `origin/main` are clean and equal at
-  `c871339` (`Harden finance import provenance and CSV recovery`).
+  `5fe26a4` (`Harden reviewed finance import identity and retries`).
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
@@ -34,6 +34,13 @@ checkpoint. Keep the release verdict honest; do not call the product done.
   DEBUG harnesses cover recovery, EOF, escaped quotes, Unicode whitespace,
   and 256/1024/3000-row scan bounds. Mac logic lane: 55/55 tests passed. The
   generic iOS test build succeeded; simulator execution remains unavailable.
+- Finance mapping/preview, content-free provenance, mapped-v3 account and
+  configuration identity, cross-device account relabeling, deterministic
+  persistence, legacy attempted-request recovery, duplicate/reimport fences,
+  and gateway identity validation are pushed at `5fe26a4`. The bounded Mac
+  finance suite is 17/17; Mac build-for-testing, contracts (199/199), contract
+  typecheck, Swift parse, gateway AST, and diff checks pass. The final Astra
+  Medium review is **MERGE**.
 
 ## Storage policy
 
@@ -49,8 +56,8 @@ checkpoint. Keep the release verdict honest; do not call the product done.
 
 ## Open gates
 
-- Finance user mapping, recurring-payment management, Robinhood/net-worth
-  verification, and live reconciliation.
+- Recurring-payment management, Robinhood/net-worth verification, and live
+  reconciliation.
 - Canonical Windows install/listener/health/Serve/Enable Banking readback.
 - Finance live connector/import/recurring/net-worth work; Zepp workouts;
   Obsidian Canvas round trip; widgets, Shortcuts, signing, physical iPhone.
@@ -59,9 +66,9 @@ checkpoint. Keep the release verdict honest; do not call the product done.
 
 ## Next action
 
-Dispatch the next bounded finance packet for explicit mapping and recurring
-payments, then add the verified Robinhood/net-worth path. Keep each packet
-reviewed, committed, pushed, and reflected in these short handoff files.
+Dispatch the next bounded finance packet for recurring-payment management,
+then add the verified Robinhood/net-worth path. Keep each packet reviewed,
+committed, pushed, and reflected in these short handoff files.
 
 ## Blockers
 

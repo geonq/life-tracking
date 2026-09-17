@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-17 Europe/Berlin. Release: **NO-GO**. Local and remote `main`
-are clean and equal at `c871339`; coordination docs record the storage guard
+are clean and equal at `5fe26a4`; coordination docs record the storage guard
 and the next finance tranche.
 Track completion separately as
 approximately **70–75% implemented** and **35–45% release-ready**. T12c and
@@ -36,8 +36,8 @@ D1/D2 have Astra Medium source **MERGE** reviews.
 4. Verify iPhone install, App Group/HealthKit, personal signing renewal, and
    the native Shortcut flows.
 5. Resolve Zepp/workout evidence and implement the Obsidian Canvas mind-map
-   plan. The institution-aware finance importer is pushed at `c871339`; next
-   are explicit mapping, market-leader recurring-payment controls, and
+   plan. The institution-aware finance importer and mapped identity packet are
+   pushed at `5fe26a4`; next are market-leader recurring-payment controls and
    Robinhood imports kept separate while feeding verified net worth, with
    NextSemis as an optional final gate. GitHub issue #2 is closed as the
    notification thread; its product scope remains in the plan.
@@ -46,7 +46,7 @@ D1/D2 have Astra Medium source **MERGE** reviews.
 
 ## Verified checkpoint
 
-`c871339` is the pushed finance provenance/recovery checkpoint after the
+`5fe26a4` is the pushed finance mapping/identity/recovery checkpoint after the
 Windows publication/storage checkpoint. The Apple
 storage guard is report/dry-run by default, requires explicit `--apply` for
 deletion, refuses active or uncheckable builds, skips booted simulators,
@@ -69,7 +69,8 @@ reviewed GREEN. Fresh SSH readback confirms the canonical marker is still
 active, while the older 31,401-unit/sequence-59,167 receipt is not treated as
 current because the default backup root has no current stage, recovery journal,
 or progress file. LifeOSAPI is stopped and LifeOSGateway is absent.
-The Finance source change is `fd8ccfb`. Calendar hardening is pushed at `8942b8e`; its focused
+The Finance visual source change is `fd8ccfb`. The current finance mapping,
+identity, and recovery checkpoint is `5fe26a4`. Calendar hardening is pushed at `8942b8e`; its focused
 iPhone 17 suite is 107/107 with exit 0 and the macOS production build exits 0.
 Usage visual/source, macOS route, and personal installer security slices have
 source evidence; the Usage focused visual run is 3/3 with seven inspected
