@@ -3,7 +3,7 @@
 Updated 2026-09-17 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Current source: `5fe26a4` on clean, equal local/remote `main`.
+- Current source: `453d304` on clean, equal local/remote `main`.
 - Windows disposable static, legacy Serve, native progress, native snapshot,
   and complete behavior suites pass. Behavior has one installed-service skip;
   canonical deployment remains unverified.
@@ -21,17 +21,21 @@ Updated 2026-09-17 Europe/Berlin.
   finance suite is 17/17; Mac build-for-testing, contracts (199/199),
   contract typecheck, Swift parse, gateway AST, and diff checks pass. Astra
   Medium returned **MERGE**.
+- The local mapped-v3 recurring-payment packet is pushed at `453d304`. Its
+  serial macOS build-for-testing and recurring/import suites pass 56/56;
+  final Astra Medium review returned **MERGE**. Live-bank reconciliation is
+  still separate.
 - Existing reviewed slices cover calendar security, Usage/Finance/Fitness,
   shell/navigation, tax accessibility, installer boundary, and API security.
-- Open: recurring payments, Robinhood/net-worth, canonical Windows
+- Open: live recurring reconciliation, Robinhood/net-worth, canonical Windows
   install/readback, live finance/providers, workouts, Obsidian Canvas,
   widgets/Shortcuts/signing, physical iPhone, whole-app visual and runtime
   acceptance, final security review.
 - Astra Medium reviewed the corrected Windows/storage candidate **MERGE** with
   no blocking source findings. Canonical and concurrent-race evidence remain
   unverified.
-- Next: recurring payments and verified Robinhood/net-worth work; every Apple
-  lane must retain the storage preflight.
+- Next: live recurring reconciliation and verified Robinhood/net-worth work;
+  every Apple lane must retain the storage preflight.
 
 Keep the product boundary: truthful live data, SF Pro, compact Linear/Vercel
 quality, no generic AI, and calorie-photo AI only.

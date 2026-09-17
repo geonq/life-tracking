@@ -1,6 +1,6 @@
 # Finance execution packet
 
-Updated 2026-09-17 Europe/Berlin. Source checkpoint: `5fe26a4` on
+Updated 2026-09-17 Europe/Berlin. Source checkpoint: `453d304` on
 `main` / `origin/main`. Subordinate to the main release plan; release remains
 **NO-GO** until deployment, live-data, and runtime gates have evidence.
 Execute stages 1–5 in order; stage 5 defines evidence required at every gate.
@@ -26,7 +26,8 @@ Execute stages 1–5 in order; stage 5 defines evidence required at every gate.
 - `ios/Shared/FinanceImportedTransaction.swift` and
   `ios/Shared/FinanceImportedTransactionStore.swift` remain the cash/investment-
   order import model and sync store. `ios/Shared/FinanceDomain.swift` has
-  observed accounts/wealth, not a verified Robinhood or recurring-payment model.
+  observed accounts/wealth; recurring metadata is local-only and does not prove
+  live bank support.
 - Enable Banking historical proof exists; deployed/native live readback is
   a separate gate. Trade Republic remains manual import. PayPal is out of scope.
 
@@ -34,10 +35,11 @@ Execute stages 1–5 in order; stage 5 defines evidence required at every gate.
 
 Explicit user mapping, detection-first UI, content-free provenance, account and
 configuration identity, cross-device relabeling, legacy attempted-request
-compatibility, and gateway validation are shipped at `5fe26a4`. Recurring
-candidates/overrides, a separate investment ledger, verified net-worth
-composition, and live reconciliation remain open. `fixedCosts` and merchant
-categorization are not recurring detection; activity is not a valuation.
+compatibility, gateway validation, and local recurring metadata are shipped at
+`453d304`. Live recurring reconciliation, a separate investment ledger,
+verified net-worth composition, and provider readback remain open. `fixedCosts`
+and merchant categorization are not recurring detection; activity is not a
+valuation.
 
 Dispatch one bounded Luna packet at a time with the stage's exact files and
 acceptance tests; Astra Medium reviews each slice before the next dependency
@@ -88,42 +90,30 @@ contracts (199/199), contract typecheck, Swift parse, gateway AST, and diff
 checks pass; the final Astra Medium review returned **MERGE**. Existing
 detector profiles remain unchanged.
 
-## 2. Recurring candidates — domain, detector, store, UI
+## 2. Completed packet — local recurring candidates and Manage Payment
 
-Add `ios/Shared/FinanceRecurringPayment.swift`,
-`ios/Shared/FinanceRecurringPaymentDetector.swift`, and
-`ios/Shared/FinanceRecurringPaymentStore.swift`. Integrate through existing
-`ios/Shared/FinanceCoordinator.swift`, `ios/LifeOS/Modules/Finance/FinanceView.swift`
-and `ios/LifeOS/Modules/Finance/FinanceImportView.swift`; reuse current stores
-as transaction authorities, not duplicate mutable transaction ownership.
+`453d304` adds `FinanceRecurringPayment.swift`,
+`FinanceRecurringPaymentDetector.swift`, `FinanceRecurringPaymentStore.swift`,
+Finance import integration, and focused Mac tests. It is intentionally local and
+mapped-v3 only; it does not claim live-provider support or sync recurring
+overrides.
 
-- Persist candidate identity from source/account/merchant, evidence row IDs,
-  cadence, confidence/reasons, next date, finance timezone and detector version.
-  Prefer provider merchant ID; otherwise fold case/diacritics, whitespace and
-  punctuation deterministically. Never merge across source/account/currency.
-- Exclude income, refunds, typed transfers, investment orders, duplicates and
-  rows without reliable source/account provenance. Ambiguous cases need review.
-- Sort each group once by local finance date; scan a fixed three cadences:
-  weekly 6–8 calendar days; monthly calendar anchor with month-end clamping
-  ±3 days; yearly calendar anchor with leap-day normalization ±3 days.
-  Persist the timezone and original anchor; never advance via fixed seconds
-  or let February clamping drift subsequent dates. DST must not shift cadence.
-- Require at least three occurrences. High confidence requires four or more
-  consistent occurrences and amounts within `max(EUR 1, 5% of median)`;
-  otherwise `needsReview`. Do not silently apply EUR thresholds to FX rows.
-  Rank by match count, date deviation, then fixed weekly/monthly/yearly order;
-  tied evidence remains reviewable. Show supporting dates/amounts and reasons.
-- Target `O(n log n)` time, `O(n)` memory per revision; no all-pairs/subset
-  search. Cache by transaction revision, timezone and detector version;
-  invalidate on relevant edits/deletes and refresh derived UI on override edits.
-- Every candidate has Manage Payment: evidence/source/batch, confidence, next
-  date, active/paused/ignored state and weekly/monthly/yearly cadence override.
-  Persist overrides separately from recomputed evidence using stable identity;
-  detection, reimport and restart must not overwrite them. Clearing an override
-  explicitly returns to detection. Missing evidence is visible, not fabricated.
+- Stable source/account/currency/merchant identity, bounded mapped-row input,
+  evidence references, exclusions, deterministic grouping, and `O(n log n)`
+  scans cover weekly/monthly/yearly cadence and finance-timezone boundaries.
+- Weekly anchors reset after gaps; month-end/leap-day clamping does not drift;
+  repeated 6/8-day drift becomes review-only; later eligible evidence cannot be
+  predicted away. Automatic, pause, ignore, and explicit cadence/anchor
+  overrides remain distinct and durable across reimport/restart.
+- Manage Payment exposes evidence, confidence, next date, state, and override;
+  owner-scoped sheet bindings prevent duplicate presenters. Stale/error state,
+  cancellation generations, post-import refresh, missing evidence, and corrupt
+  store reads remain visible instead of fabricating current data.
+- Serial macOS build-for-testing passed; detector, store, view-model, and
+  import regression suites passed 56/56. Final Astra Medium review: **MERGE**.
 
-Gate: durable overrides and deterministic calendar/evidence/performance tests
-pass; uncertain candidates remain auditable rather than asserted subscriptions.
+Remaining gate: reconcile this local model with real bank observations and
+provider account identity before presenting live recurring payments.
 
 ## 3. Robinhood ledger and verified net worth; then optional NextSemis
 

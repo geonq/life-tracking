@@ -1,8 +1,8 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-17 Europe/Berlin. Release: **NO-GO**. Local and remote `main`
-are clean and equal at `5fe26a4`; coordination docs record the storage guard
-and the next finance tranche.
+are clean and equal at `453d304`; coordination docs record the storage guard
+and the recurring-payment checkpoint.
 Track completion separately as
 approximately **70–75% implemented** and **35–45% release-ready**. T12c and
 D1/D2 have Astra Medium source **MERGE** reviews.
@@ -36,8 +36,8 @@ D1/D2 have Astra Medium source **MERGE** reviews.
 4. Verify iPhone install, App Group/HealthKit, personal signing renewal, and
    the native Shortcut flows.
 5. Resolve Zepp/workout evidence and implement the Obsidian Canvas mind-map
-   plan. The institution-aware finance importer and mapped identity packet are
-   pushed at `5fe26a4`; next are market-leader recurring-payment controls and
+   plan. The institution-aware importer and local recurring-payment controls
+   are pushed at `453d304`; next are live recurring reconciliation and
    Robinhood imports kept separate while feeding verified net worth, with
    NextSemis as an optional final gate. GitHub issue #2 is closed as the
    notification thread; its product scope remains in the plan.
@@ -46,7 +46,7 @@ D1/D2 have Astra Medium source **MERGE** reviews.
 
 ## Verified checkpoint
 
-`5fe26a4` is the pushed finance mapping/identity/recovery checkpoint after the
+`453d304` is the pushed finance recurring/mapping/identity/recovery checkpoint after the
 Windows publication/storage checkpoint. The Apple
 storage guard is report/dry-run by default, requires explicit `--apply` for
 deletion, refuses active or uncheckable builds, skips booted simulators,

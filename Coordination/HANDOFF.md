@@ -4,13 +4,13 @@ Updated 2026-09-17 Europe/Berlin.
 
 ## Active task
 
-Continue finance work after the pushed mapping/identity/recovery checkpoint.
+Continue finance work after the pushed recurring-payment checkpoint.
 Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
 - Release is **NO-GO**. `main` and `origin/main` are clean and equal at
-  `5fe26a4` (`Harden reviewed finance import identity and retries`).
+  `453d304` (`Add reviewed recurring payment controls`).
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
@@ -41,6 +41,11 @@ Keep the release verdict honest; do not call the product done.
   finance suite is 17/17; Mac build-for-testing, contracts (199/199), contract
   typecheck, Swift parse, gateway AST, and diff checks pass. The final Astra
   Medium review is **MERGE**.
+- The local mapped-v3 recurring packet is pushed at `453d304`: bounded
+  weekly/monthly/yearly detection, evidence and overrides, stale/cold/warm
+  failure handling, Manage Payment ownership, and post-import refresh. The
+  serial macOS build-for-testing passed; the latest recurring/import suites are
+  56/56, and the final Astra Medium review is **MERGE**.
 
 ## Storage policy
 
@@ -56,8 +61,8 @@ Keep the release verdict honest; do not call the product done.
 
 ## Open gates
 
-- Recurring-payment management, Robinhood/net-worth verification, and live
-  reconciliation.
+- Live-bank recurring reconciliation, Robinhood/net-worth verification, and
+  provider readback.
 - Canonical Windows install/listener/health/Serve/Enable Banking readback.
 - Finance live connector/import/recurring/net-worth work; Zepp workouts;
   Obsidian Canvas round trip; widgets, Shortcuts, signing, physical iPhone.
@@ -66,7 +71,7 @@ Keep the release verdict honest; do not call the product done.
 
 ## Next action
 
-Dispatch the next bounded finance packet for recurring-payment management,
+Dispatch the next bounded finance packet for live recurring reconciliation,
 then add the verified Robinhood/net-worth path. Keep each packet reviewed,
 committed, pushed, and reflected in these short handoff files.
 
