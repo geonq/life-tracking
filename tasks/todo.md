@@ -1,10 +1,9 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-17 Europe/Berlin. Release: **NO-GO**. Last pushed source/current
-checkpoint is `273f4dd774dd7ba9dd5669799a1549bb5dd98181` (`Add provider-neutral
-native usage watcher`). The validated native AI usage watcher registry tranche
-is committed and pushed there. It adds provider-neutral presentation over the
-validated v1 transport while preserving truthful provider boundaries.
+Updated 2026-09-18 Europe/Berlin. Release: **NO-GO**. Last pushed source/current
+checkpoint is `1956569` (`Add validated live finance readback`). The native AI
+usage watcher registry remains pushed at `273f4dd`; this checkpoint adds the
+validated, bounded finance readback path and source-aware freshness handling.
 Do not use unverified percentage estimates for completion. Acceptance is
 tracked by registry gates and their required live, runtime, device, visual,
 security, and operator evidence.
@@ -39,10 +38,11 @@ security, and operator evidence.
    the native Shortcut flows.
 5. Resolve Zepp/workout evidence and implement the Obsidian Canvas mind-map
    plan. The institution-aware importer and local recurring-payment controls
-   are pushed at `453d304`; next are live recurring reconciliation and
-   Robinhood imports kept separate while feeding verified net worth, with
-   NextSemis as an optional final gate. GitHub issue #2 is closed as the
-   notification thread; its product scope remains in the plan.
+   are pushed at `453d304`; the validated finance readback packet is pushed at
+   `1956569`. Next are live recurring reconciliation and Robinhood imports kept
+   separate while feeding verified net worth, with NextSemis as an optional
+   final gate. GitHub issue #2 is closed as the notification thread; its
+   product scope remains in the plan.
 6. Close the remaining native usage watcher gates. The pushed registry at
    `273f4dd` retains Claude support; Gemini subscription/Google AI Pro and
    Gemini API remain manual/unsupported boundary rows with no fabricated quota
@@ -54,18 +54,27 @@ security, and operator evidence.
 
 ## Verified checkpoint
 
+`1956569` is the current pushed finance live-readback checkpoint after the
+Windows publication/storage checkpoint. It is Astra Medium **MERGE** and the
+controller focused Mac suite passes 25/25; the iOS device SDK
+`build-for-testing` succeeds. It covers bounded content-type-checked parsing,
+recognized source alias canonicalization, exact signed cents, separate live
+bank-cash projection, source/row timestamp aging, and truthful
+consent/failure/cancellation state handling. Simulator execution remains
+blocked by an unavailable CoreSimulatorService.
+
 `453d304` is the pushed finance recurring/mapping/identity/recovery checkpoint after the
 Windows publication/storage checkpoint. The Apple
 storage guard is report/dry-run by default, requires explicit `--apply` for
 deletion, refuses active or uncheckable builds, skips booted simulators,
 preserves the current iPhone 17 simulator, and fails every Apple lane below a
-15 GiB free-space floor. The latest check reported 25.1 GiB free and the
+15 GiB free-space floor. The latest controller check reported 25.5 GiB free and the
 developer root at 16 GiB. Storage tests are 7 passed plus 2 process-probe
 subtests; the guard and all lane scripts pass `bash -n`.
 
-`273f4dd774dd7ba9dd5669799a1549bb5dd98181` is the current pushed source
+`273f4dd774dd7ba9dd5669799a1549bb5dd98181` is the prior usage-watcher source
 checkpoint. The 2026-09-17 native AI usage watcher registry tranche is
-committed and pushed there.
+committed and pushed there; `1956569` is the current source checkpoint.
 It provides provider-neutral presentation over the validated v1 transport,
 exact connection/window selection, evidence policy, bounded preferences,
 atomic conversion failure handling, failure retention, and management

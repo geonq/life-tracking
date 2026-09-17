@@ -1,17 +1,17 @@
 # PHASE STATUS — LifeOS
 
-Updated 2026-09-17 Europe/Berlin.
+Updated 2026-09-18 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Last pushed source/current checkpoint: `273f4dd774dd7ba9dd5669799a1549bb5dd98181`
-  (`Add provider-neutral native usage watcher`) on `main`; the validated native
-  usage registry tranche is committed and pushed there.
+- Last pushed source/current checkpoint: `1956569` (`Add validated live finance
+  readback`) on `main`; the provider-neutral native usage registry remains at
+  `273f4dd`.
 - Windows disposable static, legacy Serve, native progress, native snapshot,
   and complete behavior suites pass. Behavior has one installed-service skip;
   canonical deployment remains unverified.
 - Local source harness is 75 passed/2 skipped. Native C# compile has 0 errors.
-- Storage guard/tests pass; free space is 25.1 GiB. Only iPhone 17 remains as a
-  shutdown simulator; derived data and stale device support were removed.
+- Storage guard/tests pass; the latest controller preflight reports 25.5 GiB
+  free. CoreSimulatorService is unavailable and no simulator is booted.
 - Apple lanes check storage before every lane and serialize xcodebuild.
 - Finance institution detection/importer is pushed and Astra Medium reviewed
   **MERGE**. Native Mac logic is 55/55; generic iOS test build succeeds;
@@ -41,6 +41,13 @@ Updated 2026-09-17 Europe/Berlin.
   registry/coordinator tests pass 14/14 in the elevated lane; Mac compile and
   iPhone device SDK build pass. iOS simulator build remains environment-
   blocked because no runtime is available and `simdiskimaged` is unhealthy.
+- Validated live finance readback is pushed at `1956569` and Astra Medium
+  reviewed **MERGE**. Controller evidence: the focused macOS finance suite is
+  **25/25 passed** and the iOS device SDK `build-for-testing` succeeded. The
+  packet covers bounded readback parsing, source alias canonicalization, exact
+  cents, bank-cash separation, source/row timestamp aging, and
+  consent/failure/cancellation precedence. Simulator execution remains
+  environment-blocked.
 - Existing reviewed slices cover calendar security, Usage/Finance/Fitness,
   shell/navigation, tax accessibility, installer boundary, and API security.
 - Open: live recurring reconciliation, Robinhood/net-worth, canonical Windows
@@ -51,7 +58,8 @@ Updated 2026-09-17 Europe/Berlin.
 - Astra Medium reviewed the corrected Windows/storage candidate **MERGE** with
   no blocking source findings. Canonical and concurrent-race evidence remain
   unverified.
-- Next: continue live recurring reconciliation and verified Robinhood/net-worth
+- Next: implement the reviewed Gemini manual-reading/connection-actions packet,
+  then continue live recurring reconciliation and verified Robinhood/net-worth
   work. Every Apple lane must retain the storage preflight.
 
 Keep the product boundary: truthful live data, SF Pro, compact Linear/Vercel

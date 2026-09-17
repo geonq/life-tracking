@@ -1,6 +1,6 @@
 # HANDOFF — LifeOS native app
 
-Updated 2026-09-17 Europe/Berlin.
+Updated 2026-09-18 Europe/Berlin.
 
 ## Active task
 
@@ -10,9 +10,9 @@ Keep the release verdict honest; do not call the product done.
 ## Current truth
 
 - Release is **NO-GO**. `main` and `origin/main` are at the latest pushed
-  checkpoint `273f4dd774dd7ba9dd5669799a1549bb5dd98181` (`Add provider-neutral
-  native usage watcher`). The 2026-09-17 native usage registry tranche is
-  committed and pushed in that checkpoint.
+  checkpoint `1956569` (`Add validated live finance readback`). The native
+  usage registry remains pushed at `273f4dd`; the finance checkpoint adds the
+  bounded live readback path and source-aware freshness reconciliation.
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
@@ -34,9 +34,10 @@ Keep the release verdict honest; do not call the product done.
   partial 1177 recovery, and zero/one/multiple preserved-path diagnostics.
 - Local deployment source harness: 75 passed, 2 environment skips. Native C#
   extraction/build: 0 errors, 31 nullable/platform warnings.
-- Storage tests: 7 passed, 2 subtests. `bash -n` passes. Storage check reports
-  25.1 GiB free, 16 GiB Developer root, 11 GiB device support, and one kept
-  shutdown iPhone 17 simulator.
+- Storage tests: 7 passed, 2 subtests. `bash -n` passes. The latest controller
+  preflight reports 25.5 GiB free, 11 GiB Developer root, and 710 MiB global
+  DerivedData. CoreSimulatorService is unavailable, so no simulator is kept
+  booted.
 - Finance detector/importer: focused Astra Medium review **MERGE**; optimized
   DEBUG harnesses cover recovery, EOF, escaped quotes, Unicode whitespace,
   and 256/1024/3000-row scan bounds. Mac logic lane: 55/55 tests passed. The
@@ -72,6 +73,14 @@ Keep the release verdict honest; do not call the product done.
   passed** in the elevated lane; Mac compile passed; iPhone device SDK build
   passed. The iOS simulator build is environment-blocked because no runtime
   is available and `simdiskimaged` is unhealthy.
+- Validated live finance readback is pushed at `1956569` and reviewed by Astra
+  Medium **MERGE**. The packet canonicalizes recognized bank aliases before
+  grouping, uses bounded content-type-checked readback parsing, keeps exact
+  signed cents, separates current bank cash from non-live imports, preserves
+  consent/failure/cancellation precedence, and ages account, transaction,
+  wealth, metric, and row provenance timestamps. Controller evidence is
+  macOS focused finance **25/25 passed** and iOS device SDK
+  `build-for-testing` succeeded. Simulator execution remains unavailable.
 
 ## Storage policy
 
@@ -101,9 +110,9 @@ Keep the release verdict honest; do not call the product done.
 ## Next action
 
 Use this pushed checkpoint as the source of truth. Dispatch the next bounded
-finance packet for live recurring reconciliation and the verified
-Robinhood/net-worth path. Keep each packet reviewed and reflected in these
-short handoff files.
+Gemini manual-reading/connection-actions packet, then continue live recurring
+reconciliation and the verified Robinhood/net-worth path. Keep each packet
+reviewed and reflected in these short handoff files.
 
 ## Blockers
 
