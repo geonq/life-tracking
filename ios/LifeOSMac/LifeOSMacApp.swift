@@ -783,6 +783,7 @@ struct LifeOSMacRootView: View {
     private func financeDetail(for route: LifeOSMacRouteState, interactive: Bool) -> some View {
         FinanceView(
             summary: financeCoordinator.summary,
+            readback: financeCoordinator.readback,
             usesVisualFixtures: usesVisualFixtures,
             initialDetail: Self.financeDetailRoute(for: route.route),
             onOpenConnections: interactive ? { navigate(to: .settings) } : nil,

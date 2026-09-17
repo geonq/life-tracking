@@ -13,7 +13,12 @@ public protocol FinanceSummaryFetching: Sendable {
     func fetchFinanceSummary() async throws -> FinanceSummary
 }
 
+public protocol FinanceReadbackFetching: Sendable {
+    func fetchFinanceReadback() async throws -> FinanceReadbackResult
+}
+
 extension TailscaleSyncClient: FinanceSummaryFetching {}
+extension TailscaleSyncClient: FinanceReadbackFetching {}
 
 @available(iOS 17.0, macOS 14.0, *)
 @MainActor
@@ -23,32 +28,51 @@ public final class FinanceCoordinator: ObservableObject {
     /// existing cases so unrelated views do not need to change.
     @Published public private(set) var observationState: FinanceObservationState
     @Published public private(set) var summary: FinanceSummary?
+    @Published public private(set) var readback: FinanceReadback?
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var lastUpdated: Date?
 
     private let fetchSummary: @Sendable () async throws -> FinanceSummary
+    private let fetchReadback: (@Sendable () async throws -> FinanceReadbackResult)?
     private let staleAfter: TimeInterval
+    private let clock: @Sendable () -> Date
     private var refreshTask: Task<Void, Never>?
     private var refreshGeneration = 0
+    private var lastSettledRefreshFailureMessage: String?
 
     public init(
         client: FinanceSummaryFetching = TailscaleSyncClient(),
         staleAfter: TimeInterval = 15 * 60,
         initialSummary: FinanceSummary? = nil,
-        initialState: FinanceLoadState? = nil
+        initialState: FinanceLoadState? = nil,
+        initialReadback: FinanceReadback? = nil,
+        clock: @escaping @Sendable () -> Date = { .now }
     ) {
         self.fetchSummary = { try await client.fetchFinanceSummary() }
+        if let readbackClient = client as? any FinanceReadbackFetching {
+            self.fetchReadback = { try await readbackClient.fetchFinanceReadback() }
+        } else {
+            self.fetchReadback = nil
+        }
         self.staleAfter = staleAfter
+        self.clock = clock
         self.summary = initialSummary
+        self.readback = initialReadback
         self.lastUpdated = initialSummary?.generatedAt
+        self.lastSettledRefreshFailureMessage = nil
+        let initialNow = clock()
         self.state = Self.initialState(
             for: initialSummary,
+            readback: initialReadback,
             requested: initialState,
+            now: initialNow,
             staleAfter: staleAfter
         )
         self.observationState = Self.initialObservationState(
             for: initialSummary,
+            readback: initialReadback,
             requested: initialState,
+            now: initialNow,
             staleAfter: staleAfter
         )
     }
@@ -57,20 +81,31 @@ public final class FinanceCoordinator: ObservableObject {
         fetch: @escaping @Sendable () async throws -> FinanceSummary,
         staleAfter: TimeInterval = 15 * 60,
         initialSummary: FinanceSummary? = nil,
-        initialState: FinanceLoadState? = nil
+        initialState: FinanceLoadState? = nil,
+        initialReadback: FinanceReadback? = nil,
+        clock: @escaping @Sendable () -> Date = { .now }
     ) {
         self.fetchSummary = fetch
+        self.fetchReadback = nil
         self.staleAfter = staleAfter
+        self.clock = clock
         self.summary = initialSummary
+        self.readback = initialReadback
         self.lastUpdated = initialSummary?.generatedAt
+        self.lastSettledRefreshFailureMessage = nil
+        let initialNow = clock()
         self.state = Self.initialState(
             for: initialSummary,
+            readback: initialReadback,
             requested: initialState,
+            now: initialNow,
             staleAfter: staleAfter
         )
         self.observationState = Self.initialObservationState(
             for: initialSummary,
+            readback: initialReadback,
             requested: initialState,
+            now: initialNow,
             staleAfter: staleAfter
         )
     }
@@ -95,11 +130,20 @@ public final class FinanceCoordinator: ObservableObject {
             }
             do {
                 try Task.checkCancellation()
-                let fetched = try await self.fetchSummary()
+                let fetched: FinanceSummary
+                let fetchedReadback: FinanceReadback?
+                if let fetchReadback = self.fetchReadback {
+                    let result = try await fetchReadback()
+                    fetched = result.summary
+                    fetchedReadback = result.readback
+                } else {
+                    fetched = try await self.fetchSummary()
+                    fetchedReadback = nil
+                }
                 try Task.checkCancellation()
                 await MainActor.run {
                     guard generation == self.refreshGeneration else { return }
-                    self.apply(fetched)
+                    self.apply(fetched, readback: fetchedReadback)
                 }
             } catch is CancellationError {
                 // A newer refresh or lifecycle cancellation owns the next truthful state.
@@ -121,29 +165,62 @@ public final class FinanceCoordinator: ObservableObject {
         refreshGeneration &+= 1
         refreshTask?.cancel()
         refreshTask = nil
-        errorMessage = nil
+
+        // A failed refresh is already a published observation. Cancellation
+        // must not turn that failure into a quiet cached state. Keep this
+        // separate from the transient loading state because a retry clears
+        // the published error before the next request settles.
+        let settledFailureMessage = lastSettledRefreshFailureMessage
+            ?? (observationState == .error ? "Finance data unavailable" : nil)
 
         if state == .demo {
             return
         }
         state = hasObservedSummary ? .stale : .unavailable
-        observationState = summary?.financeAssessment(staleAfter: staleAfter).state ?? .unavailable
+        if let settledFailureMessage {
+            errorMessage = settledFailureMessage
+            observationState = .error
+            return
+        }
+
+        errorMessage = nil
+        let now = clock()
+        observationState = summary.map {
+            Self.reconciledObservationState(
+                for: $0,
+                readback: readback,
+                now: now,
+                staleAfter: staleAfter
+            )
+        } ?? .unavailable
     }
 
     public func retry() async {
         await refresh()
     }
 
-    private func apply(_ fetched: FinanceSummary) {
+    private func apply(_ fetched: FinanceSummary, readback: FinanceReadback?) {
+        lastSettledRefreshFailureMessage = nil
         summary = fetched
+        self.readback = readback
         lastUpdated = fetched.generatedAt
-        state = Self.observationState(for: fetched, now: .now, staleAfter: staleAfter)
-        observationState = fetched.financeAssessment(staleAfter: staleAfter).state
+        let now = clock()
+        let summaryState = Self.observationState(for: fetched, now: now, staleAfter: staleAfter)
+        let currentObservationState = Self.reconciledObservationState(
+            for: fetched,
+            readback: readback,
+            now: now,
+            staleAfter: staleAfter
+        )
+        state = Self.loadState(for: currentObservationState, fallback: summaryState)
+        observationState = currentObservationState
         errorMessage = state == .unavailable ? "Finance data unavailable" : nil
     }
 
     private func fail() {
-        errorMessage = "Finance data unavailable"
+        let message = "Finance data unavailable"
+        lastSettledRefreshFailureMessage = message
+        errorMessage = message
         observationState = .error
         state = hasObservedSummary ? .stale : .unavailable
     }
@@ -155,22 +232,105 @@ public final class FinanceCoordinator: ObservableObject {
 
     private static func initialState(
         for summary: FinanceSummary?,
+        readback: FinanceReadback?,
         requested: FinanceLoadState?,
+        now: Date,
         staleAfter: TimeInterval
     ) -> FinanceLoadState {
         if requested == .demo { return .demo }
         guard let summary else { return requested == .loading ? .loading : .unavailable }
-        return observationState(for: summary, now: .now, staleAfter: staleAfter)
+        let fallback = observationState(for: summary, now: now, staleAfter: staleAfter)
+        let currentObservationState = reconciledObservationState(
+            for: summary,
+            readback: readback,
+            now: now,
+            staleAfter: staleAfter
+        )
+        return loadState(for: currentObservationState, fallback: fallback)
     }
 
     private static func initialObservationState(
         for summary: FinanceSummary?,
+        readback: FinanceReadback?,
         requested: FinanceLoadState?,
+        now: Date,
         staleAfter: TimeInterval
     ) -> FinanceObservationState {
         if requested == .demo { return .demo }
         guard let summary else { return requested == .loading ? .loading : .unavailable }
-        return summary.financeAssessment(staleAfter: staleAfter).state
+        return reconciledObservationState(
+            for: summary,
+            readback: readback,
+            now: now,
+            staleAfter: staleAfter
+        )
+    }
+
+    /// Re-evaluates a cached readback against the current summary timestamps.
+    /// The readback's consent/unavailable and stale decisions remain explicit;
+    /// observed and partial values are downgraded when the summary or any
+    /// source provenance has crossed the coordinator's freshness boundary.
+    private static func reconciledObservationState(
+        for summary: FinanceSummary,
+        readback: FinanceReadback?,
+        now: Date,
+        staleAfter: TimeInterval
+    ) -> FinanceObservationState {
+        let assessmentState = summary.financeAssessment(now: now, staleAfter: staleAfter).state
+        let timestampState = observationState(for: summary, now: now, staleAfter: staleAfter)
+
+        func applyingTimestampState(to state: FinanceObservationState) -> FinanceObservationState {
+            switch timestampState {
+            case .stale:
+                return .stale
+            case .unavailable:
+                return .unavailable
+            case .observed:
+                return state
+            case .demo, .loading:
+                return state
+            }
+        }
+
+        guard let readback else {
+            return applyingTimestampState(to: assessmentState)
+        }
+
+        switch readback.assessment.availability {
+        case .unavailable:
+            return .unavailable
+        case .stale:
+            return .stale
+        case .partial:
+            return applyingTimestampState(to: assessmentState == .stale ? .stale : .partial)
+        case .observed:
+            switch assessmentState {
+            case .observed: return applyingTimestampState(to: .observed)
+            case .partial: return applyingTimestampState(to: .partial)
+            case .stale: return .stale
+            case .unavailable: return .unavailable
+            case .demo, .loading, .error:
+                // FinanceSummary.financeAssessment does not produce these
+                // transient states, but never let an unavailable timestamp
+                // state turn a cached summary into an observed value.
+                return applyingTimestampState(to: .unavailable)
+            }
+        }
+    }
+
+    private static func loadState(
+        for observationState: FinanceObservationState?,
+        fallback: FinanceLoadState
+    ) -> FinanceLoadState {
+        switch observationState {
+        case .some(.stale): return .stale
+        case .some(.unavailable): return .unavailable
+        case .some(.loading): return .loading
+        case .some(.demo): return .demo
+        case .some(.partial), .some(.observed): return fallback == .stale ? .stale : .observed
+        case .some(.error): return fallback == .unavailable ? .unavailable : .stale
+        case .none: return fallback
+        }
     }
 
     private static func observationState(
@@ -198,6 +358,9 @@ public final class FinanceCoordinator: ObservableObject {
                 return $0.provenance.freshness == .stale
                     || $0.provenance.connectorState == .refreshDue
                     || now.timeIntervalSince($0.provenance.observedAt) >= staleAfter
+                    || ($0.transactions ?? []).contains(where: { row in
+                        provenanceIsStale(row.provenance, now: now, staleAfter: staleAfter)
+                    })
             } ?? false)
             || (summary.accounts.map {
                 guard hasObservedAccounts(in: summary) else { return false }

@@ -763,6 +763,7 @@ private struct LifeOSIOSSceneRoot: View {
         case .finance:
             FinanceView(
                 summary: financeCoordinator.summary,
+                readback: financeCoordinator.readback,
                 usesVisualFixtures: usesVisualFixtures,
                 initialDetail: financeDetailRoute,
                 onOpenConnections: { navigate(.settings) },

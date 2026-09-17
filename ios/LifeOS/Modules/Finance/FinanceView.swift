@@ -319,6 +319,7 @@ enum FinancePointSelectionPolicy {
 /// only from a visual-review entry point; that path is labelled throughout the screen.
 public struct FinanceView: View {
     private let summary: FinanceSummary?
+    private let readback: FinanceReadback?
     private let transactions: [FinanceTransactionObservation]?
     private let usesVisualFixtures: Bool
     private let initialDetail: FinanceDetailRoute?
@@ -396,6 +397,7 @@ public struct FinanceView: View {
     /// chart-selection model used by the view.
     public init(
         summary: FinanceSummary? = nil,
+        readback: FinanceReadback? = nil,
         transactions: [FinanceTransactionObservation]? = nil,
         usesVisualFixtures: Bool = false,
         initialDetail: FinanceDetailRoute? = nil,
@@ -407,6 +409,7 @@ public struct FinanceView: View {
         presentationState: FinancePresentationState? = nil
     ) {
         self.summary = summary
+        self.readback = readback
         self.transactions = transactions
         self.usesVisualFixtures = usesVisualFixtures
         self.initialDetail = initialDetail
@@ -432,6 +435,7 @@ public struct FinanceView: View {
     public var body: some View {
         let snapshot = FinanceDisplaySnapshot(
             summary: summary,
+            readback: readback,
             transactions: transactions,
             usesVisualFixtures: usesVisualFixtures,
             observationState: requestedObservationState ?? (summary == nil && onRefresh != nil ? .loading : nil),
@@ -535,6 +539,7 @@ public struct FinanceView: View {
                                         FinanceStateNotice(snapshot: snapshot, onRefresh: onRefresh)
                                         FinanceHeroCard(snapshot: snapshot, isStacked: isStacked)
                                         FinanceSummaryMetricStrip(snapshot: snapshot)
+                                        FinanceBankCashCard(snapshot: snapshot)
                                     }
                                 }
 
@@ -941,15 +946,18 @@ public struct FinanceView: View {
             // enough real history exists to project from.
             let netWorthPoints = snapshot.points(for: .netWorth, range: selectedRange)
             FinanceDetailChartCard(
-                title: "Net worth",
-                subtitle: "Balance trend",
-                metric: snapshot.netWorth,
+                title: "Bank cash",
+                subtitle: "Observed EUR balances · investments excluded",
+                metric: snapshot.isDemo ? snapshot.netWorth : FinanceDisplayMetric(
+                    cents: snapshot.bankCash.totalCents,
+                    detail: snapshot.bankCash.detailText
+                ),
                 points: netWorthPoints,
                 selectedPoint: $presentationState.selectedNetWorthPoint,
                 isDemo: snapshot.isDemo,
                 availabilityIdentity: "\(selectedDetail.rawValue)|\(selectedRange.rawValue)",
                 chartState: snapshot.chartState(for: .netWorth, range: selectedRange),
-                emptyDetail: "Net-worth history is not available from the current Finance contract.",
+                emptyDetail: "A bank-cash subtotal is shown only when current EUR account balances are source-backed. Complete personal net worth needs a separate holdings observation.",
                 showMaxAction: selectedRange == .max ? nil : { selectedRange = .max },
                 projection: Self.wealthProjection(from: snapshot.netWorthPoints)
             )
@@ -1091,6 +1099,9 @@ public struct FinanceView: View {
             observationState: snapshot.observationState,
             sourceDisclosure: snapshot.sourceDisclosure,
             netWorthCents: snapshot.netWorth.cents,
+            bankCashCents: snapshot.bankCash.totalCents,
+            bankCashAvailability: snapshot.bankCash.availability,
+            bankCashExclusionCount: snapshot.bankCash.exclusions.count,
             accountsCount: snapshot.accounts.count,
             hasObservedValue: snapshot.hasObservedValue,
             transactionTotalsAvailable: snapshot.transactionTotalsAvailable
@@ -1136,6 +1147,9 @@ internal struct FinanceDisplayTruth: Equatable {
     let observationState: FinanceObservationState
     let sourceDisclosure: String
     let netWorthCents: Int?
+    let bankCashCents: Int?
+    let bankCashAvailability: FinanceBankCashProjectionAvailability
+    let bankCashExclusionCount: Int
     let accountsCount: Int
     let hasObservedValue: Bool
     let transactionTotalsAvailable: Bool
@@ -1365,8 +1379,8 @@ private struct FinanceHeroCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .flatCard(featured: true)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Total across accounts")
-        .accessibilityValue("\(snapshot.netWorth.accessibilityValue). Accounts \(snapshot.accounts.isEmpty ? "not available" : "\(snapshot.accounts.count) connected"). Updated \(snapshot.updatedLabel).")
+        .accessibilityLabel(snapshot.isDemo ? "Total across accounts" : "Bank cash subtotal")
+        .accessibilityValue("\(snapshot.isDemo ? snapshot.netWorth.accessibilityValue : snapshot.bankCash.accessibilityValue). Accounts \(snapshot.accounts.isEmpty ? "not available" : "\(snapshot.accounts.count) connected"). Updated \(snapshot.updatedLabel).")
     }
 
     private var wideComposition: some View {
@@ -1392,16 +1406,16 @@ private struct FinanceHeroCard: View {
 
     private var heroSummary: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("Total across accounts")
+            Text(snapshot.isDemo ? "Total across accounts" : "Bank cash subtotal")
                 .lifeOSTypography(.metadata, weight: .semibold)
                 .foregroundStyle(LifeOSTokens.secondaryText)
-            Text(snapshot.netWorth.valueText)
+            Text(snapshot.isDemo ? snapshot.netWorth.valueText : FinanceCurrencyFormatter.euro(cents: snapshot.bankCash.totalCents))
                 .lifeOSTypography(.metric)
                 .tracking(-0.3)
                 .numericTransition()
-            Text(snapshot.netWorth.detail)
+            Text(snapshot.isDemo ? snapshot.netWorth.detail : snapshot.bankCash.detailText)
                 .lifeOSTypography(.metadata)
-                .foregroundStyle(snapshot.netWorth.isUnavailable ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
+                .foregroundStyle(snapshot.isDemo || snapshot.bankCash.totalCents != nil ? LifeOSTokens.tertiaryText : LifeOSTokens.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -1439,7 +1453,9 @@ private struct FinanceHeroCard: View {
 
     @ViewBuilder
     private var heroAccessory: some View {
-        if snapshot.netWorth.isUnavailable {
+        if !snapshot.isDemo && snapshot.bankCash.totalCents == nil {
+            UnavailableMetricMark(label: snapshot.bankCash.availability.label)
+        } else if snapshot.netWorth.isUnavailable {
             UnavailableMetricMark(label: "Not available")
         } else if snapshot.netWorthPoints.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
@@ -1517,6 +1533,74 @@ private struct FinanceSummaryMetricCell: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
         .accessibilityValue("\(metric.accessibilityValue). \(metric.detail)")
+    }
+}
+
+private struct FinanceBankCashCard: View {
+    let snapshot: FinanceDisplaySnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            FinanceSectionHeader(
+                title: "Bank cash",
+                subtitle: "Source-backed EUR balances · investments excluded",
+                icon: .bankConnections,
+                accent: LifeOSTokens.Module.finance
+            )
+
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(snapshot.isDemo
+                     ? snapshot.netWorth.valueText
+                     : FinanceCurrencyFormatter.euro(cents: snapshot.bankCash.totalCents))
+                    .lifeOSTypography(.cardTitle, weight: .semibold)
+                    .monospacedDigit()
+                    .foregroundStyle(snapshot.isDemo || snapshot.bankCash.totalCents != nil
+                                     ? LifeOSTokens.primaryText
+                                     : LifeOSTokens.tertiaryText)
+                Spacer(minLength: 8)
+                Text(snapshot.isDemo ? "Demo · not live" : snapshot.bankCash.availability.label)
+                    .lifeOSTypography(.metadata, weight: .semibold)
+                    .foregroundStyle(snapshot.isDemo ? LifeOSTokens.warning : financeStatusColor)
+            }
+
+            if snapshot.isDemo {
+                Text("Visual fixture only; no bank source is connected.")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            } else {
+                HStack(spacing: 8) {
+                    Text(snapshot.bankCash.detailText)
+                    if !snapshot.bankCash.includedAccounts.isEmpty {
+                        Text("·")
+                        Text("\(snapshot.bankCash.includedAccounts.count) included")
+                    }
+                    if !snapshot.bankCash.exclusions.isEmpty {
+                        Text("·")
+                        Text("\(snapshot.bankCash.exclusions.count) excluded")
+                    }
+                }
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .lineLimit(2)
+            }
+        }
+        .padding(LifeOSTokens.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .flatCard()
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Bank cash subtotal")
+        .accessibilityValue(snapshot.isDemo
+                            ? "Demo fixture, not live"
+                            : "\(snapshot.bankCash.accessibilityValue). \(snapshot.bankCash.detailText)")
+        .accessibilityIdentifier("finance-bank-cash")
+    }
+
+    private var financeStatusColor: Color {
+        switch snapshot.bankCash.availability {
+        case .observed: return LifeOSTokens.success
+        case .partial, .stale: return LifeOSTokens.warning
+        case .unavailable: return LifeOSTokens.tertiaryText
+        }
     }
 }
 
@@ -3483,6 +3567,10 @@ struct FinanceDisplaySnapshot {
     let hasReviewedSource: Bool
     let transactionTotalsAvailable: Bool
     let netWorth: FinanceDisplayMetric
+    /// The live UI uses this typed projection for the account-only subtotal.
+    /// `netWorth` remains as a compatibility seam for existing chart tests.
+    let bankCash: FinanceBankCashProjection
+    let readback: FinanceReadback?
     let spent: FinanceDisplayMetric
     let spendBudget: FinanceDisplayMetric
     let cashFlow: FinanceDisplayMetric
@@ -3507,6 +3595,7 @@ struct FinanceDisplaySnapshot {
 
     init(
         summary: FinanceSummary?,
+        readback: FinanceReadback? = nil,
         transactions suppliedTransactions: [FinanceTransactionObservation]?,
         usesVisualFixtures: Bool,
         observationState requestedObservationState: FinanceObservationState? = nil,
@@ -3592,6 +3681,12 @@ struct FinanceDisplaySnapshot {
         netWorth = Self.overflowCheckedAccountTotal(accountObservations).map {
             FinanceDisplayMetric(cents: $0, detail: "Observed account balances")
         } ?? .unavailable("Not available")
+        self.readback = readback
+        self.bankCash = FinanceBankCashProjection.project(
+            summary: summary,
+            readback: readback,
+            requestedState: requestedObservationState
+        )
         categories = transactionTotals.map { Self.displayCategories(from: $0.categoryObservations) } ?? []
         incomeCategories = transactionTotals.map { Self.displayCategories(from: $0.incomeCategoryObservations) } ?? []
         wealth = summary?.wealth
@@ -3770,6 +3865,8 @@ struct FinanceDisplaySnapshot {
         transactionTotalsAvailable: Bool,
         hasReviewedSource: Bool,
         netWorth: FinanceDisplayMetric,
+        bankCash: FinanceBankCashProjection = .unavailable(reason: .missingAccountSnapshot),
+        readback: FinanceReadback? = nil,
         spent: FinanceDisplayMetric,
         spendBudget: FinanceDisplayMetric,
         cashFlow: FinanceDisplayMetric,
@@ -3801,6 +3898,8 @@ struct FinanceDisplaySnapshot {
         self.hasReviewedSource = hasReviewedSource
         self.transactionTotalsAvailable = transactionTotalsAvailable
         self.netWorth = netWorth
+        self.bankCash = bankCash
+        self.readback = readback
         self.spent = spent
         self.spendBudget = spendBudget
         self.cashFlow = cashFlow

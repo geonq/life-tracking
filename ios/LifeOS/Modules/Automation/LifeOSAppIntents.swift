@@ -100,6 +100,7 @@ struct LifeOSAutomationDependencies: Sendable {
     var now: @Sendable () -> Date
     var isMac: Bool
     var refreshHealthKit: (@Sendable () async throws -> LifeOSAutomationHealthRefreshState)? = nil
+    var fetchFinanceReadback: (@Sendable () async throws -> FinanceReadbackResult)? = nil
 
     static func fixturesEnabled(arguments: [String], environment: [String: String]) -> Bool {
         arguments.contains("-LifeOSVisualFixtures") || environment["LIFEOS_VISUAL_FIXTURES"] == "1"
@@ -123,7 +124,8 @@ struct LifeOSAutomationDependencies: Sendable {
             }(),
             refreshHealthKit: {
                 try await LifeOSAutomationRefreshRegistry.shared.refreshHealth()
-            }
+            },
+            fetchFinanceReadback: { try await client.fetchFinanceReadback() }
         )
     }
 }
@@ -196,9 +198,15 @@ enum LifeOSAutomationStatus {
         let banking: Step
         if configured {
             do {
-                let summary = try await dependencies.fetchFinance()
+                let state: FinanceObservationState
+                if let fetchFinanceReadback = dependencies.fetchFinanceReadback {
+                    let result = try await fetchFinanceReadback()
+                    state = result.readback.assessment.availability.observationState
+                } else {
+                    let summary = try await dependencies.fetchFinance()
+                    state = summary.financeAssessment(now: dependencies.now(), staleAfter: 15 * 60).state
+                }
                 try Task.checkCancellation()
-                let state = summary.financeAssessment(now: dependencies.now(), staleAfter: 15 * 60).state
                 let status: LifeOSAutomationReport.Status
                 switch state {
                 case .observed: status = .success

@@ -842,13 +842,43 @@ public actor TailscaleSyncClient {
     /// directly owns `/finance/summary` and normalizes the provider response;
     /// the phone never talks to the provider or receives bank credentials.
     public func fetchFinanceSummary() async throws -> FinanceSummary {
+        // Keep the legacy return type while routing every summary caller
+        // through the bounded response envelope and readback validation.
+        try await fetchFinanceReadback().summary
+    }
+
+    /// Reads the compatibility summary and retains the gateway's validated
+    /// response metadata. This is the only native path that exposes finance
+    /// freshness/coverage headers to the coordinator; the existing summary
+    /// method remains unchanged for older callers.
+    public func fetchFinanceReadback() async throws -> FinanceReadbackResult {
         let url = try baseURL().appendingPathComponent("finance").appendingPathComponent("summary")
-        let data = try await Self.performBoundedReadOnly(
+        let (data, response) = try await Self.performBoundedReadOnlyResponse(
             session: financeSession,
             request: request(url: url),
             maximumBytes: Self.maximumReadOnlyResponseBytes
         )
-        return try FinanceSummary.decode(data)
+        return try Self.parseFinanceReadbackResponse(data: data, response: response)
+    }
+
+    /// Pure readback parsing keeps malformed and contradictory metadata
+    /// testable without a network or a provider credential.
+    nonisolated static func parseFinanceReadbackResponse(
+        data: Data,
+        response: HTTPURLResponse,
+        now: Date = .now
+    ) throws -> FinanceReadbackResult {
+        guard data.count <= maximumReadOnlyResponseBytes else {
+            throw TailscaleSyncError.responseTooLarge
+        }
+        try checkHTTPStatus(response)
+        guard isJSONContentType(response.value(forHTTPHeaderField: "Content-Type")) else {
+            throw TailscaleSyncError.invalidResponse
+        }
+        let summary = try FinanceSummary.decode(data, now: now)
+        let metadata = try FinanceResponseMetadata(response: response, bodySize: data.count, now: now)
+        let readback = try FinanceReadback.make(summary: summary, response: metadata, now: now)
+        return FinanceReadbackResult(summary: summary, readback: readback)
     }
 
     // MARK: - Gateway-authoritative manual imported-finance ledger
@@ -1182,6 +1212,21 @@ public actor TailscaleSyncClient {
         maximumBytes: Int,
         taskDelegate: URLSessionTaskDelegate? = nil
     ) async throws -> Data {
+        let (data, _) = try await performBoundedReadOnlyResponse(
+            session: session,
+            request: request,
+            maximumBytes: maximumBytes,
+            taskDelegate: taskDelegate
+        )
+        return data
+    }
+
+    nonisolated private static func performBoundedReadOnlyResponse(
+        session: URLSession,
+        request: URLRequest,
+        maximumBytes: Int,
+        taskDelegate: URLSessionTaskDelegate? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
         guard request.httpMethod == "GET" else { throw TailscaleSyncError.invalidResponse }
         recordNetworkTaskCreated()
         let (bytes, response) = try await session.bytes(for: request, delegate: taskDelegate)
@@ -1197,7 +1242,8 @@ public actor TailscaleSyncClient {
         guard Self.contentLengthIsAllowed(declaredLength, maximumBytes: maximumBytes) else {
             throw TailscaleSyncError.responseTooLarge
         }
-        return try await Self.collectBounded(bytes, maximumBytes: maximumBytes)
+        let data = try await Self.collectBounded(bytes, maximumBytes: maximumBytes)
+        return (data, http)
     }
 
     nonisolated static func collectBounded<Bytes: AsyncSequence>(

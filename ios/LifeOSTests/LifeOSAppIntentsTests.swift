@@ -91,6 +91,38 @@ final class LifeOSAppIntentsTests: XCTestCase {
         XCTAssertEqual(refreshCallCount, 1)
     }
 
+    func testMorningReadbackConsentNeverReportsObservedSuccess() async throws {
+        let summary = try summary()
+        let metadata = try FinanceResponseMetadata(
+            statusCode: 200,
+            contentType: "application/json; charset=utf-8",
+            bodySize: 256,
+            bankingState: .consent,
+            isPartial: false,
+            lastSuccessAt: nil,
+            lastFailureAt: Self.now.addingTimeInterval(-1),
+            now: Self.now
+        )
+        let readback = try FinanceReadback.make(summary: summary, response: metadata, now: Self.now)
+        let fallbackCalls = CallCounter()
+        var deps = dependencies()
+        deps.fetchFinance = {
+            await fallbackCalls.increment()
+            return summary
+        }
+        deps.fetchFinanceReadback = {
+            FinanceReadbackResult(summary: summary, readback: readback)
+        }
+
+        let result = try await LifeOSMorningStatusIntent(dependencies: deps).perform()
+        let finance = try output(result.value).step("finance")
+
+        XCTAssertEqual(finance.status, .unavailable)
+        XCTAssertEqual(finance.code, "unavailable")
+        let fallbackCallCount = await fallbackCalls.value
+        XCTAssertEqual(fallbackCallCount, 0)
+    }
+
     func testMorningAwaitsInjectedHealthRefreshBeforePublishing() async throws {
         let summary = try summary()
         let gate = RefreshGate()
