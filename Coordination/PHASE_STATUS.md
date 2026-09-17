@@ -28,9 +28,9 @@ Updated 2026-09-17 Europe/Berlin.
 - Existing reviewed slices cover calendar security, Usage/Finance/Fitness,
   shell/navigation, tax accessibility, installer boundary, and API security.
 - Open: live recurring reconciliation, Robinhood/net-worth, canonical Windows
-  install/readback, live finance/providers, workouts, Obsidian Canvas,
-  widgets/Shortcuts/signing, physical iPhone, whole-app visual and runtime
-  acceptance, final security review.
+  install/readback, live finance/providers, workouts, Obsidian Canvas, usage
+  provider registry/Gemini watcher, widgets/Shortcuts/signing, physical iPhone,
+  whole-app visual and runtime acceptance, final security review.
 - Astra Medium reviewed the corrected Windows/storage candidate **MERGE** with
   no blocking source findings. Canonical and concurrent-race evidence remain
   unverified.

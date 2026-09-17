@@ -1,5 +1,6 @@
 import { z } from 'zod';
 export * from './usage.js';
+export * from './usage-v2.js';
 export * from './supplements.js';
 export * from './nutrition.js';
 export * from './nutrition-barcode.js';

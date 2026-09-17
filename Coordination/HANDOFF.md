@@ -14,8 +14,7 @@ Keep the release verdict honest; do not call the product done.
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
-- No generic advisor, usage watcher, demo fallback, or conversational AI is
-  allowed. Calorie-photo tracking is the only in-app AI boundary.
+- No generic advisor, conversational AI, or demo fallback is allowed. Calorie photo tracking is the only in-app AI feature. The Usage module retains the Claude watcher and is being generalized into a truthful provider registry; Gemini subscription tracking starts as manual/unsupported unless Google exposes a documented quota endpoint.
 
 ## Latest evidence
 
@@ -64,8 +63,9 @@ Keep the release verdict honest; do not call the product done.
 - Live-bank recurring reconciliation, Robinhood/net-worth verification, and
   provider readback.
 - Canonical Windows install/listener/health/Serve/Enable Banking readback.
-- Finance live connector/import/recurring/net-worth work; Zepp workouts;
-  Obsidian Canvas round trip; widgets, Shortcuts, signing, physical iPhone.
+- Finance live connector/import/recurring/net-worth work; usage provider
+  registry/Gemini watcher; Zepp workouts; Obsidian Canvas round trip; widgets,
+  Shortcuts, signing, physical iPhone.
 - Whole-app visual/runtime acceptance remains open; current UI slices are
   evidence for those slices only, not product-wide approval.
 
