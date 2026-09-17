@@ -103,7 +103,8 @@ The frozen registry is structurally valid but has 0 accepted leaves; do not use
 the earlier 60% estimate as release progress. Acceptance must be earned with
 the required live, runtime, device, visual, and operator evidence.
 
-Keep the generic advisor/conversational AI out of the product. Retain the Claude
-usage watcher and generalize it through the provider-registry plan in the LifeOS
-Design docs; Gemini subscription usage is manual/unsupported until an official
-quota endpoint is verified.
+Keep the generic advisor/conversational AI out of the product. The reviewed
+Usage v2 provider registry is pushed at `8c1a225`; native watcher integration
+still has to use its truthful boundaries. Retain the Claude watcher, represent
+Gemini subscription usage as manual/unsupported until an official quota
+endpoint is verified, and keep Gemini API usage separate.

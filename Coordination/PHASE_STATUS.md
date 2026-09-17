@@ -3,7 +3,7 @@
 Updated 2026-09-17 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Current source: `453d304` on clean, equal local/remote `main`.
+- Current source: `8c1a225` on clean, equal local/remote `main`.
 - Windows disposable static, legacy Serve, native progress, native snapshot,
   and complete behavior suites pass. Behavior has one installed-service skip;
   canonical deployment remains unverified.
@@ -25,11 +25,16 @@ Updated 2026-09-17 Europe/Berlin.
   serial macOS build-for-testing and recurring/import suites pass 56/56;
   final Astra Medium review returned **MERGE**. Live-bank reconciliation is
   still separate.
+- Finance investment validation and the Usage v2 provider-registry contract
+  are pushed at `8c1a225`. The focused finance suite passes 21/21; contracts
+  typecheck and build cleanly and pass 212/212 tests. Astra Medium returned
+  **MERGE**. Native watcher integration and Gemini subscription readback remain
+  open.
 - Existing reviewed slices cover calendar security, Usage/Finance/Fitness,
   shell/navigation, tax accessibility, installer boundary, and API security.
 - Open: live recurring reconciliation, Robinhood/net-worth, canonical Windows
-  install/readback, live finance/providers, workouts, Obsidian Canvas, usage
-  provider registry/Gemini watcher, widgets/Shortcuts/signing, physical iPhone,
+  install/readback, live finance/providers, native usage integration/Gemini
+  watcher, workouts, Obsidian Canvas, widgets/Shortcuts/signing, physical iPhone,
   whole-app visual and runtime acceptance, final security review.
 - Astra Medium reviewed the corrected Windows/storage candidate **MERGE** with
   no blocking source findings. Canonical and concurrent-race evidence remain

@@ -10,7 +10,7 @@ Keep the release verdict honest; do not call the product done.
 ## Current truth
 
 - Release is **NO-GO**. `main` and `origin/main` are clean and equal at
-  `453d304` (`Add reviewed recurring payment controls`).
+  `8c1a225` (`Add finance validation and usage provider registry`).
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
@@ -45,6 +45,15 @@ Keep the release verdict honest; do not call the product done.
   failure handling, Manage Payment ownership, and post-import refresh. The
   serial macOS build-for-testing passed; the latest recurring/import suites are
   56/56, and the final Astra Medium review is **MERGE**.
+- Finance investment validation and the usage provider-registry contract are
+  pushed at `8c1a225`. Robinhood activity import is strict and separate from
+  net-worth evidence; stale FX, incomplete coverage, duplicate economic cash,
+  linked-cash overlap, and decoded semantic tampering fail closed. The focused
+  macOS finance suite is 21/21 with **TEST SUCCEEDED**. The Usage v2 registry
+  retains Claude, models Gemini subscription usage as manual/unsupported until
+  an official endpoint exists, and keeps Gemini API usage as a separate
+  product; contracts typecheck, build, and pass 212/212 tests. Astra Medium
+  final review is **MERGE**.
 
 ## Storage policy
 
@@ -72,8 +81,9 @@ Keep the release verdict honest; do not call the product done.
 ## Next action
 
 Dispatch the next bounded finance packet for live recurring reconciliation,
-then add the verified Robinhood/net-worth path. Keep each packet reviewed,
-committed, pushed, and reflected in these short handoff files.
+then integrate the reviewed usage registry into the native watcher and add the
+verified Robinhood/net-worth path. Keep each packet reviewed, committed,
+pushed, and reflected in these short handoff files.
 
 ## Blockers
 
