@@ -15,20 +15,43 @@ public enum FinanceImportSkipReason: String, Equatable, Sendable {
     case unrecognizedHeader
 }
 
+/// Semantic information for a duplicate identity that was rejected from an
+/// import. The public skip-reason enum intentionally remains unchanged because
+/// the existing SwiftUI surface has an exhaustive switch over it. Callers
+/// that need to distinguish duplicate handling should inspect this property on
+/// `FinanceImportDiagnostic`.
+public enum FinanceImportDuplicateDisposition: String, Equatable, Sendable {
+    case exactRepeat
+    case conflictingProviderID
+}
+
 public struct FinanceImportDiagnostic: Equatable, Sendable {
     public let rowNumber: Int
     public let reason: FinanceImportSkipReason
+    /// Present when a valid row was rejected because its stable imported
+    /// identity was already present in this source. The compatibility
+    /// `reason` is `.malformedRow` for exact repeats and
+    /// `.invalidDateOrAmount` for conflicts so untouched exhaustive UI code
+    /// remains source-compatible; this field is the authoritative semantic
+    /// classification.
+    public let duplicateDisposition: FinanceImportDuplicateDisposition?
 
-    public init(rowNumber: Int, reason: FinanceImportSkipReason) {
+    public init(
+        rowNumber: Int,
+        reason: FinanceImportSkipReason,
+        duplicateDisposition: FinanceImportDuplicateDisposition? = nil
+    ) {
         self.rowNumber = max(rowNumber, 1)
         self.reason = reason
+        self.duplicateDisposition = duplicateDisposition
     }
 }
 
 public struct FinanceImportResult: Equatable, Sendable {
     public let transactions: [FinanceImportedTransaction]
     /// Rows present in the file (excluding the header and blank lines) that
-    /// did not yield a valid date + amount and were therefore skipped.
+    /// were not imported because they were malformed, unsupported, invalid,
+    /// or repeated observations.
     public let skippedRowCount: Int
     /// The detected source layout, used to label imported rows. `.genericCSV`
     /// when no specific known layout was recognized.
@@ -46,6 +69,10 @@ public struct FinanceImportResult: Equatable, Sendable {
     /// imported transactions so detection can evolve without changing the
     /// stored transaction schema or row identity.
     public let institutionDetection: FinanceInstitutionDetection
+    /// Source record numbers for valid transactions, in the same order as
+    /// `transactions`. This is transient preview metadata used to create
+    /// content-free local provenance and is never part of a sync record.
+    public let sourceRowNumbers: [Int]
 
     public init(
         transactions: [FinanceImportedTransaction],
@@ -54,7 +81,8 @@ public struct FinanceImportResult: Equatable, Sendable {
         dataRowCount: Int? = nil,
         headerRecognized: Bool = true,
         diagnostics: [FinanceImportDiagnostic] = [],
-        institutionDetection: FinanceInstitutionDetection = .unknown
+        institutionDetection: FinanceInstitutionDetection = .unknown,
+        sourceRowNumbers: [Int] = []
     ) {
         self.transactions = transactions
         self.skippedRowCount = skippedRowCount
@@ -63,6 +91,7 @@ public struct FinanceImportResult: Equatable, Sendable {
         self.headerRecognized = headerRecognized
         self.diagnostics = diagnostics
         self.institutionDetection = institutionDetection
+        self.sourceRowNumbers = sourceRowNumbers
     }
 
     public static let empty = FinanceImportResult(
@@ -129,6 +158,78 @@ public enum FinanceStatementImporter {
         }
     }
 
+    private struct UniqueTransactionObservation {
+        let transaction: FinanceImportedTransaction
+        let sourceRowNumber: Int
+    }
+
+    /// Collects all valid observations before deciding which rows are safe to
+    /// retain. If one stable identity has conflicting source observations, the
+    /// whole identity is quarantined; accepting whichever row appeared first
+    /// would make the ledger depend on export ordering.
+    private struct UniqueTransactionCollector {
+        private(set) var observations: [UniqueTransactionObservation] = []
+        private var firstIndexByID: [UUID: Int] = [:]
+        private var conflictingIDs: Set<UUID> = []
+
+        mutating func append(_ transaction: FinanceImportedTransaction, sourceRowNumber: Int) {
+            let index = observations.count
+            observations.append(
+                UniqueTransactionObservation(transaction: transaction, sourceRowNumber: sourceRowNumber)
+            )
+            guard let firstIndex = firstIndexByID[transaction.id] else {
+                firstIndexByID[transaction.id] = index
+                return
+            }
+            if !observations[firstIndex].transaction.hasSameSourceObservation(as: transaction) {
+                conflictingIDs.insert(transaction.id)
+            }
+        }
+
+        func finish() -> (
+            transactions: [FinanceImportedTransaction],
+            sourceRowNumbers: [Int],
+            diagnostics: [FinanceImportDiagnostic],
+            skippedCount: Int
+        ) {
+            var transactions: [FinanceImportedTransaction] = []
+            var sourceRowNumbers: [Int] = []
+            var diagnostics: [FinanceImportDiagnostic] = []
+            transactions.reserveCapacity(observations.count)
+            sourceRowNumbers.reserveCapacity(observations.count)
+
+            var emittedFirstIndexByID: [UUID: Int] = [:]
+            emittedFirstIndexByID.reserveCapacity(firstIndexByID.count)
+            for (index, observation) in observations.enumerated() {
+                let transaction = observation.transaction
+                if conflictingIDs.contains(transaction.id) {
+                    diagnostics.append(
+                        FinanceImportDiagnostic(
+                            rowNumber: observation.sourceRowNumber,
+                            reason: .invalidDateOrAmount,
+                            duplicateDisposition: .conflictingProviderID
+                        )
+                    )
+                    continue
+                }
+                if emittedFirstIndexByID[transaction.id] == nil {
+                    emittedFirstIndexByID[transaction.id] = index
+                    transactions.append(transaction)
+                    sourceRowNumbers.append(observation.sourceRowNumber)
+                } else {
+                    diagnostics.append(
+                        FinanceImportDiagnostic(
+                            rowNumber: observation.sourceRowNumber,
+                            reason: .malformedRow,
+                            duplicateDisposition: .exactRepeat
+                        )
+                    )
+                }
+            }
+            return (transactions, sourceRowNumbers, diagnostics, diagnostics.count)
+        }
+    }
+
     public static let maximumInputBytes = 5 * 1024 * 1024
     private static let delimiterProbeMaximumCharacters = 128 * 1024
     private static let delimiterProbeMaximumPhysicalLines = 256
@@ -138,9 +239,7 @@ public enum FinanceStatementImporter {
         case unsupportedEncoding
     }
 
-    /// Decodes common bank-export encodings before parsing. Bank portals often
-    /// emit UTF-16 with a BOM even when the file is named `.csv`.
-    public static func parseCSV(data: Data) throws -> FinanceImportResult {
+    private static func decodedText(from data: Data) throws -> String {
         guard data.count <= maximumInputBytes else { throw Error.inputTooLarge }
         for encoding in [
             String.Encoding.utf8,
@@ -150,10 +249,455 @@ public enum FinanceStatementImporter {
             .utf32BigEndian
         ] {
             if let text = String(data: data, encoding: encoding) {
-                return parseCSV(text)
+                return text
             }
         }
         throw Error.unsupportedEncoding
+    }
+
+    private static func appendMissingDuplicateDiagnostics(
+        _ additions: [FinanceImportDiagnostic],
+        to diagnostics: inout [FinanceImportDiagnostic]
+    ) -> Int {
+        var existingKeys = Set(diagnostics.compactMap { diagnostic -> String? in
+            guard let disposition = diagnostic.duplicateDisposition else { return nil }
+            return "\(diagnostic.rowNumber)|\(disposition.rawValue)"
+        })
+        var addedCount = 0
+        for diagnostic in additions {
+            guard let disposition = diagnostic.duplicateDisposition else { continue }
+            let key = "\(diagnostic.rowNumber)|\(disposition.rawValue)"
+            guard existingKeys.insert(key).inserted else { continue }
+            diagnostics.append(diagnostic)
+            addedCount += 1
+        }
+        return addedCount
+    }
+
+    private static func lexingText(_ text: String) -> String {
+        let withoutLeadingBOM = text.hasPrefix("\u{FEFF}")
+            ? String(text.dropFirst())
+            : text
+        return withoutLeadingBOM
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+    }
+
+    /// Decodes common bank-export encodings before parsing. Bank portals often
+    /// emit UTF-16 with a BOM even when the file is named `.csv`.
+    public static func parseCSV(data: Data) throws -> FinanceImportResult {
+        return parseCSV(try decodedText(from: data))
+    }
+
+    /// Inspects a bounded file without retaining raw source text in the
+    /// returned value. Header indexes and content-free detector metadata are
+    /// enough for the mapping UI to request an explicit interpretation.
+    internal static func inspectCSV(data: Data) throws -> FinanceImportInspection {
+        let text = lexingText(try decodedText(from: data))
+        var meter = CSVScanMeter()
+        let delimiterCharacter = detectDelimiter(in: text, meter: &meter)
+        let delimiter = FinanceCSVDelimiter(character: delimiterCharacter) ?? .comma
+        let records = splitRecords(text, delimiter: delimiterCharacter, meter: &meter)
+        let rows = records.map { record in
+            splitRow(
+                record.raw,
+                delimiter: delimiterCharacter,
+                recordMalformed: record.isMalformed,
+                meter: &meter
+            )
+        }
+        let recognizedHeaderIndices = rows.enumerated().compactMap { (index, row) -> Int? in
+            guard isImporterHeaderRow(row, delimiter: delimiter) else { return nil }
+            return index
+        }
+        let structuralHeaderIndices = rows.enumerated().compactMap { index, _ in
+            isMappingHeaderCandidate(at: index, rows: rows, delimiter: delimiter) ? index : nil
+        }
+        // Prefer known or alias-recognized headers. For a completely
+        // unfamiliar export, retain only structurally supported candidates;
+        // this lets a real table header after an opaque preamble reach the
+        // mapping editor without mistaking the preamble for the table.
+        let candidateHeaderIndices = Array(
+            (recognizedHeaderIndices.isEmpty ? structuralHeaderIndices : recognizedHeaderIndices)
+                .prefix(256)
+        )
+        let headerIndex = recognizedHeaderIndices.first ?? candidateHeaderIndices.first
+        let rawHeader = headerIndex.map { rows[$0].fields } ?? []
+        let selectedEligibility = FinanceInstitutionDetector.mappingEligibility(
+            headers: rawHeader,
+            delimiter: delimiter
+        )
+        // A marker in another unmodified record must not be hidden by choosing
+        // a different header row in the mapping UI. Header-like marker rows
+        // are rare in ordinary data, so this scan stays conservative by only
+        // considering rows with more than one field.
+        let blockedEligibility = rows.enumerated().compactMap { index, row -> FinanceImportMappingEligibility? in
+            guard index != headerIndex, !row.isMalformed, row.fields.count > 1 else { return nil }
+            let eligibility = FinanceInstitutionDetector.mappingEligibility(
+                headers: row.fields,
+                delimiter: delimiter
+            )
+            return eligibility.isBlocked ? eligibility : nil
+        }.first
+        let eligibility = blockedEligibility ?? selectedEligibility
+        let dataRowCount = headerIndex.map { max(rows.count - $0 - 1, 0) } ?? max(rows.count - 1, 0)
+        return try FinanceImportInspection(
+            sourceDigest: FinanceImportFingerprint.bytes(data),
+            byteCount: data.count,
+            headerFingerprint: FinanceImportFingerprint.header(rawHeader),
+            delimiter: delimiter,
+            headerRecordIndex: headerIndex,
+            candidateHeaderRecordIndices: candidateHeaderIndices,
+            columnCount: rawHeader.count,
+            dataRowCount: dataRowCount,
+            originalDetection: eligibility.originalDetection,
+            mappingEligibility: eligibility
+        )
+    }
+
+    /// Returns raw header labels only to the private mapping editor. They are
+    /// never part of `FinanceImportInspection` or durable provenance.
+    internal static func headerColumnNames(
+        data: Data,
+        inspection: FinanceImportInspection
+    ) throws -> [String] {
+        guard let headerIndex = inspection.headerRecordIndex else { return [] }
+        guard let candidate = try headerCandidates(data: data, inspection: inspection)
+            .first(where: { $0.recordIndex == headerIndex }) else {
+            throw FinanceImportMappingError.missingHeader
+        }
+        return candidate.labels
+    }
+
+    /// Returns bounded raw labels for each candidate header. The labels are
+    /// transient UI input only; callers must persist the fingerprint and
+    /// selected index, never this value.
+    internal static func headerCandidates(
+        data: Data,
+        inspection: FinanceImportInspection
+    ) throws -> [FinanceImportHeaderCandidate] {
+        guard FinanceImportFingerprint.bytes(data) == inspection.sourceDigest else {
+            throw FinanceImportMappingError.stalePreview
+        }
+        let text = lexingText(try decodedText(from: data))
+        var meter = CSVScanMeter()
+        let records = splitRecords(text, delimiter: inspection.delimiter.character, meter: &meter)
+        var candidates: [FinanceImportHeaderCandidate] = []
+        candidates.reserveCapacity(inspection.candidateHeaderRecordIndices.count)
+        for recordIndex in inspection.candidateHeaderRecordIndices {
+            guard records.indices.contains(recordIndex) else { throw FinanceImportMappingError.stalePreview }
+            let row = splitRow(
+                records[recordIndex].raw,
+                delimiter: inspection.delimiter.character,
+                recordMalformed: records[recordIndex].isMalformed,
+                meter: &meter
+            )
+            guard !row.isMalformed else { throw FinanceImportMappingError.stalePreview }
+            candidates.append(try FinanceImportHeaderCandidate(recordIndex: recordIndex, labels: row.fields))
+        }
+        return candidates
+    }
+
+    /// Creates the immutable prepared preview for an already verified profile.
+    /// The source rows and IDs originate from the parser result; the view never
+    /// supplies source fields to the store.
+    internal static func prepareKnownImport(
+        result: FinanceImportResult,
+        inspection: FinanceImportInspection,
+        sessionID: UUID,
+        revision: Int
+    ) throws -> FinancePreparedImport {
+        guard inspection.mappingEligibility.state == .known,
+              result.institutionDetection.isKnown,
+              !result.transactions.isEmpty,
+              result.sourceRowNumbers.count == result.transactions.count else {
+            throw FinanceImportMappingError.invalidMapping
+        }
+        let batchID = UUID()
+        let token = try FinanceImportPreviewToken(
+            sessionID: sessionID,
+            revision: revision,
+            batchID: batchID,
+            sourceDigest: inspection.sourceDigest
+        )
+        var collector = UniqueTransactionCollector()
+        var skippedRowCount = result.skippedRowCount
+        var diagnostics = result.diagnostics
+        for (sourceRowNumber, transaction) in zip(result.sourceRowNumbers, result.transactions) {
+            collector.append(transaction, sourceRowNumber: sourceRowNumber)
+        }
+        let unique = collector.finish()
+        let addedDiagnostics = appendMissingDuplicateDiagnostics(unique.diagnostics, to: &diagnostics)
+        skippedRowCount += addedDiagnostics
+        diagnostics.sort { $0.rowNumber < $1.rowNumber }
+        let rows = try zip(unique.sourceRowNumbers, unique.transactions).map {
+            try FinancePreparedImportRow(sourceRowNumber: $0.0, transaction: $0.1)
+        }
+        let links = try rows.map {
+            try FinanceImportRowProvenance(
+                batchID: batchID,
+                sourceRowNumber: $0.sourceRowNumber,
+                transactionID: $0.transaction.id
+            )
+        }
+        let batch = try FinanceImportBatchProvenance(
+            id: batchID,
+            importedAt: Date(),
+            sourceDigest: inspection.sourceDigest,
+            byteCount: inspection.byteCount,
+            headerFingerprint: inspection.headerFingerprint,
+            delimiter: inspection.delimiter,
+            headerRecordIndex: inspection.headerRecordIndex ?? 0,
+            mappingID: nil,
+            originalDetection: inspection.originalDetection,
+            effectiveDetection: result.institutionDetection,
+            rowLinks: links
+        )
+        return try FinancePreparedImport(
+            token: token,
+            rows: rows,
+            skippedRowCount: skippedRowCount,
+            dataRowCount: result.dataRowCount,
+            diagnostics: diagnostics,
+            originalDetection: inspection.originalDetection,
+            effectiveDetection: result.institutionDetection,
+            mapping: nil,
+            batchProvenance: batch
+        )
+    }
+
+    /// Re-parses through the existing bounded CSV lexer using the user's
+    /// validated column choices. No CSV text is synthesized and no legacy
+    /// generic column guess participates in mapped values.
+    internal static func prepareMappedImport(
+        data: Data,
+        mapping: FinanceImportMapping,
+        sessionID: UUID,
+        revision: Int
+    ) throws -> FinancePreparedImport {
+        try prepareMappedImport(
+            data: data,
+            inspection: inspectCSV(data: data),
+            mapping: mapping,
+            sessionID: sessionID,
+            revision: revision
+        )
+    }
+
+    /// Re-evaluates the original bytes before applying a mapping. A mapping is
+    /// never allowed to override a disabled or near-match profile discovered
+    /// from the unmodified source.
+    internal static func prepareMappedImport(
+        data: Data,
+        inspection: FinanceImportInspection,
+        mapping: FinanceImportMapping,
+        sessionID: UUID,
+        revision: Int
+    ) throws -> FinancePreparedImport {
+        try mapping.validate()
+        let derivedInspection = try inspectCSV(data: data)
+        guard derivedInspection == inspection else { throw FinanceImportMappingError.stalePreview }
+        guard inspection.mappingEligibility.state == .requiresMapping else {
+            if inspection.mappingEligibility.isBlocked { throw FinanceImportMappingError.unsupportedProfile }
+            throw FinanceImportMappingError.mappingNotRequired
+        }
+        guard inspection.delimiter == mapping.delimiter,
+              inspection.candidateHeaderRecordIndices.contains(mapping.headerRecordIndex),
+              inspection.headerRecordIndex != nil else {
+            throw FinanceImportMappingError.stalePreview
+        }
+        let text = lexingText(try decodedText(from: data))
+        var meter = CSVScanMeter()
+        let delimiterCharacter = mapping.delimiter.character
+        let records = splitRecords(text, delimiter: delimiterCharacter, meter: &meter)
+        let rows = records.map { record in
+            splitRow(
+                record.raw,
+                delimiter: delimiterCharacter,
+                recordMalformed: record.isMalformed,
+                meter: &meter
+            )
+        }
+        guard rows.indices.contains(mapping.headerRecordIndex) else { throw FinanceImportMappingError.missingHeader }
+        let headerRow = rows[mapping.headerRecordIndex]
+        guard !headerRow.isMalformed,
+              headerRow.fields.count == mapping.columnCount,
+              FinanceImportFingerprint.header(headerRow.fields) == mapping.headerFingerprint else {
+            throw FinanceImportMappingError.stalePreview
+        }
+
+        let headerEligibility = FinanceInstitutionDetector.mappingEligibility(
+            headers: headerRow.fields,
+            delimiter: mapping.delimiter
+        )
+        guard !headerEligibility.isBlocked else { throw FinanceImportMappingError.unsupportedProfile }
+        guard headerEligibility.state == .requiresMapping else { throw FinanceImportMappingError.mappingNotRequired }
+
+        // Re-evaluate every unmodified header-like record before extracting
+        // mapped columns. This prevents a duplicate/alternate header choice
+        // from concealing a recognizable unsupported export.
+        for (index, row) in rows.enumerated() where index != mapping.headerRecordIndex && !row.isMalformed && row.fields.count > 1 {
+            let eligibility = FinanceInstitutionDetector.mappingEligibility(
+                headers: row.fields,
+                delimiter: mapping.delimiter
+            )
+            if eligibility.isBlocked { throw FinanceImportMappingError.unsupportedProfile }
+        }
+
+        var diagnostics: [FinanceImportDiagnostic] = []
+        let dataRows = Array(rows.dropFirst(mapping.headerRecordIndex + 1))
+        var fallbackOrdinals: [String: Int] = [:]
+        var collector = UniqueTransactionCollector()
+        let importedAt = Date()
+
+        for (offset, row) in dataRows.enumerated() {
+            let rowNumber = mapping.headerRecordIndex + 2 + offset
+            guard !row.isMalformed, row.fields.count == headerRow.fields.count else {
+                diagnostics.append(FinanceImportDiagnostic(rowNumber: rowNumber, reason: .malformedRow))
+                continue
+            }
+            let fields = row.fields
+            guard let bookedAt = mapping.dateFormat.parse(normalizedField(fields[mapping.dateColumn])) else {
+                diagnostics.append(FinanceImportDiagnostic(rowNumber: rowNumber, reason: .invalidDateOrAmount))
+                continue
+            }
+            guard let amountCents = mappedAmountCents(mapping.amount, fields: fields) else {
+                diagnostics.append(FinanceImportDiagnostic(rowNumber: rowNumber, reason: .invalidDateOrAmount))
+                continue
+            }
+            switch mapping.currency {
+            case .constantEUR:
+                break
+            case .column(let index):
+                let currency = normalizedField(fields[index])
+                guard !currency.isEmpty, currency.caseInsensitiveCompare("EUR") == .orderedSame else {
+                    diagnostics.append(FinanceImportDiagnostic(rowNumber: rowNumber, reason: .unsupportedCurrency))
+                    continue
+                }
+            }
+            let sourceAccountValue: String?
+            if let accountColumn = mapping.account.sourceColumn {
+                let rawSourceAccountValue = normalizedField(fields[accountColumn])
+                guard !rawSourceAccountValue.isEmpty else {
+                    diagnostics.append(FinanceImportDiagnostic(rowNumber: rowNumber, reason: .invalidDateOrAmount))
+                    continue
+                }
+                // This is an opaque identity component. Keep case and
+                // interior whitespace exactly as parsed; only the parser's
+                // safe outer-field trimming has happened above.
+                sourceAccountValue = rawSourceAccountValue
+            } else {
+                sourceAccountValue = nil
+            }
+
+            let description: String
+            switch mapping.description {
+            case .none:
+                description = "Imported transaction"
+            case .column(let index):
+                let value = normalizedField(fields[index])
+                description = value.isEmpty ? "Imported transaction" : value
+            }
+            let merchant = mapping.merchantColumn.map { normalizedField(fields[$0]) }
+            let resolvedDescription = merchant?.isEmpty == false ? merchant! : description
+            guard resolvedDescription.utf8.count <= FinanceImportedSyncRecord.maximumDescriptionBytes else {
+                diagnostics.append(FinanceImportDiagnostic(rowNumber: rowNumber, reason: .invalidDateOrAmount))
+                continue
+            }
+            let providerID = mapping.providerIDColumn.flatMap { index -> String? in
+                let value = normalizedField(fields[index])
+                return value.isEmpty ? nil : value
+            }
+            guard providerID?.utf8.count ?? 0 <= FinanceImportedSyncRecord.maximumProviderCodeBytes * 4 else {
+                diagnostics.append(FinanceImportDiagnostic(rowNumber: rowNumber, reason: .invalidDateOrAmount))
+                continue
+            }
+            let currency = "EUR"
+            let identity = mappedFallbackIdentity(
+                bookedAt: bookedAt,
+                amountCents: amountCents,
+                description: resolvedDescription,
+                currency: currency,
+                accountID: mapping.account.identity.id,
+                sourceAccountValue: sourceAccountValue
+            )
+            let ordinal: Int
+            if providerID != nil {
+                // Provider IDs are the identity. The collector handles
+                // repeated IDs after all observations are available, so no
+                // mutable row field or ordinal may be folded into this key.
+                ordinal = 0
+            } else {
+                ordinal = fallbackOrdinals[identity, default: 0]
+                fallbackOrdinals[identity] = ordinal + 1
+            }
+            let transaction = FinanceImportedTransaction(
+                id: mappedStableID(
+                    providerID: providerID,
+                    identity: identity,
+                    accountID: mapping.account.identity.id,
+                    sourceAccountValue: sourceAccountValue,
+                    ordinal: ordinal
+                ),
+                bookedAt: bookedAt,
+                amountCents: amountCents,
+                description: resolvedDescription,
+                source: .genericCSV,
+                identityScheme: .mappedV3,
+                mappedIdentity: try FinanceImportedMappedIdentity(mapping: mapping),
+                importedAt: importedAt
+            )
+            do {
+                _ = try FinanceImportedSyncRecord(validating: transaction)
+            } catch {
+                diagnostics.append(FinanceImportDiagnostic(rowNumber: rowNumber, reason: .invalidDateOrAmount))
+                continue
+            }
+            collector.append(transaction, sourceRowNumber: rowNumber)
+        }
+
+        let unique = collector.finish()
+        diagnostics.append(contentsOf: unique.diagnostics)
+        diagnostics.sort { $0.rowNumber < $1.rowNumber }
+        let originalDetection = headerEligibility.originalDetection
+        let effectiveDetection = userMappedDetection(from: originalDetection, delimiter: mapping.delimiter)
+        let batchID = UUID()
+        let token = try FinanceImportPreviewToken(
+            sessionID: sessionID,
+            revision: revision,
+            batchID: batchID,
+            sourceDigest: FinanceImportFingerprint.bytes(data)
+        )
+        let preparedRows = try zip(unique.sourceRowNumbers, unique.transactions).map {
+            try FinancePreparedImportRow(sourceRowNumber: $0.0, transaction: $0.1)
+        }
+        let links = try preparedRows.map {
+            try FinanceImportRowProvenance(batchID: batchID, sourceRowNumber: $0.sourceRowNumber, transactionID: $0.transaction.id)
+        }
+        let batch = try FinanceImportBatchProvenance(
+            id: batchID,
+            importedAt: importedAt,
+            sourceDigest: FinanceImportFingerprint.bytes(data),
+            byteCount: data.count,
+            headerFingerprint: mapping.headerFingerprint,
+            delimiter: mapping.delimiter,
+            headerRecordIndex: mapping.headerRecordIndex,
+            mappingID: mapping.id,
+            originalDetection: originalDetection,
+            effectiveDetection: effectiveDetection,
+            rowLinks: links
+        )
+        return try FinancePreparedImport(
+            token: token,
+            rows: preparedRows,
+            skippedRowCount: diagnostics.count,
+            dataRowCount: dataRows.count,
+            diagnostics: diagnostics,
+            originalDetection: originalDetection,
+            effectiveDetection: effectiveDetection,
+            mapping: mapping,
+            batchProvenance: batch
+        )
     }
 
     /// Column header names (lowercased) recognized for each logical field.
@@ -161,9 +705,13 @@ public enum FinanceStatementImporter {
     /// "Beschreibung", "Betrag"); other exports commonly use English ones.
     private static let dateHeaders: Set<String> = Set([
         "date", "datum", "buchungsdatum", "booking date", "wertstellung", "booking_date",
-        "timestamp", "datetime"
+        "timestamp", "datetime", "posted", "posted_at", "posted on", "transaction_date",
+        "transaction date", "settled_at", "settled date", "value date"
     ].map(FinanceInstitutionDetector.normalizeHeader))
-    private static let amountHeaders: Set<String> = Set(["amount", "betrag", "wert", "value", "netto"]
+    private static let amountHeaders: Set<String> = Set([
+        "amount", "betrag", "wert", "value", "netto", "net amount", "debit", "credit",
+        "withdrawal", "deposit", "gross amount"
+    ]
         .map(FinanceInstitutionDetector.normalizeHeader))
     private static let descriptionHeaders: Set<String> = Set([
         "description", "beschreibung", "memo", "merchant", "verwendungszweck", "text", "empfänger/zahlungspflichtiger", "empfaenger"
@@ -383,10 +931,10 @@ public enum FinanceStatementImporter {
         let legacyAccountColumn = firstIndex(of: legacyAccountHeaders, in: legacyHeader)
         let legacyCurrencyColumn = firstIndex(of: legacyCurrencyHeaders, in: legacyHeader)
 
-        var transactions: [FinanceImportedTransaction] = []
         var skipped = 0
         var diagnostics: [FinanceImportDiagnostic] = []
         var fallbackIdentityOrdinals: [String: Int] = [:]
+        var collector = UniqueTransactionCollector()
         for (offset, row) in dataRows.enumerated() {
             let rowNumber = headerIndex + 2 + offset
             guard !row.isMalformed else {
@@ -489,39 +1037,44 @@ public enum FinanceStatementImporter {
                 ordinal = fallbackIdentityOrdinals[identity, default: 0]
                 fallbackIdentityOrdinals[identity] = ordinal + 1
             }
-            transactions.append(
-                FinanceImportedTransaction(
-                    id: stableID(source: oldIdentitySource, providerID: legacyProviderID, identity: identity, ordinal: ordinal),
-                    bookedAt: bookedAt,
-                    amountCents: amountCents,
-                    description: resolvedDescription,
-                    category: nil,
-                    source: candidateSource,
-                    sourceCategory: (category?.isEmpty == false) ? category : nil,
-                    providerCode: providerCode,
-                    kind: isInvestmentOrder ? .investmentOrder : .cash,
-                    investment: investment
-                )
+            let transaction = FinanceImportedTransaction(
+                id: stableID(source: oldIdentitySource, providerID: legacyProviderID, identity: identity, ordinal: ordinal),
+                bookedAt: bookedAt,
+                amountCents: amountCents,
+                description: resolvedDescription,
+                category: nil,
+                source: candidateSource,
+                sourceCategory: (category?.isEmpty == false) ? category : nil,
+                providerCode: providerCode,
+                kind: isInvestmentOrder ? .investmentOrder : .cash,
+                investment: investment
             )
+            collector.append(transaction, sourceRowNumber: rowNumber)
         }
 
-        let detectedSource: FinanceImportSource = candidateSource == .tradeRepublicCSV && !transactions.isEmpty
+        let unique = collector.finish()
+        skipped += unique.skippedCount
+        diagnostics.append(contentsOf: unique.diagnostics)
+        diagnostics.sort { $0.rowNumber < $1.rowNumber }
+
+        let detectedSource: FinanceImportSource = candidateSource == .tradeRepublicCSV && !unique.transactions.isEmpty
             ? .tradeRepublicCSV
             : .genericCSV
         let finalDetection = FinanceInstitutionDetector.detect(
             headers: rawHeader,
             delimiter: csvDelimiter,
-            validEURRowCount: transactions.count
+            validEURRowCount: unique.transactions.count
         )
 
         return FinanceImportResult(
-            transactions: transactions,
+            transactions: unique.transactions,
             skippedRowCount: skipped,
             detectedSource: detectedSource,
             dataRowCount: dataRows.count,
             headerRecognized: true,
             diagnostics: diagnostics,
-            institutionDetection: finalDetection
+            institutionDetection: finalDetection,
+            sourceRowNumbers: unique.sourceRowNumbers
         )
     }
 
@@ -855,15 +1408,21 @@ public enum FinanceStatementImporter {
         for delimiter in candidates {
             let csvDelimiter = FinanceCSVDelimiter(character: delimiter) ?? .comma
             let records = splitRecords(probe, delimiter: delimiter, meter: &meter)
-            var score = 0
-            for record in records.prefix(32) {
-                let row = splitRow(
+            let probeRows = records.prefix(64).map { record in
+                splitRow(
                     record.raw,
                     delimiter: delimiter,
                     recordMalformed: record.isMalformed,
                     meter: &meter
                 )
-                if isImporterHeaderRow(row, delimiter: csvDelimiter) { score += 1 }
+            }
+            var score = 0
+            for (index, row) in probeRows.enumerated() {
+                if isImporterHeaderRow(row, delimiter: csvDelimiter) {
+                    score += 1_000
+                } else if isMappingHeaderCandidate(at: index, rows: probeRows, delimiter: csvDelimiter) {
+                    score += 1
+                }
             }
             headerScores.append((delimiter, score))
         }
@@ -990,6 +1549,46 @@ public enum FinanceStatementImporter {
         return hasGenericDateAndAmount
             || FinanceInstitutionDetector.hasImporterFingerprint(headers: row.fields, delimiter: delimiter)
             || FinanceInstitutionDetector.hasUnsupportedNearMatch(headers: row.fields, delimiter: delimiter)
+    }
+
+    /// Finds a header that the detector does not know by looking for a row of
+    /// textual labels followed by a bounded sample containing both a strict
+    /// date and a strict amount in different columns. This is intentionally a
+    /// conservative fallback: it never parses or imports the sample row here,
+    /// and the eventual mapping still has to choose every column explicitly.
+    private static func isMappingHeaderCandidate(
+        at index: Int,
+        rows: [CSVRow],
+        delimiter: FinanceCSVDelimiter
+    ) -> Bool {
+        guard rows.indices.contains(index), index <= 255 else { return false }
+        let row = rows[index]
+        guard !row.isMalformed,
+              row.fields.count > 1,
+              row.fields.count <= FinanceImportMapping.maximumColumnCount else { return false }
+        if isImporterHeaderRow(row, delimiter: delimiter) { return true }
+        guard row.fields.allSatisfy({ field in
+            let value = normalizedField(field)
+            return !value.isEmpty
+                && value.rangeOfCharacter(from: .letters) != nil
+                && parseDate(value) == nil
+                && parseAmountCents(value) == nil
+        }) else {
+            return false
+        }
+
+        for nextRow in rows.dropFirst(index + 1).prefix(8) {
+            guard !nextRow.isMalformed, nextRow.fields.count == row.fields.count else { continue }
+            var hasDate = false
+            var hasAmount = false
+            for field in nextRow.fields {
+                let value = normalizedField(field)
+                if parseDate(value) != nil { hasDate = true }
+                if parseAmountCents(value) != nil { hasAmount = true }
+                if hasDate && hasAmount { return true }
+            }
+        }
+        return false
     }
 
     private static func firstIndex(of candidates: Set<String>, in header: [String]) -> Int? {
@@ -1149,6 +1748,148 @@ public enum FinanceStatementImporter {
             return nil
         }
         return normalizedField((decimal as NSDecimalNumber).stringValue)
+    }
+
+    private static func mappedAmountCents(
+        _ amount: FinanceImportAmountSelection,
+        fields: [String]
+    ) -> Int? {
+        switch amount.signConvention {
+        case .signed:
+            guard let index = amount.amountColumn, fields.indices.contains(index) else { return nil }
+            return FinanceImportStrictValueParser.parseCents(
+                normalizedField(fields[index]),
+                format: amount.format,
+                allowSign: true
+            )
+        case .debitCredit:
+            guard let debitIndex = amount.debitColumn,
+                  let creditIndex = amount.creditColumn,
+                  fields.indices.contains(debitIndex), fields.indices.contains(creditIndex) else {
+                return nil
+            }
+            let debitRaw = normalizedField(fields[debitIndex])
+            let creditRaw = normalizedField(fields[creditIndex])
+            guard !(debitRaw.isEmpty && creditRaw.isEmpty), debitRaw.isEmpty || creditRaw.isEmpty else {
+                return nil
+            }
+            let debit = debitRaw.isEmpty ? 0 : FinanceImportStrictValueParser.parseCents(
+                debitRaw,
+                format: amount.format,
+                allowSign: false
+            )
+            let credit = creditRaw.isEmpty ? 0 : FinanceImportStrictValueParser.parseCents(
+                creditRaw,
+                format: amount.format,
+                allowSign: false
+            )
+            guard let debit, let credit, debit == 0 || credit == 0 else { return nil }
+            guard credit <= FinanceImportedSyncRecord.maximumSafeCents,
+                  debit <= FinanceImportedSyncRecord.maximumSafeCents,
+                  credit >= 0, debit >= 0 else { return nil }
+            let difference: Int
+            switch amount.debitCreditConvention {
+            case .debitIsNegative:
+                difference = credit - debit
+            case .creditIsNegative:
+                difference = debit - credit
+            }
+            guard difference >= -FinanceImportedSyncRecord.maximumSafeCents,
+                  difference <= FinanceImportedSyncRecord.maximumSafeCents else { return nil }
+            return difference
+        }
+    }
+
+    private static func userMappedDetection(
+        from original: FinanceInstitutionDetection,
+        delimiter: FinanceCSVDelimiter
+    ) -> FinanceInstitutionDetection {
+        let provenance = original.provenance
+        return FinanceInstitutionDetection(
+            state: .userMapped,
+            institution: nil,
+            profileID: nil,
+            candidates: original.candidates,
+            provenance: FinanceInstitutionDetectionProvenance(
+                registryVersion: provenance.registryVersion,
+                detectorVersion: provenance.detectorVersion,
+                normalizationVersion: provenance.normalizationVersion,
+                delimiter: delimiter,
+                legacyLayoutCompatibility: false,
+                reasonCodes: provenance.reasonCodes,
+                evidenceCodes: provenance.evidenceCodes
+            )
+        )
+    }
+
+    private static func mappedFallbackIdentity(
+        bookedAt: Date,
+        amountCents: Int,
+        description: String,
+        currency: String,
+        accountID: UUID,
+        sourceAccountValue: String?
+    ) -> String {
+        [
+            "lifeos-finance-mapped-v1",
+            mappedComponent(String(format: "%.0f", bookedAt.timeIntervalSinceReferenceDate)),
+            mappedComponent(String(amountCents)),
+            mappedComponent(identityComponent(description)),
+            mappedComponent(identityComponent(currency)),
+            mappedComponent(accountID.uuidString.lowercased()),
+            // Account values are opaque identity components. Only the field's
+            // outer whitespace was removed before this function was called.
+            mappedComponent(sourceAccountValue ?? "")
+        ].joined(separator: "\u{1F}")
+    }
+
+    private static func mappedStableID(
+        providerID: String?,
+        identity: String,
+        accountID: UUID,
+        sourceAccountValue: String?,
+        ordinal: Int
+    ) -> UUID {
+        let opaqueSourceAccount = sourceAccountValue ?? ""
+        let sourceKey: String
+        if let providerID {
+                // Provider IDs are stable within the persistent mapped account.
+                // Do not add date, amount, description, or an ordinal here:
+                // corrected exports must address the existing ledger row.
+                sourceKey = [
+                    "provider",
+                    mappedComponent(providerID),
+                    "source-account",
+                    mappedComponent(opaqueSourceAccount)
+                ].joined(separator: "\u{1F}")
+        } else {
+            // Without a provider ID, retain deterministic multiplicity for
+            // identical rows while keeping the fallback identity scoped to
+            // both the persistent account and any selected source account.
+            sourceKey = [
+                "row",
+                mappedComponent(identity),
+                "source-account",
+                mappedComponent(opaqueSourceAccount),
+                String(ordinal)
+            ].joined(separator: "\u{1F}")
+        }
+        let stableIdentity = [
+            "lifeos-finance-mapped-v3",
+            mappedComponent(accountID.uuidString.lowercased()),
+            sourceKey
+        ].joined(separator: "\u{1E}")
+        let digest = Array(SHA256.hash(data: Data(stableIdentity.utf8)).prefix(16))
+        return UUID(uuid: (
+            digest[0] & 0x0f | 0x50, digest[1], digest[2], digest[3],
+            digest[4] & 0x3f | 0x80, digest[5], digest[6], digest[7],
+            digest[8], digest[9], digest[10], digest[11], digest[12], digest[13], digest[14], digest[15]
+        ))
+    }
+
+    private static func mappedComponent(_ value: String) -> String {
+        let byteCount = value.utf8.count
+        return "\(byteCount):\(value)"
     }
 
     private static func isInvestmentRow(

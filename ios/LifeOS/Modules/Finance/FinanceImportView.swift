@@ -9,6 +9,23 @@ private extension FinanceImportSkipReason {
         case .unsupportedCurrency: "unsupported currency"
         case .invalidDateOrAmount: "invalid date or amount"
         case .unrecognizedHeader: "unrecognized date/amount header"
+        @unknown default: "skipped row"
+        }
+    }
+}
+
+extension FinanceImportDiagnostic {
+    /// A duplicate identity is a valid parsed row with a distinct user-facing
+    /// outcome. Keep it separate from parser failures even though the shared
+    /// compatibility reason remains unchanged.
+    var financeImportDisplayName: String {
+        switch duplicateDisposition {
+        case .exactRepeat:
+            "exact repeat"
+        case .conflictingProviderID:
+            "conflicting provider identity"
+        case nil:
+            reason.displayName
         }
     }
 }
@@ -33,6 +50,22 @@ enum FinanceImportCopy {
     static let clearAllSuccess = "Imported records removed on this device. " + clearAllPropagation
 }
 
+/// An account identity available to the mapping editor. A locally reviewed
+/// mapping contributes its private label; a mapped row received from another
+/// device contributes only its stable UUID and must be given a local label
+/// before it can be used. No source account value is retained here.
+struct FinanceImportAccountChoice: Identifiable, Equatable {
+    let id: UUID
+    let localLabel: String?
+
+    var isSyncedOnly: Bool { localLabel == nil }
+
+    var displayName: String {
+        if let localLabel { return localLabel }
+        return "Synced account · \(id.uuidString.prefix(8))"
+    }
+}
+
 // MARK: - Manual bank-statement CSV import
 
 /// Drives the CSV file picker, parse preview, and persistence for manually
@@ -44,7 +77,7 @@ enum FinanceImportCopy {
 @MainActor
 final class FinanceImportViewModel: ObservableObject {
     typealias SyncOperation = (FinanceImportedTransactionStore) async throws -> FinanceImportedSyncResult
-    typealias ImportOperation = ([FinanceImportedTransaction]) async throws -> FinanceImportSaveResult
+    typealias PreparedImportOperation = (FinancePreparedImport, [FinanceImportCategoryEdit]) async throws -> FinanceImportSaveResult
 
     @Published var isImporterPresented = false
     @Published var pendingResult: FinanceImportResult?
@@ -57,34 +90,50 @@ final class FinanceImportViewModel: ObservableObject {
     @Published private(set) var lastConfirmedRemoteRevision: Int?
     @Published private(set) var isSynchronizing = false
     @Published private(set) var isImporting = false
+    @Published private(set) var availableAccountChoices: [FinanceImportAccountChoice] = []
 
     private let store: FinanceImportedTransactionStore?
     private let syncOperation: SyncOperation
-    private let importOperation: ImportOperation
+    private let preparedImportOperation: PreparedImportOperation
     private var syncGeneration = 0
     private var importGeneration = 0
+    private var pendingSourceData: Data?
+    private var pendingInspection: FinanceImportInspection?
+    private var pendingHeaderColumns: [String] = []
+    private var pendingPreparedImport: FinancePreparedImport?
+    private var pendingSessionID: UUID?
+
+    private static let boundedReadChunkSize = 64 * 1024
 
     init(
         store: FinanceImportedTransactionStore? = nil,
         syncOperation: @escaping SyncOperation = { store in
             try await store.synchronize(using: TailscaleSyncClient())
         },
-        importOperation: ImportOperation? = nil
+        preparedImportOperation: PreparedImportOperation? = nil
     ) {
         let resolvedStore: FinanceImportedTransactionStore?
         let initialTransactions: [FinanceImportedTransaction]
+        let initialAccountChoices: [FinanceImportAccountChoice]
         let initialSyncStatus: FinanceImportedSyncStatus?
         let initialError: String?
         if let store {
             resolvedStore = store
             var loadedTransactions: [FinanceImportedTransaction] = []
+            var loadedMappings: [FinanceImportMapping] = []
             var loadError: String?
             do {
                 loadedTransactions = try store.all()
             } catch {
                 loadError = Self.localErrorMessage(for: error)
             }
+            do {
+                loadedMappings = try store.importMappings()
+            } catch {
+                if loadError == nil { loadError = Self.localErrorMessage(for: error) }
+            }
             initialTransactions = loadedTransactions
+            initialAccountChoices = Self.accountChoices(from: loadedMappings, transactions: loadedTransactions)
             do {
                 initialSyncStatus = try store.syncStatus()
             } catch {
@@ -97,13 +146,20 @@ final class FinanceImportViewModel: ObservableObject {
                 let candidate = try FinanceImportedTransactionStore()
                 resolvedStore = candidate
                 var loadedTransactions: [FinanceImportedTransaction] = []
+                var loadedMappings: [FinanceImportMapping] = []
                 var loadError: String?
                 do {
                     loadedTransactions = try candidate.all()
                 } catch {
                     loadError = Self.localErrorMessage(for: error)
                 }
+                do {
+                    loadedMappings = try candidate.importMappings()
+                } catch {
+                    if loadError == nil { loadError = Self.localErrorMessage(for: error) }
+                }
                 initialTransactions = loadedTransactions
+                initialAccountChoices = Self.accountChoices(from: loadedMappings, transactions: loadedTransactions)
                 do {
                     initialSyncStatus = try candidate.syncStatus()
                 } catch {
@@ -114,19 +170,21 @@ final class FinanceImportViewModel: ObservableObject {
             } catch {
                 resolvedStore = nil
                 initialTransactions = []
+                initialAccountChoices = []
                 initialSyncStatus = nil
                 initialError = Self.localErrorMessage(for: error)
             }
         }
         self.store = resolvedStore
         self.syncOperation = syncOperation
-        self.importOperation = importOperation ?? { transactions in
+        self.preparedImportOperation = preparedImportOperation ?? { prepared, categoryEdits in
             guard let resolvedStore else {
                 throw FinanceImportedTransactionStoreError.applicationSupportUnavailable
             }
-            return try resolvedStore.add(transactions)
+            return try resolvedStore.commitPreparedImport(prepared, categoryEdits: categoryEdits)
         }
         self.savedTransactions = initialTransactions
+        self.availableAccountChoices = initialAccountChoices
         self.currentSyncStatus = initialSyncStatus
         self.syncState = if resolvedStore == nil {
             .unavailable
@@ -148,6 +206,27 @@ final class FinanceImportViewModel: ObservableObject {
     var hasStore: Bool { store != nil }
     var canImport: Bool { store != nil && !isImporting }
     var canSynchronize: Bool { store != nil && !isSynchronizing }
+    var requiresExplicitMapping: Bool {
+        pendingPreparedImport == nil && pendingInspection?.mappingEligibility.requiresExplicitMapping == true
+    }
+    var mappingIsBlocked: Bool {
+        pendingPreparedImport == nil && pendingInspection?.mappingEligibility.isBlocked == true
+    }
+    var mappingHeaderColumns: [String] { pendingHeaderColumns }
+    var mappingHeaderRecordIndices: [Int] {
+        pendingInspection?.candidateHeaderRecordIndices ?? []
+    }
+    var mappingHeaderRecordIndex: Int? {
+        pendingInspection?.headerRecordIndex
+    }
+    var showsMappingEditor: Bool {
+        guard pendingInspection?.mappingEligibility.requiresExplicitMapping == true else { return false }
+        return pendingPreparedImport == nil || pendingPreparedImport?.transactions.isEmpty == true
+    }
+    var canEditMapping: Bool {
+        pendingInspection?.mappingEligibility.requiresExplicitMapping == true
+            && pendingPreparedImport?.transactions.isEmpty == false
+    }
     var syncActionTitle: String {
         if isSynchronizing { return "Syncing…" }
         if case .blocked = syncState { return "Retry sync" }
@@ -163,6 +242,11 @@ final class FinanceImportViewModel: ObservableObject {
         errorMessage = nil
         statusMessage = nil
         pendingResult = nil
+        pendingSourceData = nil
+        pendingInspection = nil
+        pendingHeaderColumns = []
+        pendingPreparedImport = nil
+        pendingSessionID = nil
         switch result {
         case .failure(let error):
             errorMessage = error.localizedDescription
@@ -175,14 +259,73 @@ final class FinanceImportViewModel: ObservableObject {
             defer { if secured { url.stopAccessingSecurityScopedResource() } }
             do {
                 let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
-                guard resourceValues.isDirectory != true,
-                      let fileSize = resourceValues.fileSize,
-                      fileSize <= FinanceStatementImporter.maximumInputBytes else {
+                guard resourceValues.isDirectory != true else {
                     throw FinanceStatementImporter.Error.inputTooLarge
                 }
-                let data = try Data(contentsOf: url)
-                pendingResult = try FinanceStatementImporter.parseCSV(data: data)
-                if pendingResult?.headerRecognized == false {
+                if let fileSize = resourceValues.fileSize,
+                   fileSize > FinanceStatementImporter.maximumInputBytes {
+                    throw FinanceStatementImporter.Error.inputTooLarge
+                }
+                let data = try Self.readBoundedData(
+                    from: url,
+                    maximumBytes: FinanceStatementImporter.maximumInputBytes
+                )
+                let parsedResult = try FinanceStatementImporter.parseCSV(data: data)
+                let inspection = try FinanceStatementImporter.inspectCSV(data: data)
+                pendingSourceData = data
+                pendingInspection = inspection
+                pendingHeaderColumns = try Self.headerColumnNames(
+                    data: data,
+                    inspection: inspection,
+                    recordIndex: inspection.headerRecordIndex
+                )
+                pendingSessionID = UUID()
+
+                switch inspection.mappingEligibility.state {
+                case .known:
+                    pendingResult = parsedResult
+                    if !parsedResult.transactions.isEmpty {
+                        pendingPreparedImport = try FinanceStatementImporter.prepareKnownImport(
+                            result: parsedResult,
+                            inspection: inspection,
+                            sessionID: pendingSessionID!,
+                            revision: importGeneration
+                        )
+                    }
+                case .requiresMapping:
+                    // The legacy parser may be able to guess generic columns,
+                    // but those rows are not trusted until the user chooses
+                    // an explicit mapping. Keep the preview honest.
+                    pendingResult = FinanceImportResult(
+                        transactions: [],
+                        skippedRowCount: 0,
+                        detectedSource: .genericCSV,
+                        dataRowCount: inspection.dataRowCount,
+                        headerRecognized: inspection.headerRecordIndex != nil,
+                        institutionDetection: inspection.originalDetection
+                    )
+                case .blocked:
+                    pendingResult = FinanceImportResult(
+                        transactions: [],
+                        skippedRowCount: inspection.dataRowCount,
+                        detectedSource: .genericCSV,
+                        dataRowCount: inspection.dataRowCount,
+                        headerRecognized: inspection.headerRecordIndex != nil,
+                        diagnostics: (0..<inspection.dataRowCount).map {
+                            FinanceImportDiagnostic(
+                                rowNumber: (inspection.headerRecordIndex ?? 0) + 2 + $0,
+                                reason: .unrecognizedHeader
+                            )
+                        },
+                        institutionDetection: inspection.originalDetection
+                    )
+                }
+
+                if requiresExplicitMapping {
+                    statusMessage = "Choose the statement columns before any rows can be saved."
+                } else if mappingIsBlocked {
+                    statusMessage = "This export is recognized as an unsupported format and cannot be imported as a bank statement."
+                } else if pendingResult?.headerRecognized == false {
                     statusMessage = "No date and amount header was recognized; no columns were guessed."
                 } else if pendingResult?.transactions.isEmpty == true {
                     statusMessage = "The statement was read, but no valid EUR transactions were found."
@@ -197,52 +340,130 @@ final class FinanceImportViewModel: ObservableObject {
         }
     }
 
+    /// Reads at most one byte beyond the importer limit. The metadata check in
+    /// `handlePickedFile` is only an early rejection; this second check closes
+    /// the growth/replacement race before any parser receives the bytes.
+    private static func readBoundedData(from url: URL, maximumBytes: Int) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        var data = Data()
+        data.reserveCapacity(min(maximumBytes, boundedReadChunkSize))
+        while data.count <= maximumBytes {
+            let remaining = maximumBytes + 1 - data.count
+            guard remaining > 0 else { break }
+            let chunk = try handle.read(upToCount: min(remaining, boundedReadChunkSize)) ?? Data()
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        guard data.count <= maximumBytes else {
+            throw FinanceStatementImporter.Error.inputTooLarge
+        }
+        return data
+    }
+
+    /// Uses the shared bounded indexed-header API. Raw labels stay transient;
+    /// only the selected record index and the mapping's resulting fingerprint
+    /// cross the mapping boundary.
+    private static func headerColumnNames(
+        data: Data,
+        inspection: FinanceImportInspection,
+        recordIndex: Int?
+    ) throws -> [String] {
+        guard let recordIndex,
+              inspection.candidateHeaderRecordIndices.contains(recordIndex) else {
+            throw FinanceImportMappingError.missingHeader
+        }
+        guard let candidate = try FinanceStatementImporter.headerCandidates(data: data, inspection: inspection)
+            .first(where: { $0.recordIndex == recordIndex }) else {
+            throw FinanceImportMappingError.missingHeader
+        }
+        return candidate.labels
+    }
+
+    fileprivate func headerColumns(for recordIndex: Int) -> [String]? {
+        guard let data = pendingSourceData, let inspection = pendingInspection else { return nil }
+        return try? Self.headerColumnNames(data: data, inspection: inspection, recordIndex: recordIndex)
+    }
+
     @discardableResult
     func confirmImport(_ transactions: [FinanceImportedTransaction]) async -> FinanceImportConfirmationResult {
-        guard store != nil else {
-            syncState = .unavailable
-            syncMessage = "Imported Finance storage is unavailable. Local rows could not be changed."
-            return .failed(message: syncMessage ?? "Imported Finance storage is unavailable.")
+        guard pendingPreparedImport != nil else {
+            return .failed(message: "This import preview is no longer available. Choose the file again.")
         }
-        guard !transactions.isEmpty else {
-            errorMessage = "There are no valid transactions to import."
-            return .failed(message: errorMessage ?? "There are no valid transactions to import.")
+        return await confirmPreparedImport(transactions)
+    }
+
+    /// Secure production commit path. The caller can edit categories, but it
+    /// cannot replace importer-owned source rows, IDs, detection or
+    /// provenance. The store receives the immutable prepared preview and the
+    /// validated category-only delta.
+    @discardableResult
+    func confirmPreparedImport(_ editedTransactions: [FinanceImportedTransaction]) async -> FinanceImportConfirmationResult {
+        guard let prepared = pendingPreparedImport, store != nil else {
+            return .failed(message: "This import preview is no longer available. Choose the file again.")
         }
         guard !isImporting else {
             return .failed(message: "An import is already being saved. Keep this preview open and wait for it to finish.")
         }
+        guard editedTransactions.count == prepared.transactions.count else {
+            return .failed(message: "The import preview changed. Review it and retry.")
+        }
 
+        do {
+            let originalByID = Dictionary(uniqueKeysWithValues: prepared.transactions.map { ($0.id, $0) })
+            guard Set(editedTransactions.map(\.id)) == Set(originalByID.keys) else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            var edits: [FinanceImportCategoryEdit] = []
+            edits.reserveCapacity(editedTransactions.count)
+            for edited in editedTransactions {
+                guard let original = originalByID[edited.id],
+                      edited.hasSameSourceObservation(as: original) else {
+                    throw FinanceImportedTransactionStoreError.invalidEnvelope
+                }
+                let editedCategory = try edited.category.map { rawValue in
+                    guard let category = FinanceTransactionCategory(rawValue: rawValue) else {
+                        throw FinanceImportedTransactionStoreError.invalidEnvelope
+                    }
+                    return category
+                }
+                if edited.category != original.category {
+                    edits.append(FinanceImportCategoryEdit(transactionID: edited.id, category: editedCategory))
+                }
+            }
+            return await commitPreparedImport(prepared, categoryEdits: edits)
+        } catch {
+            return .failed(message: "The import preview changed. Review it and retry.")
+        }
+    }
+
+    private func commitPreparedImport(
+        _ prepared: FinancePreparedImport,
+        categoryEdits: [FinanceImportCategoryEdit]
+    ) async -> FinanceImportConfirmationResult {
         importGeneration &+= 1
         let generation = importGeneration
         isImporting = true
         defer {
             if generation == importGeneration { isImporting = false }
         }
-
         do {
             try Task.checkCancellation()
-            let result = try await importOperation(transactions)
+            let result = try await preparedImportOperation(prepared, categoryEdits)
             guard generation == importGeneration else {
                 return .failed(message: "This import result is stale. The editable preview remains available; retry it.")
             }
-
-            // Once the store operation returns, its atomic write is durable.
-            // Do not turn a cancellation arriving after that point into a
-            // false failure or clear the user's successful import.
             errorMessage = nil
-            self.pendingResult = nil
+            clearPendingImport()
             refreshAfterLocalMutation()
-            var parts: [String] = []
-            if result.insertedCount > 0 { parts.append("imported \(result.insertedCount) new rows") }
-            if result.updatedCount > 0 { parts.append("updated \(result.updatedCount) corrected rows") }
-            if result.duplicateCount > 0 { parts.append("skipped \(result.duplicateCount) unchanged duplicates") }
-            statusMessage = parts.isEmpty ? "No source changes were found." : parts.joined(separator: "; ") + "."
+            statusMessage = Self.importStatusMessage(for: result)
             return .saved
         } catch is CancellationError {
             guard generation == importGeneration else {
                 return .failed(message: "This import result is stale. The editable preview remains available; retry it.")
             }
-            return .failed(message: "Import cancelled. The editable preview remains available; retry when ready.")
+            return .failed(message: "Import cancelled. The preview remains available; retry when ready.")
         } catch {
             guard generation == importGeneration else {
                 return .failed(message: "This import result is stale. The editable preview remains available; retry it.")
@@ -252,11 +473,93 @@ final class FinanceImportViewModel: ObservableObject {
         }
     }
 
+    func applyMapping(_ draft: FinanceImportMappingDraft) {
+        guard !isImporting,
+              let data = pendingSourceData,
+              let inspection = pendingInspection,
+              let sessionID = pendingSessionID else {
+            errorMessage = "This import preview is no longer available. Choose the file again."
+            return
+        }
+        do {
+            guard let headerRecordIndex = draft.headerRecordIndex else {
+                throw FinanceImportMappingError.missingHeader
+            }
+            let headerColumns = try Self.headerColumnNames(
+                data: data,
+                inspection: inspection,
+                recordIndex: headerRecordIndex
+            )
+            var boundDraft = draft
+            boundDraft.delimiter = inspection.delimiter
+            let mapping = try FinanceImportMapping(draft: boundDraft, headerColumns: headerColumns)
+            let prepared = try FinanceStatementImporter.prepareMappedImport(
+                data: data,
+                inspection: inspection,
+                mapping: mapping,
+                sessionID: sessionID,
+                revision: importGeneration
+            )
+            pendingPreparedImport = prepared
+            pendingResult = prepared.result
+            errorMessage = nil
+            statusMessage = prepared.transactions.isEmpty
+                ? "The mapping is valid, but no rows contain a valid EUR transaction."
+                : "Mapping applied. Review the rows before saving."
+        } catch FinanceImportMappingError.unsupportedProfile {
+            errorMessage = "This export matches an unsupported institution format and cannot be enabled by mapping."
+        } catch FinanceImportMappingError.mappingNotRequired {
+            errorMessage = "This export is already a verified layout. Choose the file again to refresh its preview."
+        } catch FinanceImportMappingError.stalePreview {
+            errorMessage = "The file changed while it was being reviewed. Choose it again."
+        } catch {
+            errorMessage = "That mapping is incomplete or does not match the selected statement."
+        }
+    }
+
+    /// Drops only the importer-produced preview. The source bytes, inspection,
+    /// header choices, session, and persisted account choices remain available
+    /// so the user can correct a mapping without selecting the file again.
+    func beginMappingEdit() {
+        guard !isImporting,
+              canEditMapping,
+              let inspection = pendingInspection else { return }
+        importGeneration &+= 1
+        pendingPreparedImport = nil
+        pendingResult = FinanceImportResult(
+            transactions: [],
+            skippedRowCount: 0,
+            detectedSource: .genericCSV,
+            dataRowCount: inspection.dataRowCount,
+            headerRecognized: inspection.headerRecordIndex != nil,
+            institutionDetection: inspection.originalDetection
+        )
+        errorMessage = nil
+        statusMessage = "Adjust the statement columns before reviewing the rows."
+    }
+
     func discardPending() {
         guard !isImporting else { return }
         importGeneration &+= 1
-        pendingResult = nil
+        clearPendingImport()
         statusMessage = nil
+    }
+
+    private func clearPendingImport() {
+        pendingResult = nil
+        pendingSourceData = nil
+        pendingInspection = nil
+        pendingHeaderColumns = []
+        pendingPreparedImport = nil
+        pendingSessionID = nil
+    }
+
+    private static func importStatusMessage(for result: FinanceImportSaveResult) -> String {
+        var parts: [String] = []
+        if result.insertedCount > 0 { parts.append("imported \(result.insertedCount) new rows") }
+        if result.updatedCount > 0 { parts.append("updated \(result.updatedCount) corrected rows") }
+        if result.duplicateCount > 0 { parts.append("skipped \(result.duplicateCount) unchanged duplicates") }
+        return parts.isEmpty ? "No source changes were found." : parts.joined(separator: "; ") + "."
     }
 
     func delete(id: UUID) {
@@ -363,8 +666,10 @@ final class FinanceImportViewModel: ObservableObject {
         }
         do {
             let transactions = try store.all()
+            let mappings = try store.importMappings()
             let status = try store.syncStatus()
             savedTransactions = transactions
+            availableAccountChoices = Self.accountChoices(from: mappings, transactions: transactions)
             currentSyncStatus = status
             syncState = isSynchronizing ? .syncing : Self.presentationState(for: status)
         } catch {
@@ -373,6 +678,38 @@ final class FinanceImportViewModel: ObservableObject {
             syncMessage = "Imported Finance data could not be refreshed."
             errorMessage = Self.localErrorMessage(for: error)
         }
+    }
+
+    private static func accountChoices(
+        from mappings: [FinanceImportMapping],
+        transactions: [FinanceImportedTransaction]
+    ) -> [FinanceImportAccountChoice] {
+        var choicesByID: [UUID: FinanceImportAccountChoice] = [:]
+        var orderedIDs: [UUID] = []
+        orderedIDs.reserveCapacity(mappings.count + transactions.count)
+
+        for mapping in mappings {
+            let identity = mapping.account.identity
+            guard choicesByID[identity.id] == nil else { continue }
+            choicesByID[identity.id] = FinanceImportAccountChoice(
+                id: identity.id,
+                localLabel: identity.label
+            )
+            orderedIDs.append(identity.id)
+        }
+
+        for transaction in transactions {
+            guard transaction.identityScheme == .mappedV3,
+                  let mappedIdentity = transaction.mappedIdentity,
+                  choicesByID[mappedIdentity.accountID] == nil else { continue }
+            choicesByID[mappedIdentity.accountID] = FinanceImportAccountChoice(
+                id: mappedIdentity.accountID,
+                localLabel: nil
+            )
+            orderedIDs.append(mappedIdentity.accountID)
+        }
+
+        return orderedIDs.compactMap { choicesByID[$0] }
     }
 
     private func handleLocalError(_ error: Error) {
@@ -398,6 +735,8 @@ final class FinanceImportViewModel: ObservableObject {
         switch error {
         case .applicationSupportUnavailable, .readFailed, .invalidEnvelope:
             return "Imported Finance storage is unavailable or invalid."
+        case .migrationRequired:
+            return "Older generic Finance imports need one-time reconciliation before another mapped statement can be saved."
         case .transactionNotFound:
             return "That imported row is no longer available. Refresh the list and try again."
         case .stateTooLarge:
@@ -660,8 +999,10 @@ struct FinanceImportCard: View {
             set: { newValue in if newValue == nil { model.discardPending() } }
         )) { item in
             FinanceImportPreviewView(
+                model: model,
                 result: item.result,
                 onConfirm: { transactions in await model.confirmImport(transactions) },
+                onApplyMapping: model.applyMapping,
                 onCancel: model.discardPending
             )
         }
@@ -841,8 +1182,10 @@ private struct FinanceImportPreviewSheetItem: Identifiable {
 /// commits to persisting anything. Nothing is written to the durable store
 /// until the user explicitly taps Import.
 private struct FinanceImportPreviewView: View {
+    @ObservedObject var model: FinanceImportViewModel
     let result: FinanceImportResult
     let onConfirm: ([FinanceImportedTransaction]) async -> FinanceImportConfirmationResult
+    let onApplyMapping: (FinanceImportMappingDraft) -> Void
     let onCancel: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var workingTransactions: [FinanceImportedTransaction]
@@ -852,15 +1195,23 @@ private struct FinanceImportPreviewView: View {
     @State private var activeSaveToken: UUID?
 
     init(
+        model: FinanceImportViewModel,
         result: FinanceImportResult,
         onConfirm: @escaping ([FinanceImportedTransaction]) async -> FinanceImportConfirmationResult,
+        onApplyMapping: @escaping (FinanceImportMappingDraft) -> Void,
         onCancel: @escaping () -> Void
     ) {
+        self.model = model
         self.result = result
         self.onConfirm = onConfirm
+        self.onApplyMapping = onApplyMapping
         self.onCancel = onCancel
         _workingTransactions = State(initialValue: result.transactions)
         _confirmationError = State(initialValue: nil)
+    }
+
+    private var displayedResult: FinanceImportResult {
+        model.pendingResult ?? result
     }
 
     private var previewRows: [FinanceImportedTransaction] {
@@ -874,58 +1225,95 @@ private struct FinanceImportPreviewView: View {
                     HStack {
                         Text("Parsed")
                         Spacer()
-                        Text("\(result.transactions.count)")
+                        Text("\(displayedResult.transactions.count)")
                             .foregroundStyle(LifeOSTokens.success)
                             .fontWeight(.semibold)
                     }
                     HStack {
                         Text("Skipped (invalid rows)")
                         Spacer()
-                        Text("\(result.skippedRowCount)")
-                            .foregroundStyle(result.skippedRowCount > 0 ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
+                        Text("\(displayedResult.skippedRowCount)")
+                            .foregroundStyle(displayedResult.skippedRowCount > 0 ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                             .fontWeight(.semibold)
                     }
                     HStack {
                         Text("Detected layout")
                         Spacer()
-                        Text(result.detectedSource == .tradeRepublicCSV ? "Trade Republic" : "Generic CSV")
+                        Text(displayedResult.detectedSource == .tradeRepublicCSV ? "Trade Republic" : "Generic CSV")
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     HStack {
                         Text("Rows in file")
                         Spacer()
-                        Text("\(result.dataRowCount)")
+                        Text("\(displayedResult.dataRowCount)")
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
-                    if result.investmentTransactionCount > 0 {
+                    if displayedResult.investmentTransactionCount > 0 {
                         HStack {
                             Text("Investment orders")
                             Spacer()
-                            Text("\(result.investmentTransactionCount)")
+                            Text("\(displayedResult.investmentTransactionCount)")
                                 .foregroundStyle(LifeOSTokens.secondaryText)
                         }
                     }
-                    if !result.diagnostics.isEmpty {
+                    if !displayedResult.diagnostics.isEmpty {
                         Text("Diagnostics identify only affected rows and never include statement contents.")
                             .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 }
 
-                if !result.diagnostics.isEmpty {
+                if model.mappingIsBlocked {
+                    Section("Import unavailable") {
+                        Label("Unsupported statement format", systemImage: "nosign")
+                            .foregroundStyle(LifeOSTokens.warning)
+                        Text("This export is recognized as an unsupported institution format. Mapping its columns cannot enable it as a bank statement.")
+                            .lifeOSTypography(.metadata)
+                            .foregroundStyle(LifeOSTokens.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if model.showsMappingEditor {
+                    Section("Choose columns") {
+                        FinanceImportMappingEditor(
+                            headers: model.mappingHeaderColumns,
+                            headerRecordIndices: model.mappingHeaderRecordIndices,
+                            selectedHeaderRecordIndex: model.mappingHeaderRecordIndex,
+                            headerColumnsForRecord: { model.headerColumns(for: $0) },
+                            accountChoices: model.availableAccountChoices,
+                            onApply: onApplyMapping
+                        )
+                    }
+                }
+
+                if model.canEditMapping {
+                    Section {
+                        Button {
+                            model.beginMappingEdit()
+                        } label: {
+                            Label("Edit mapping", systemImage: "slider.horizontal.3")
+                        }
+                        .disabled(isSaving)
+                        Text("Review the statement with a different column interpretation. The current preview will be discarded until the new mapping is applied.")
+                            .lifeOSTypography(.metadata)
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if !displayedResult.diagnostics.isEmpty {
                     Section("Import diagnostics") {
-                        ForEach(Array(result.diagnostics.prefix(8).enumerated()), id: \.offset) { _, diagnostic in
+                        ForEach(Array(displayedResult.diagnostics.prefix(8).enumerated()), id: \.offset) { _, diagnostic in
                             HStack(spacing: 8) {
                                 LifeOSIcon(.warning)
                                     .foregroundStyle(LifeOSTokens.warning)
                                     .frame(width: 14, height: 14)
-                                Text("Row \(diagnostic.rowNumber): \(diagnostic.reason.displayName)")
+                                Text("Row \(diagnostic.rowNumber): \(diagnostic.financeImportDisplayName)")
                                     .lifeOSTypography(.metadata)
                                     .foregroundStyle(LifeOSTokens.secondaryText)
                             }
                         }
-                        if result.diagnostics.count > 8 {
-                            Text("Showing the first 8 of \(result.diagnostics.count) skipped rows.")
+                        if displayedResult.diagnostics.count > 8 {
+                            Text("Showing the first 8 of \(displayedResult.diagnostics.count) skipped rows.")
                                 .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                         }
@@ -943,9 +1331,15 @@ private struct FinanceImportPreviewView: View {
                     }
                 }
 
-                if result.transactions.isEmpty {
+                if displayedResult.transactions.isEmpty {
                     Section {
-                        Text(result.headerRecognized
+                        Text(model.requiresExplicitMapping
+                             ? "The file has not been interpreted yet. Choose the columns above; no guessed rows can be imported."
+                             : model.mappingIsBlocked
+                             ? "No rows were imported because this institution format is not enabled for bank-statement import."
+                             : model.showsMappingEditor
+                             ? "No valid rows matched this mapping. Adjust the columns above and apply the mapping again."
+                             : displayedResult.headerRecognized
                              ? "No valid EUR transactions were found in this file. Rows with unsupported currencies or malformed dates/amounts are not imported."
                              : "No date and amount header was recognized. No column order was guessed, so nothing was imported.")
                             .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -996,6 +1390,12 @@ private struct FinanceImportPreviewView: View {
                 }
             }
             .interactiveDismissDisabled(isSaving)
+            .onChange(of: model.pendingResult) { _, newValue in
+                guard let newValue else { return }
+                workingTransactions = newValue.transactions
+                draftRevision &+= 1
+                confirmationError = nil
+            }
         }
     }
 
@@ -1029,6 +1429,481 @@ private struct FinanceImportPreviewView: View {
                 confirmationError = message
             }
         }
+    }
+}
+
+private struct FinanceImportMappingEditor: View {
+    @State private var headers: [String]
+    let headerRecordIndices: [Int]
+    let headerColumnsForRecord: (Int) -> [String]?
+    let accountChoices: [FinanceImportAccountChoice]
+    let onApply: (FinanceImportMappingDraft) -> Void
+
+    @State private var selectedHeaderRecordIndex: Int
+    @State private var dateColumn: Int
+    @State private var dateFormat: FinanceImportDateFormat = .yearMonthDay
+    @State private var amountMode: AmountMode = .signed
+    @State private var amountColumn: Int
+    @State private var debitColumn: Int
+    @State private var creditColumn: Int
+    @State private var debitCreditConvention: FinanceImportDebitCreditConvention = .debitIsNegative
+    @State private var decimalSeparator: FinanceImportDecimalSeparator = .dot
+    @State private var groupingSeparator: FinanceImportGroupingSeparator = .none
+    @State private var descriptionMode: DescriptionMode = .column
+    @State private var descriptionColumn: Int
+    @State private var currencyMode: CurrencyMode = .constantEUR
+    @State private var currencyColumn: Int
+    @State private var sourceAccountColumn: Int?
+    @State private var providerIDColumn: Int?
+    @State private var merchantColumn: Int?
+    @State private var accountMode: AccountMode
+    @State private var selectedAccountID: UUID?
+    @State private var accountLabel = "Personal account"
+    @State private var errorMessage: String?
+
+    private enum AmountMode: String, CaseIterable, Identifiable {
+        case signed
+        case debitCredit
+        var id: Self { self }
+        var title: String { self == .signed ? "Signed amount" : "Debit + credit" }
+    }
+
+    private enum DescriptionMode: String, CaseIterable, Identifiable {
+        case column
+        case none
+        var id: Self { self }
+        var title: String { self == .column ? "Description column" : "No description" }
+    }
+
+    private enum CurrencyMode: String, CaseIterable, Identifiable {
+        case constantEUR
+        case column
+        var id: Self { self }
+        var title: String { self == .constantEUR ? "All rows are EUR" : "Currency column" }
+    }
+
+    private enum AccountMode: String, CaseIterable, Identifiable {
+        case existing
+        case new
+        var id: Self { self }
+        var title: String {
+            switch self {
+            case .existing: "Use saved account"
+            case .new: "Create new account"
+            }
+        }
+    }
+
+    private struct ColumnDefaults {
+        let date: Int
+        let amount: Int
+        let debit: Int
+        let credit: Int
+        let description: Int?
+        let currency: Int
+    }
+
+    init(
+        headers: [String],
+        headerRecordIndices: [Int],
+        selectedHeaderRecordIndex: Int?,
+        headerColumnsForRecord: @escaping (Int) -> [String]?,
+        accountChoices: [FinanceImportAccountChoice],
+        onApply: @escaping (FinanceImportMappingDraft) -> Void
+    ) {
+        _headers = State(initialValue: headers)
+        self.headerRecordIndices = headerRecordIndices
+        self.headerColumnsForRecord = headerColumnsForRecord
+        self.accountChoices = accountChoices
+        self.onApply = onApply
+        let defaults = Self.defaults(for: headers)
+        _selectedHeaderRecordIndex = State(initialValue: selectedHeaderRecordIndex ?? headerRecordIndices.first ?? 0)
+        _dateColumn = State(initialValue: defaults.date)
+        _amountColumn = State(initialValue: defaults.amount)
+        _debitColumn = State(initialValue: defaults.debit)
+        _creditColumn = State(initialValue: defaults.credit)
+        _descriptionColumn = State(initialValue: defaults.description ?? 0)
+        _descriptionMode = State(initialValue: defaults.description == nil ? .none : .column)
+        _currencyColumn = State(initialValue: defaults.currency)
+        _sourceAccountColumn = State(initialValue: nil)
+        _providerIDColumn = State(initialValue: nil)
+        _merchantColumn = State(initialValue: nil)
+        let defaultAccount = accountChoices.first
+        _accountMode = State(initialValue: defaultAccount == nil ? .new : .existing)
+        _selectedAccountID = State(initialValue: defaultAccount?.id)
+        _accountLabel = State(initialValue: defaultAccount?.localLabel ?? (defaultAccount == nil ? "Personal account" : ""))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("This file needs a one-time interpretation. The choices are saved with the import receipt; raw CSV text is never persisted.")
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if headers.isEmpty {
+                Text("No usable header row was found.")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.warning)
+            } else {
+                if !headerRecordIndices.isEmpty {
+                    Picker("Header row", selection: $selectedHeaderRecordIndex) {
+                        ForEach(headerRecordIndices, id: \.self) { recordIndex in
+                            Text("Record \(recordIndex + 1)").tag(recordIndex)
+                        }
+                    }
+                    .disabled(headerRecordIndices.count < 2)
+                    Text("The selected record is used as the exact source header for this mapping.")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                mappingPicker("Date", selection: $dateColumn)
+                Picker("Date format", selection: $dateFormat) {
+                    ForEach(FinanceImportDateFormat.allCases, id: \.self) { format in
+                        Text(format.rawValue).tag(format)
+                    }
+                }
+                Picker("Amount", selection: $amountMode) {
+                    ForEach(AmountMode.allCases) { mode in Text(mode.title).tag(mode) }
+                }
+                if amountMode == .signed {
+                    mappingPicker("Amount column", selection: $amountColumn)
+                } else {
+                    mappingPicker("Debit column", selection: $debitColumn)
+                    mappingPicker("Credit column", selection: $creditColumn)
+                    Picker("Direction", selection: $debitCreditConvention) {
+                        Text("Debit is outflow").tag(FinanceImportDebitCreditConvention.debitIsNegative)
+                        Text("Credit is outflow").tag(FinanceImportDebitCreditConvention.creditIsNegative)
+                    }
+                }
+                Picker("Decimal separator", selection: $decimalSeparator) {
+                    Text("Dot · 1234.56").tag(FinanceImportDecimalSeparator.dot)
+                    Text("Comma · 1234,56").tag(FinanceImportDecimalSeparator.comma)
+                }
+                Picker("Grouping", selection: $groupingSeparator) {
+                    Text("None").tag(FinanceImportGroupingSeparator.none)
+                    Text("Dot").tag(FinanceImportGroupingSeparator.dot)
+                    Text("Comma").tag(FinanceImportGroupingSeparator.comma)
+                    Text("Space").tag(FinanceImportGroupingSeparator.space)
+                    Text("Non-breaking space").tag(FinanceImportGroupingSeparator.nonBreakingSpace)
+                    Text("Narrow non-breaking space").tag(FinanceImportGroupingSeparator.narrowNonBreakingSpace)
+                }
+                Picker("Currency", selection: $currencyMode) {
+                    ForEach(CurrencyMode.allCases) { mode in Text(mode.title).tag(mode) }
+                }
+                if currencyMode == .column {
+                    mappingPicker("Currency column", selection: $currencyColumn)
+                }
+                Picker("Description", selection: $descriptionMode) {
+                    ForEach(DescriptionMode.allCases) { mode in Text(mode.title).tag(mode) }
+                }
+                if descriptionMode == .column {
+                    mappingPicker("Description column", selection: $descriptionColumn)
+                }
+                optionalMappingPicker("Provider ID", selection: $providerIDColumn)
+                optionalMappingPicker("Merchant", selection: $merchantColumn)
+                if accountChoices.isEmpty {
+                    Text("Account identity · Create new account")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                } else {
+                    Picker("Account identity", selection: $accountMode) {
+                        ForEach(AccountMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                }
+                if accountMode == .existing, !accountChoices.isEmpty {
+                    Picker("Saved account", selection: $selectedAccountID) {
+                        ForEach(accountChoices) { account in
+                            Text(account.displayName).tag(Optional(account.id))
+                        }
+                    }
+                    if let selectedAccount = selectedAccountChoice {
+                        if let localLabel = selectedAccount.localLabel {
+                            Text("Using \(localLabel)")
+                                .lifeOSTypography(.metadata)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                        } else {
+                            Text("This identity came from a synced mapped row. Add a private local label before applying the mapping.")
+                                .lifeOSTypography(.metadata)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                            TextField("Local account label", text: $accountLabel)
+                                #if os(iOS)
+                                .textInputAutocapitalization(.sentences)
+                                #endif
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                } else {
+                    if accountChoices.isEmpty {
+                        Text("No saved account identity exists yet. Create one explicitly for this statement.")
+                            .lifeOSTypography(.metadata)
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    TextField("Local account label", text: $accountLabel)
+                        #if os(iOS)
+                        .textInputAutocapitalization(.sentences)
+                        #endif
+                        .textFieldStyle(.roundedBorder)
+                }
+                optionalMappingPicker("Source account", selection: $sourceAccountColumn)
+                Text("Optional columns default to None. Selecting a source account separates rows from one export into the saved account identity while keeping the source value out of local provenance.")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let errorMessage {
+                    Text(errorMessage)
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.warning)
+                }
+                Button("Apply mapping") {
+                    apply()
+                }
+                .buttonStyle(LifeOSButtonStyle(.secondary))
+                .disabled(headers.isEmpty)
+            }
+        }
+        .onAppear { reconcileAccountSelection() }
+        .onChange(of: accountChoices) { _, _ in reconcileAccountSelection() }
+        .onChange(of: selectedAccountID) { _, _ in updateAccountLabelForSelection(resetSyncedLabel: true) }
+        .onChange(of: accountMode) { _, newMode in
+            if newMode == .existing { updateAccountLabelForSelection(resetSyncedLabel: true) }
+        }
+        .onChange(of: selectedHeaderRecordIndex) { oldValue, newValue in
+            selectHeader(newValue, revertingTo: oldValue)
+        }
+    }
+
+    @ViewBuilder
+    private func mappingPicker(_ title: String, selection: Binding<Int>) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(headers.indices, id: \.self) { index in
+                Text(Self.displayName(headers[index], index: index)).tag(index)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func optionalMappingPicker(_ title: String, selection: Binding<Int?>) -> some View {
+        Picker(title, selection: selection) {
+            Text("None").tag(nil as Int?)
+            ForEach(headers.indices, id: \.self) { index in
+                Text(Self.displayName(headers[index], index: index)).tag(Optional(index))
+            }
+        }
+    }
+
+    private func apply() {
+        do {
+            guard !headers.isEmpty, headerRecordIndices.contains(selectedHeaderRecordIndex) else {
+                errorMessage = "Choose a valid header row before applying the mapping."
+                return
+            }
+            guard !hasDuplicateColumnSelection else {
+                errorMessage = "Each mapped field must use a different column. Choose None for optional fields when needed."
+                return
+            }
+            let identity: FinanceImportAccountIdentity
+            switch accountMode {
+            case .existing:
+                guard let selectedAccountID,
+                      let selectedAccount = accountChoices.first(where: { $0.id == selectedAccountID }) else {
+                    errorMessage = "Choose a saved account or create a new account explicitly."
+                    return
+                }
+                let localLabel = selectedAccount.localLabel ?? accountLabel
+                identity = try FinanceImportAccountIdentity(id: selectedAccount.id, label: localLabel)
+            case .new:
+                identity = try FinanceImportAccountIdentity(label: accountLabel)
+            }
+            let amount = amountMode == .signed
+                ? FinanceImportAmountSelection.signed(
+                    column: amountColumn,
+                    format: FinanceImportAmountFormat(decimalSeparator: decimalSeparator, groupingSeparator: groupingSeparator)
+                )
+                : FinanceImportAmountSelection.debitCredit(
+                    debitColumn: debitColumn,
+                    creditColumn: creditColumn,
+                    convention: debitCreditConvention,
+                    format: FinanceImportAmountFormat(decimalSeparator: decimalSeparator, groupingSeparator: groupingSeparator)
+                )
+            let draft = FinanceImportMappingDraft(
+                delimiter: nil,
+                headerRecordIndex: selectedHeaderRecordIndex,
+                dateColumn: dateColumn,
+                dateFormat: dateFormat,
+                amount: amount,
+                currency: currencyMode == .constantEUR ? .constantEUR : .column(index: currencyColumn),
+                account: FinanceImportAccountSelection(identity: identity, sourceColumn: sourceAccountColumn),
+                description: descriptionMode == .none
+                    ? FinanceImportDescriptionSelection.none
+                    : FinanceImportDescriptionSelection.column(index: descriptionColumn),
+                providerIDColumn: providerIDColumn,
+                merchantColumn: merchantColumn
+            )
+            onApply(draft)
+            errorMessage = nil
+        } catch {
+            errorMessage = "Enter a short local account label before applying the mapping."
+        }
+    }
+
+    private var hasDuplicateColumnSelection: Bool {
+        var columns = [dateColumn]
+        if amountMode == .signed {
+            columns.append(amountColumn)
+        } else {
+            columns.append(contentsOf: [debitColumn, creditColumn])
+        }
+        if currencyMode == .column { columns.append(currencyColumn) }
+        if descriptionMode == .column { columns.append(descriptionColumn) }
+        if let sourceAccountColumn { columns.append(sourceAccountColumn) }
+        if let providerIDColumn { columns.append(providerIDColumn) }
+        if let merchantColumn { columns.append(merchantColumn) }
+        return !columns.allSatisfy({ headers.indices.contains($0) })
+            || Set(columns).count != columns.count
+    }
+
+    private func selectHeader(_ recordIndex: Int, revertingTo previousRecordIndex: Int) {
+        guard let selectedHeaders = headerColumnsForRecord(recordIndex), !selectedHeaders.isEmpty else {
+            selectedHeaderRecordIndex = previousRecordIndex
+            errorMessage = "That candidate header could not be read. Choose another header row."
+            return
+        }
+        headers = selectedHeaders
+        resetColumnDefaults()
+        errorMessage = nil
+    }
+
+    private func resetColumnDefaults() {
+        let defaults = Self.defaults(for: headers)
+        dateColumn = defaults.date
+        dateFormat = .yearMonthDay
+        amountMode = .signed
+        amountColumn = defaults.amount
+        debitColumn = defaults.debit
+        creditColumn = defaults.credit
+        debitCreditConvention = .debitIsNegative
+        decimalSeparator = .dot
+        groupingSeparator = .none
+        descriptionMode = defaults.description == nil ? .none : .column
+        descriptionColumn = defaults.description ?? 0
+        currencyMode = .constantEUR
+        currencyColumn = defaults.currency
+        sourceAccountColumn = nil
+        providerIDColumn = nil
+        merchantColumn = nil
+    }
+
+    private func reconcileAccountSelection() {
+        guard !accountChoices.isEmpty else {
+            accountMode = .new
+            selectedAccountID = nil
+            return
+        }
+        guard accountMode == .existing else { return }
+        guard let selectedAccountID,
+              accountChoices.contains(where: { $0.id == selectedAccountID }) else {
+            let first = accountChoices[0]
+            self.selectedAccountID = first.id
+            self.accountLabel = first.localLabel ?? ""
+            return
+        }
+        updateAccountLabelForSelection()
+    }
+
+    private var selectedAccountChoice: FinanceImportAccountChoice? {
+        guard let selectedAccountID else { return nil }
+        return accountChoices.first(where: { $0.id == selectedAccountID })
+    }
+
+    private func updateAccountLabelForSelection(resetSyncedLabel: Bool = false) {
+        guard accountMode == .existing,
+              let selectedAccountChoice else { return }
+        if let localLabel = selectedAccountChoice.localLabel {
+            accountLabel = localLabel
+        } else if resetSyncedLabel {
+            // A synced-only choice stays content-free until the user enters
+            // a private label in the local mapping editor.
+            accountLabel = ""
+        }
+    }
+
+    private static func defaults(for headers: [String]) -> ColumnDefaults {
+        guard !headers.isEmpty else {
+            return ColumnDefaults(date: 0, amount: 0, debit: 0, credit: 0, description: nil, currency: 0)
+        }
+        let date = preferredIndex(
+            in: headers,
+            matching: ["date", "datum", "buchungsdatum", "booking date"],
+            excluding: []
+        ) ?? firstAvailable(in: headers, excluding: []) ?? 0
+        let amount = preferredIndex(
+            in: headers,
+            matching: ["amount", "betrag", "value", "netto"],
+            excluding: [date]
+        ) ?? firstAvailable(in: headers, excluding: [date]) ?? date
+        let debit = preferredIndex(
+            in: headers,
+            matching: ["debit", "debit amount", "lastschrift"],
+            excluding: [date]
+        ) ?? firstAvailable(in: headers, excluding: [date]) ?? date
+        let creditExcluding = [date, debit]
+        let credit = preferredIndex(
+            in: headers,
+            matching: ["credit", "credit amount", "gutschrift"],
+            excluding: creditExcluding
+        ) ?? firstAvailable(in: headers, excluding: creditExcluding)
+            ?? headers.indices.first(where: { $0 != debit })
+            ?? debit
+        let descriptionExcluding = [date, amount]
+        let description = preferredIndex(
+            in: headers,
+            matching: ["description", "beschreibung", "memo", "name", "merchant"],
+            excluding: descriptionExcluding
+        ) ?? firstAvailable(in: headers, excluding: descriptionExcluding)
+        let currencyExcluding = descriptionExcluding + (description.map { [$0] } ?? [])
+        let currency = preferredIndex(
+            in: headers,
+            matching: ["currency", "währung", "waehrung"],
+            excluding: currencyExcluding
+        ) ?? firstAvailable(in: headers, excluding: currencyExcluding) ?? 0
+        return ColumnDefaults(
+            date: date,
+            amount: amount,
+            debit: debit,
+            credit: credit,
+            description: description,
+            currency: currency
+        )
+    }
+
+    private static func preferredIndex(
+        in headers: [String],
+        matching values: [String],
+        excluding: [Int]
+    ) -> Int? {
+        let excluded = Set(excluding)
+        let normalized = Set(values.map(FinanceInstitutionDetector.normalizeHeader))
+        return headers.indices.first {
+            !excluded.contains($0)
+                && normalized.contains(FinanceInstitutionDetector.normalizeHeader(headers[$0]))
+        }
+    }
+
+    private static func firstAvailable(in headers: [String], excluding: [Int]) -> Int? {
+        let excluded = Set(excluding)
+        return headers.indices.first(where: { !excluded.contains($0) })
+    }
+
+    private static func displayName(_ header: String, index: Int) -> String {
+        let cleaned = header.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = cleaned.isEmpty ? "Unnamed column" : String(cleaned.prefix(36))
+        return "\(index + 1) · \(label)"
     }
 }
 

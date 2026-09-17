@@ -6,6 +6,9 @@ public enum FinanceImportedTransactionStoreError: Error, Equatable, Sendable {
     case applicationSupportUnavailable
     case readFailed
     case invalidEnvelope
+    /// A persisted import was produced by the pre-v3 mapped identity scheme.
+    /// It must be reconciled before a v3 import can create another row.
+    case migrationRequired
     case writeFailed
     case transactionNotFound
     case stateTooLarge
@@ -59,6 +62,7 @@ extension FinanceImportedTransactionStoreError: LocalizedError {
         case .applicationSupportUnavailable: return "Local Finance import storage is unavailable."
         case .readFailed: return "Local Finance import storage could not be read."
         case .invalidEnvelope: return "Local Finance import storage is invalid and was not loaded."
+        case .migrationRequired: return "This Finance import needs one-time identity migration before it can be imported again."
         case .writeFailed: return "Imported transaction changes could not be saved."
         case .transactionNotFound: return "The imported transaction to remove was not found."
         case .stateTooLarge: return "The imported Finance ledger exceeds its safe storage limit."
@@ -121,7 +125,13 @@ public struct FinanceImportedAttemptedSyncRequest: Codable, Equatable, Sendable 
         }
         do {
             let request = try JSONDecoder.lifeOS.decode(FinanceImportedSyncRequest.self, from: body)
-            guard request.baseRevision == baseRevision, try request.canonicalData() == body else {
+            let currentCanonical = try request.canonicalData()
+            var acceptedCanonical = currentCanonical == body
+            if !acceptedCanonical, let legacyIdentityCanonical = try? request.legacyIdentityCanonicalData() {
+                acceptedCanonical = legacyIdentityCanonical == body
+            }
+            guard request.baseRevision == baseRevision,
+                  acceptedCanonical else {
                 throw FinanceImportedTransactionStoreError.invalidEnvelope
             }
         } catch let error as FinanceImportedTransactionStoreError {
@@ -371,12 +381,14 @@ public struct FinanceImportedPendingSyncRequest: Equatable, Sendable {
 }
 
 /// Version 3 adds per-record authority metadata, tombstone metadata, and
-/// immutable attempted envelopes. Versions 1 and 2 are decoded only to run a
+/// immutable attempted envelopes. Version 4 adds local-only mapping and
+/// import provenance metadata. Versions 1–3 are decoded only to run a
 /// one-time explicit migration; unknown versions fail closed.
 public struct FinanceImportedTransactionStoreEnvelope: Codable, Equatable, Sendable {
     public static let legacySchemaVersion = 1
     public static let previousSchemaVersion = 2
-    public static let currentSchemaVersion = 3
+    public static let preProvenanceSchemaVersion = 3
+    public static let currentSchemaVersion = 4
 
     public let schemaVersion: Int
     public let transactions: [FinanceImportedTransaction]
@@ -385,10 +397,23 @@ public struct FinanceImportedTransactionStoreEnvelope: Codable, Equatable, Senda
     public let remoteRecordRevisions: [String: Int]
     public let remoteTombstones: [FinanceImportedSyncTombstone]
     public let outbox: [FinanceImportedPendingSyncEntry]
+    public let importMappings: [FinanceImportMapping]
+    public let importBatches: [FinanceImportBatchProvenance]
+    /// Local-only fence for mappings decoded from the legacy mapped-v2
+    /// identity scheme. The marker is deliberately kept outside the mapping
+    /// payload so older mapping decoders can still be read without silently
+    /// losing the migration requirement.
+    public let legacyIdentityMappingIDs: [UUID]
+    /// Local-only fence for generic CSV rows written before reviewed import
+    /// provenance existed. Their historical v2 IDs cannot be safely matched
+    /// to the account-scoped mapped-v3 IDs, so a new mapped import must stop
+    /// until the user explicitly reconciles or clears those rows.
+    public let legacyGenericTransactionIDs: [UUID]
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case schemaVersion, transactions, remoteRevision, remoteETag
         case remoteRecordRevisions, remoteTombstones, outbox
+        case importMappings, importBatches, legacyIdentityMappingIDs, legacyGenericTransactionIDs
     }
 
     public init(
@@ -397,7 +422,11 @@ public struct FinanceImportedTransactionStoreEnvelope: Codable, Equatable, Senda
         remoteETag: String? = nil,
         remoteRecordRevisions: [String: Int] = [:],
         remoteTombstones: [FinanceImportedSyncTombstone] = [],
-        outbox: [FinanceImportedPendingSyncEntry] = []
+        outbox: [FinanceImportedPendingSyncEntry] = [],
+        importMappings: [FinanceImportMapping] = [],
+        importBatches: [FinanceImportBatchProvenance] = [],
+        legacyIdentityMappingIDs: [UUID] = [],
+        legacyGenericTransactionIDs: [UUID] = []
     ) {
         schemaVersion = Self.currentSchemaVersion
         self.transactions = transactions
@@ -406,6 +435,10 @@ public struct FinanceImportedTransactionStoreEnvelope: Codable, Equatable, Senda
         self.remoteRecordRevisions = remoteRecordRevisions
         self.remoteTombstones = remoteTombstones
         self.outbox = outbox
+        self.importMappings = importMappings
+        self.importBatches = importBatches
+        self.legacyIdentityMappingIDs = legacyIdentityMappingIDs
+        self.legacyGenericTransactionIDs = legacyGenericTransactionIDs
     }
 
     public init(from decoder: Decoder) throws {
@@ -424,6 +457,10 @@ public struct FinanceImportedTransactionStoreEnvelope: Codable, Equatable, Senda
             remoteRecordRevisions = [:]
             remoteTombstones = []
             outbox = []
+            importMappings = []
+            importBatches = []
+            legacyIdentityMappingIDs = []
+            legacyGenericTransactionIDs = []
         case Self.previousSchemaVersion:
             guard Set(container.allKeys) == Set([CodingKeys.schemaVersion, .transactions, .remoteRevision, .remoteETag, .outbox]) else {
                 throw FinanceImportedTransactionStoreError.invalidEnvelope
@@ -435,8 +472,15 @@ public struct FinanceImportedTransactionStoreEnvelope: Codable, Equatable, Senda
             remoteRecordRevisions = [:]
             remoteTombstones = []
             outbox = try container.decode([FinanceImportedPendingSyncEntry].self, forKey: .outbox)
-        case Self.currentSchemaVersion:
-            guard Set(container.allKeys) == Set(CodingKeys.allCases) else {
+            importMappings = []
+            importBatches = []
+            legacyIdentityMappingIDs = []
+            legacyGenericTransactionIDs = []
+        case Self.preProvenanceSchemaVersion:
+            guard Set(container.allKeys) == Set([
+                CodingKeys.schemaVersion, .transactions, .remoteRevision, .remoteETag,
+                .remoteRecordRevisions, .remoteTombstones, .outbox
+            ]) else {
                 throw FinanceImportedTransactionStoreError.invalidEnvelope
             }
             self.schemaVersion = schemaVersion
@@ -446,6 +490,28 @@ public struct FinanceImportedTransactionStoreEnvelope: Codable, Equatable, Senda
             remoteRecordRevisions = try container.decode([String: Int].self, forKey: .remoteRecordRevisions)
             remoteTombstones = try container.decode([FinanceImportedSyncTombstone].self, forKey: .remoteTombstones)
             outbox = try container.decode([FinanceImportedPendingSyncEntry].self, forKey: .outbox)
+            importMappings = []
+            importBatches = []
+            legacyIdentityMappingIDs = []
+            legacyGenericTransactionIDs = []
+        case Self.currentSchemaVersion:
+            let optionalKeys: Set<CodingKeys> = [.legacyIdentityMappingIDs, .legacyGenericTransactionIDs]
+            let requiredKeys = Set(CodingKeys.allCases).subtracting(optionalKeys)
+            guard requiredKeys.isSubset(of: Set(container.allKeys)),
+                  Set(container.allKeys).isSubset(of: Set(CodingKeys.allCases)) else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            self.schemaVersion = schemaVersion
+            transactions = try container.decode([FinanceImportedTransaction].self, forKey: .transactions)
+            remoteRevision = try container.decode(Int.self, forKey: .remoteRevision)
+            remoteETag = try container.decodeIfPresent(String.self, forKey: .remoteETag)
+            remoteRecordRevisions = try container.decode([String: Int].self, forKey: .remoteRecordRevisions)
+            remoteTombstones = try container.decode([FinanceImportedSyncTombstone].self, forKey: .remoteTombstones)
+            outbox = try container.decode([FinanceImportedPendingSyncEntry].self, forKey: .outbox)
+            importMappings = try container.decode([FinanceImportMapping].self, forKey: .importMappings)
+            importBatches = try container.decode([FinanceImportBatchProvenance].self, forKey: .importBatches)
+            legacyIdentityMappingIDs = try container.decodeIfPresent([UUID].self, forKey: .legacyIdentityMappingIDs) ?? []
+            legacyGenericTransactionIDs = try container.decodeIfPresent([UUID].self, forKey: .legacyGenericTransactionIDs) ?? []
         default:
             throw FinanceImportedTransactionStoreError.invalidEnvelope
         }
@@ -461,6 +527,14 @@ public struct FinanceImportedTransactionStoreEnvelope: Codable, Equatable, Senda
         try container.encode(remoteRecordRevisions, forKey: .remoteRecordRevisions)
         try container.encode(remoteTombstones, forKey: .remoteTombstones)
         try container.encode(outbox, forKey: .outbox)
+        try container.encode(importMappings, forKey: .importMappings)
+        try container.encode(importBatches, forKey: .importBatches)
+        if !legacyIdentityMappingIDs.isEmpty {
+            try container.encode(legacyIdentityMappingIDs, forKey: .legacyIdentityMappingIDs)
+        }
+        if !legacyGenericTransactionIDs.isEmpty {
+            try container.encode(legacyGenericTransactionIDs, forKey: .legacyGenericTransactionIDs)
+        }
     }
 }
 
@@ -498,6 +572,9 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
     public static let maximumPendingOperations = 10_000
     public static let maximumStateBytes = 8 * 1024 * 1024
     public static let maximumRetryAge: TimeInterval = 90 * 24 * 60 * 60
+    public static let maximumImportMappings = 256
+    public static let maximumImportBatches = 1_024
+    public static let maximumImportRowLinks = maximumTransactions
 
     private static let processTransactionLock = NSLock()
     private static let maximumOperationsPerEntry = FinanceImportedPendingSyncEntry.maximumOperations
@@ -509,6 +586,20 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         var remoteRecordRevisions: [UUID: Int]
         var remoteTombstones: [UUID: FinanceImportedSyncTombstone]
         var outbox: [FinanceImportedPendingSyncEntry]
+        var importMappings: [FinanceImportMapping]
+        var importBatches: [FinanceImportBatchProvenance]
+        var legacyIdentityMappingIDs: [UUID]
+        var legacyGenericTransactionIDs: [UUID]
+    }
+
+    private struct TransactionCommitOutcome {
+        let result: FinanceImportSaveResult
+        let didChange: Bool
+    }
+
+    private struct EquivalentBatchMatch {
+        let prior: FinanceImportBatchProvenance
+        let isPartial: Bool
     }
 
     public let fileURL: URL
@@ -533,6 +624,22 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         return try loadStateUnlocked().transactions
     }
 
+    /// Content-free local receipts for reviewed imports. Raw CSV, headers,
+    /// paths and account values are intentionally absent from this metadata.
+    public func importBatches() throws -> [FinanceImportBatchProvenance] {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        return try loadStateUnlocked().importBatches
+    }
+
+    /// User mappings are private local configuration. They are never added to
+    /// sync records or canonical operation bytes.
+    public func importMappings() throws -> [FinanceImportMapping] {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        return try loadStateUnlocked().importMappings
+    }
+
     @discardableResult
     public func add(_ transactions: [FinanceImportedTransaction]) throws -> FinanceImportSaveResult {
         guard !transactions.isEmpty else {
@@ -541,8 +648,175 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
         var state = try loadStateUnlocked()
+        let outcome = try commitTransactions(transactions, state: &state)
+        guard outcome.didChange else { return outcome.result }
+        try saveStateUnlocked(state)
+        return outcome.result
+    }
+
+    /// Commits only an importer-owned immutable preview. Source fields and
+    /// transaction IDs are taken from `prepared`; the caller may submit only
+    /// category edits keyed to rows already present in that preview.
+    @discardableResult
+    public func commitPreparedImport(
+        _ prepared: FinancePreparedImport,
+        categoryEdits: [FinanceImportCategoryEdit] = []
+    ) throws -> FinanceImportSaveResult {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        var state = try loadStateUnlocked()
+        try validatePreparedImport(prepared, categoryEdits: categoryEdits, state: state)
+        let effectiveMapping = try validateMappingReuse(
+            prepared.mapping,
+            batch: prepared.batchProvenance,
+            state: state
+        )
+        let effectiveBatch = try batchProvenance(
+            prepared.batchProvenance,
+            mappingID: effectiveMapping?.id
+        )
+
+        // The batch token is the idempotency boundary for local provenance.
+        // A retried commit reports the original rows as duplicates and never
+        // applies a second set of category edits or receipt metadata.
+        if let existingBatch = state.importBatches.first(where: { $0.id == effectiveBatch.id }) {
+            guard try equivalentBatchReceipt(existingBatch, effectiveBatch),
+                  existingBatch.rowLinks.map(\.transactionID) == effectiveBatch.rowLinks.map(\.transactionID),
+                  existingBatch.rowLinks.map(\.sourceRowNumber) == effectiveBatch.rowLinks.map(\.sourceRowNumber) else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            return try commitDuplicatePreparedImport(
+                prepared,
+                categoryEdits: categoryEdits,
+                state: &state
+            )
+        }
+
+        if let equivalentReceipt = try equivalentBatch(
+            for: effectiveBatch,
+            mapping: effectiveMapping,
+            state: state
+        ) {
+            let committedTransactions = try equivalentImportTransactions(
+                prepared,
+                categoryEdits: categoryEdits,
+                state: state
+            )
+            let outcome = try commitTransactions(
+                committedTransactions,
+                categoryEditIDs: Set(categoryEdits.map(\.transactionID)),
+                state: &state
+            )
+            if equivalentReceipt.isPartial {
+                guard let batchIndex = state.importBatches.firstIndex(where: { $0.id == equivalentReceipt.prior.id }) else {
+                    throw FinanceImportedTransactionStoreError.invalidEnvelope
+                }
+                state.importBatches[batchIndex] = try repairedEquivalentBatch(
+                    prior: equivalentReceipt.prior,
+                    candidate: effectiveBatch
+                )
+            }
+            // An exact duplicate has no receipt append. Category edits remain
+            // a normal local mutation and therefore still persist through the
+            // ordinary outbox path.
+            if outcome.didChange || equivalentReceipt.isPartial { try saveStateUnlocked(state) }
+            return outcome.result
+        }
+
+        let committedTransactions = try transactionsApplyingCategoryEdits(
+            to: prepared.transactions,
+            edits: categoryEdits
+        )
+        let outcome = try commitTransactions(
+            committedTransactions,
+            categoryEditIDs: Set(categoryEdits.map(\.transactionID)),
+            state: &state
+        )
+        guard state.importBatches.count < Self.maximumImportBatches else {
+            throw FinanceImportedTransactionStoreError.stateTooLarge
+        }
+        if let mapping = effectiveMapping,
+           !state.importMappings.contains(where: { $0.id == mapping.id }) {
+            guard state.importMappings.count < Self.maximumImportMappings else {
+                throw FinanceImportedTransactionStoreError.stateTooLarge
+            }
+            state.importMappings.append(mapping)
+        }
+        state.importBatches.append(effectiveBatch)
+        // The single atomic replacement covers transactions, outbox, mapping
+        // and provenance together. Duplicate-only imports return above and do
+        // not consume durable receipt, mapping, or row-link capacity.
+        try saveStateUnlocked(state)
+        return outcome.result
+    }
+
+    /// Reopening a previously imported source is a receipt replay. Preserve
+    /// any current source correction already in the ledger, while still
+    /// allowing a deliberately deleted row to be restored and an explicit
+    /// category edit to apply to an existing row.
+    private func equivalentImportTransactions(
+        _ prepared: FinancePreparedImport,
+        categoryEdits: [FinanceImportCategoryEdit],
+        state: State
+    ) throws -> [FinanceImportedTransaction] {
+        let editedPreview = try transactionsApplyingCategoryEdits(
+            to: prepared.transactions,
+            edits: categoryEdits
+        )
+        let editedIDs = Set(categoryEdits.map(\.transactionID))
+        let currentByID = Dictionary(uniqueKeysWithValues: state.transactions.map { ($0.id, $0) })
+        return editedPreview.map { candidate in
+            guard let current = currentByID[candidate.id] else { return candidate }
+            let category = editedIDs.contains(candidate.id) ? candidate.category : current.category
+            return FinanceImportedTransaction(
+                id: current.id,
+                bookedAt: current.bookedAt,
+                amountCents: current.amountCents,
+                description: current.description,
+                category: category,
+                source: current.source,
+                identityScheme: current.identityScheme,
+                mappedIdentity: current.mappedIdentity,
+                importedAt: current.importedAt,
+                sourceCategory: current.sourceCategory,
+                providerCode: current.providerCode,
+                kind: current.kind,
+                investment: current.investment
+            )
+        }
+    }
+
+    private func commitDuplicatePreparedImport(
+        _ prepared: FinancePreparedImport,
+        categoryEdits: [FinanceImportCategoryEdit],
+        state: inout State
+    ) throws -> FinanceImportSaveResult {
+        // A committed batch token is a receipt replay, not a new mutation.
+        // In particular, never reapply an old source preview or category edit
+        // after a later import has corrected the same provider identity.
+        _ = categoryEdits
+        return FinanceImportSaveResult(
+            requestedCount: prepared.transactions.count,
+            insertedCount: 0,
+            updatedCount: 0,
+            duplicateCount: prepared.transactions.count,
+            storedCount: state.transactions.count
+        )
+    }
+
+    private func commitTransactions(
+        _ transactions: [FinanceImportedTransaction],
+        categoryEditIDs: Set<UUID> = Set<UUID>(),
+        state: inout State
+    ) throws -> TransactionCommitOutcome {
         guard state.transactions.count <= Self.maximumTransactions else { throw FinanceImportedTransactionStoreError.stateTooLarge }
-        var indexByID = Dictionary(uniqueKeysWithValues: state.transactions.enumerated().map { ($0.element.id, $0.offset) })
+        var indexByID: [UUID: Int] = [:]
+        indexByID.reserveCapacity(state.transactions.count)
+        for (index, transaction) in state.transactions.enumerated() {
+            // `validateState` already rejects duplicates. Assignment keeps
+            // this path fail-safe if it is ever reused before validation.
+            indexByID[transaction.id] = index
+        }
         var seenIncomingIDs = Set<UUID>()
         var additions: [FinanceImportedTransaction] = []
         var changedOperations: [FinanceImportedSyncOperation] = []
@@ -555,21 +829,45 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
             if let index = indexByID[incoming.id] {
                 let existing = state.transactions[index]
                 var candidate = incoming
-                if candidate.category == nil { candidate.category = existing.category }
+                if candidate.category == nil && !categoryEditIDs.contains(incoming.id) {
+                    candidate.category = existing.category
+                }
                 candidate = FinanceImportedTransaction(
                     id: candidate.id, bookedAt: candidate.bookedAt, amountCents: candidate.amountCents,
                     description: candidate.description, category: candidate.category, source: candidate.source,
+                    identityScheme: candidate.identityScheme,
+                    mappedIdentity: candidate.mappedIdentity,
                     importedAt: existing.importedAt, sourceCategory: candidate.sourceCategory,
                     providerCode: candidate.providerCode, kind: candidate.kind, investment: candidate.investment
                 )
-                if existing.hasSameSourceObservation(as: candidate), existing.category == candidate.category {
+                let sourceChanged = !existing.hasSameSourceObservation(as: candidate)
+                let categoryChanged = existing.category != candidate.category
+                if !sourceChanged && !categoryChanged {
                     duplicateCount += 1
                 } else {
                     state.transactions[index] = candidate
-                    changedOperations.append(.upsert(
-                        record: try FinanceImportedSyncRecord(validating: candidate, sourceRevision: expected),
-                        expectedSourceRevision: expected
-                    ))
+                    if !sourceChanged && categoryChanged && categoryEditIDs.contains(incoming.id) {
+                        if let category = candidate.category {
+                            guard let category = FinanceTransactionCategory(rawValue: category) else {
+                                throw FinanceImportedTransactionStoreError.invalidEnvelope
+                            }
+                            changedOperations.append(.categorySet(
+                                recordID: candidate.id,
+                                expectedSourceRevision: expected,
+                                categoryOverride: category
+                            ))
+                        } else {
+                            changedOperations.append(.categoryClear(
+                                recordID: candidate.id,
+                                expectedSourceRevision: expected
+                            ))
+                        }
+                    } else {
+                        changedOperations.append(.upsert(
+                            record: try FinanceImportedSyncRecord(validating: candidate, sourceRevision: expected),
+                            expectedSourceRevision: expected
+                        ))
+                    }
                     updatedCount += 1
                 }
             } else {
@@ -581,14 +879,338 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
                 ))
             }
         }
+        guard additions.count <= Self.maximumTransactions - state.transactions.count else {
+            throw FinanceImportedTransactionStoreError.stateTooLarge
+        }
         state.transactions.append(contentsOf: additions)
         let result = FinanceImportSaveResult(requestedCount: transactions.count, insertedCount: additions.count,
                                              updatedCount: updatedCount, duplicateCount: duplicateCount,
                                              storedCount: state.transactions.count)
-        guard !changedOperations.isEmpty else { return result }
-        try appendToOutbox(changedOperations, state: &state)
-        try saveStateUnlocked(state)
-        return result
+        if !changedOperations.isEmpty {
+            try appendToOutbox(changedOperations, state: &state)
+        }
+        return TransactionCommitOutcome(result: result, didChange: !changedOperations.isEmpty)
+    }
+
+    private func validatePreparedImport(
+        _ prepared: FinancePreparedImport,
+        categoryEdits: [FinanceImportCategoryEdit],
+        state: State
+    ) throws {
+        guard !prepared.rows.isEmpty,
+              prepared.rows.count <= Self.maximumTransactions,
+              prepared.token.batchID == prepared.batchProvenance.id,
+              prepared.token.sourceDigest == prepared.batchProvenance.sourceDigest,
+              prepared.effectiveDetection == prepared.batchProvenance.effectiveDetection,
+              prepared.originalDetection == prepared.batchProvenance.originalDetection,
+              prepared.rows.count == prepared.batchProvenance.rowLinks.count,
+              prepared.rows.map(\.transaction.id) == prepared.batchProvenance.rowLinks.map(\.transactionID),
+              prepared.rows.map(\.sourceRowNumber) == prepared.batchProvenance.rowLinks.map(\.sourceRowNumber) else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        switch prepared.effectiveDetection.state {
+        case .known:
+            guard prepared.effectiveDetection.institution != nil, prepared.mapping == nil,
+                  prepared.batchProvenance.mappingID == nil else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+        case .userMapped:
+            guard prepared.effectiveDetection.institution == nil,
+                  let mapping = prepared.mapping,
+                  prepared.batchProvenance.mappingID == mapping.id,
+                  prepared.transactions.allSatisfy({
+                      $0.source == .genericCSV && $0.identityScheme == .mappedV3
+                  }) else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            guard !state.transactions.contains(where: {
+                $0.identityScheme == .mappedV3 && $0.mappedIdentity == nil
+            }) else {
+                // A mapped row from an older client has no account/configuration
+                // proof. Do not guess its relationship to this import.
+                throw FinanceImportedTransactionStoreError.migrationRequired
+            }
+            guard state.legacyGenericTransactionIDs.isEmpty else {
+                throw FinanceImportedTransactionStoreError.migrationRequired
+            }
+        case .unknown, .ambiguous:
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        let existingIDs = Set(state.transactions.map(\.id))
+        let previewIDs = Set(prepared.rows.map(\.transaction.id))
+        let newCount = prepared.rows.reduce(into: 0) { count, row in
+            if !existingIDs.contains(row.transaction.id) { count += 1 }
+        }
+        guard state.transactions.count + newCount <= Self.maximumTransactions else {
+            throw FinanceImportedTransactionStoreError.stateTooLarge
+        }
+        var editIDs = Set<UUID>()
+        for edit in categoryEdits {
+            guard editIDs.insert(edit.transactionID).inserted,
+                  previewIDs.contains(edit.transactionID) else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+        }
+    }
+
+    private func validateMappingReuse(
+        _ mapping: FinanceImportMapping?,
+        batch: FinanceImportBatchProvenance,
+        state: State
+    ) throws -> FinanceImportMapping? {
+        guard let mapping else { return nil }
+        // A v2 mapping cannot be allowed to create a v3 row. The importer may
+        // still be able to decode and display the old configuration, but the
+        // store has no safe way to prove that its old IDs match the v3 scheme.
+        guard !mapping.usesLegacyIdentityScheme else {
+            throw FinanceImportedTransactionStoreError.migrationRequired
+        }
+        let existingMapping = state.importMappings.first(where: { $0.id == mapping.id })
+        if let existingMapping {
+            guard !existingMapping.usesLegacyIdentityScheme,
+                  !state.legacyIdentityMappingIDs.contains(existingMapping.id) else {
+                throw FinanceImportedTransactionStoreError.migrationRequired
+            }
+            guard existingMapping == mapping else { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+        }
+
+        // A legacy mapping has no safe correspondence to mapped-v3 IDs. The
+        // account identity is the only durable scope that survives the old
+        // format, so any later mapped import for that account must stop at an
+        // explicit migration boundary regardless of changed selectors.
+        if state.importMappings.contains(where: {
+            ($0.usesLegacyIdentityScheme || state.legacyIdentityMappingIDs.contains($0.id))
+                && $0.account.identity.id == mapping.account.identity.id
+        }) {
+            throw FinanceImportedTransactionStoreError.migrationRequired
+        }
+
+        let mappedConfigurationDigest = mapping.identityConfigurationDigest
+        for transaction in state.transactions where transaction.identityScheme == .mappedV3 {
+            guard let mappedIdentity = transaction.mappedIdentity else {
+                throw FinanceImportedTransactionStoreError.migrationRequired
+            }
+            if mappedIdentity.accountID == mapping.account.identity.id,
+               mappedIdentity.configurationDigest != mappedConfigurationDigest {
+                throw FinanceImportedTransactionStoreError.migrationRequired
+            }
+        }
+
+        let mappingsByID = Dictionary(uniqueKeysWithValues: state.importMappings.map { ($0.id, $0) })
+        for priorBatch in state.importBatches where priorBatch.sourceDigest == batch.sourceDigest {
+            guard let priorMappingID = priorBatch.mappingID else { continue }
+            guard let priorMapping = mappingsByID[priorMappingID] else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            // The same source/account cannot silently adopt a different
+            // interpretation. Requiring an explicit new account preserves
+            // account separation while avoiding a second ledger copy caused
+            // by changed mapping columns.
+            if priorMapping.account.identity.id == mapping.account.identity.id,
+               !priorMapping.hasSameConfiguration(as: mapping) {
+                // A changed identity selector, source-account column, or
+                // amount interpretation can produce a different row ID for
+                // the same bytes. Never create a second ledger copy without
+                // an explicit migration/reconciliation step.
+                throw FinanceImportedTransactionStoreError.migrationRequired
+            }
+        }
+        for priorMapping in state.importMappings
+            where priorMapping.account.identity.id == mapping.account.identity.id
+                && priorMapping.id != mapping.id {
+            guard priorMapping.hasSameConfiguration(as: mapping) else {
+                // A changed provider selector, amount interpretation, source
+                // account column, or layout can address the same statement
+                // rows with different IDs. Require explicit reconciliation
+                // even when the newly selected export has different bytes.
+                throw FinanceImportedTransactionStoreError.migrationRequired
+            }
+        }
+
+        if let existingMapping {
+            return existingMapping
+        }
+
+        // A new preview may carry a new UUID even though the user selected
+        // the same reviewed account and layout. Reuse the durable mapping so
+        // the UUID cannot consume another mapping slot or change provenance
+        // identity on an exact reimport. This return is deliberately after
+        // the source/account interpretation checks above.
+        if let equivalent = state.importMappings.first(where: { $0.hasSameConfiguration(as: mapping) }) {
+            guard !state.legacyIdentityMappingIDs.contains(equivalent.id) else {
+                throw FinanceImportedTransactionStoreError.migrationRequired
+            }
+            return equivalent
+        }
+        return mapping
+    }
+
+    private func batchProvenance(
+        _ batch: FinanceImportBatchProvenance,
+        mappingID: UUID?
+    ) throws -> FinanceImportBatchProvenance {
+        guard batch.mappingID != mappingID else { return batch }
+        return try FinanceImportBatchProvenance(
+            id: batch.id,
+            importedAt: batch.importedAt,
+            sourceDigest: batch.sourceDigest,
+            byteCount: batch.byteCount,
+            headerFingerprint: batch.headerFingerprint,
+            delimiter: batch.delimiter,
+            headerRecordIndex: batch.headerRecordIndex,
+            mappingID: mappingID,
+            originalDetection: batch.originalDetection,
+            effectiveDetection: batch.effectiveDetection,
+            rowLinks: batch.rowLinks
+        )
+    }
+
+    /// JSONEncoder.lifeOS intentionally writes whole-second ISO-8601 dates.
+    /// Compare the encoded date bytes instead of the in-memory Date values so
+    /// a prepared receipt remains idempotent after a relaunch.
+    private func equivalentBatchReceipt(
+        _ lhs: FinanceImportBatchProvenance,
+        _ rhs: FinanceImportBatchProvenance
+    ) throws -> Bool {
+        guard lhs.id == rhs.id,
+              lhs.sourceDigest == rhs.sourceDigest,
+              lhs.byteCount == rhs.byteCount,
+              lhs.headerFingerprint == rhs.headerFingerprint,
+              lhs.delimiter == rhs.delimiter,
+              lhs.headerRecordIndex == rhs.headerRecordIndex,
+              lhs.mappingID == rhs.mappingID,
+              lhs.registryVersion == rhs.registryVersion,
+              lhs.detectorVersion == rhs.detectorVersion,
+              lhs.normalizationVersion == rhs.normalizationVersion,
+              lhs.originalDetection == rhs.originalDetection,
+              lhs.effectiveDetection == rhs.effectiveDetection,
+              lhs.rowLinks == rhs.rowLinks else {
+            return false
+        }
+        let lhsDate = try JSONEncoder.lifeOS.encode(lhs.importedAt)
+        let rhsDate = try JSONEncoder.lifeOS.encode(rhs.importedAt)
+        return lhsDate == rhsDate
+    }
+
+    /// Returns an existing receipt only when source bytes, effective layout,
+    /// and every row identity match. A partial receipt is allowed to be
+    /// repaired by a later import; an incompatible identity set is fenced so
+    /// a changed identity algorithm can never silently duplicate rows.
+    private func equivalentBatch(
+        for candidate: FinanceImportBatchProvenance,
+        mapping: FinanceImportMapping?,
+        state: State
+    ) throws -> EquivalentBatchMatch? {
+        for prior in state.importBatches where prior.sourceDigest == candidate.sourceDigest {
+            guard prior.byteCount == candidate.byteCount,
+                  prior.headerFingerprint == candidate.headerFingerprint,
+                  prior.delimiter == candidate.delimiter,
+                  prior.headerRecordIndex == candidate.headerRecordIndex,
+                  prior.originalDetection == candidate.originalDetection,
+                  prior.effectiveDetection == candidate.effectiveDetection else {
+                continue
+            }
+
+            let sameEffectiveMapping: Bool
+            switch (prior.mappingID, candidate.mappingID) {
+            case (nil, nil):
+                sameEffectiveMapping = true
+            case let (priorID?, candidateID?):
+                guard let priorMapping = state.importMappings.first(where: { $0.id == priorID }) else {
+                    throw FinanceImportedTransactionStoreError.invalidEnvelope
+                }
+                guard let mapping else { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+                // candidateID is checked by validateMappingReuse; keeping the
+                // comparison here makes this helper safe if another caller is
+                // added later.
+                guard candidateID == mapping.id else { continue }
+                sameEffectiveMapping = priorMapping.hasSameConfiguration(as: mapping)
+            default:
+                sameEffectiveMapping = false
+            }
+            guard sameEffectiveMapping else { continue }
+
+            let priorIDs = prior.rowLinks.map(\.transactionID)
+            let candidateIDs = candidate.rowLinks.map(\.transactionID)
+            if priorIDs == candidateIDs,
+               prior.rowLinks.map(\.sourceRowNumber) == candidate.rowLinks.map(\.sourceRowNumber) {
+                return EquivalentBatchMatch(prior: prior, isPartial: false)
+            }
+
+            // Removing a local row prunes its link from a receipt. Permit a
+            // later full statement to restore that row and repair the same
+            // receipt atomically. Any other mismatch is an identity-version
+            // seam and requires explicit migration before another row can be
+            // created.
+            let priorIDSet = Set(priorIDs)
+            let candidateIDSet = Set(candidateIDs)
+            guard priorIDSet.isSubset(of: candidateIDSet)
+                    || candidateIDSet.isSubset(of: priorIDSet) else {
+                throw FinanceImportedTransactionStoreError.migrationRequired
+            }
+            return EquivalentBatchMatch(prior: prior, isPartial: true)
+        }
+        return nil
+    }
+
+    private func repairedEquivalentBatch(
+        prior: FinanceImportBatchProvenance,
+        candidate: FinanceImportBatchProvenance
+    ) throws -> FinanceImportBatchProvenance {
+        let repairedLinks = try candidate.rowLinks.map {
+            try FinanceImportRowProvenance(
+                batchID: prior.id,
+                sourceRowNumber: $0.sourceRowNumber,
+                transactionID: $0.transactionID
+            )
+        }
+        return try FinanceImportBatchProvenance(
+            id: prior.id,
+            importedAt: prior.importedAt,
+            sourceDigest: candidate.sourceDigest,
+            byteCount: candidate.byteCount,
+            headerFingerprint: candidate.headerFingerprint,
+            delimiter: candidate.delimiter,
+            headerRecordIndex: candidate.headerRecordIndex,
+            mappingID: candidate.mappingID,
+            originalDetection: candidate.originalDetection,
+            effectiveDetection: candidate.effectiveDetection,
+            rowLinks: repairedLinks
+        )
+    }
+
+    private func transactionsApplyingCategoryEdits(
+        to transactions: [FinanceImportedTransaction],
+        edits: [FinanceImportCategoryEdit]
+    ) throws -> [FinanceImportedTransaction] {
+        let transactionIDs = Set(transactions.map(\.id))
+        var editsByID: [UUID: FinanceImportCategoryEdit] = [:]
+        editsByID.reserveCapacity(edits.count)
+        for edit in edits {
+            guard editsByID[edit.transactionID] == nil,
+                  transactionIDs.contains(edit.transactionID) else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            editsByID[edit.transactionID] = edit
+        }
+        return transactions.map { transaction in
+            guard let edit = editsByID[transaction.id] else { return transaction }
+            return FinanceImportedTransaction(
+                id: transaction.id,
+                bookedAt: transaction.bookedAt,
+                amountCents: transaction.amountCents,
+                description: transaction.description,
+                category: edit.category?.rawValue,
+                source: transaction.source,
+                identityScheme: transaction.identityScheme,
+                mappedIdentity: transaction.mappedIdentity,
+                importedAt: transaction.importedAt,
+                sourceCategory: transaction.sourceCategory,
+                providerCode: transaction.providerCode,
+                kind: transaction.kind,
+                investment: transaction.investment
+            )
+        }
     }
 
     public func remove(id: UUID) throws {
@@ -597,6 +1219,7 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         var state = try loadStateUnlocked()
         guard let index = state.transactions.firstIndex(where: { $0.id == id }) else { throw FinanceImportedTransactionStoreError.transactionNotFound }
         state.transactions.remove(at: index)
+        try pruneImportBatches(&state)
         try appendToOutbox([.delete(recordID: id, expectedSourceRevision: state.remoteRecordRevisions[id] ?? 0, deletedAt: .now)], state: &state)
         try saveStateUnlocked(state)
     }
@@ -637,10 +1260,45 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
                 }
             }
         )
-        guard !clearedIDs.isEmpty else { return }
+        guard !clearedIDs.isEmpty || !state.importMappings.isEmpty || !state.importBatches.isEmpty
+                || !state.legacyIdentityMappingIDs.isEmpty
+                || !state.legacyGenericTransactionIDs.isEmpty else { return }
         state.transactions.removeAll(keepingCapacity: false)
-        try compactOutboxForClearAll(clearedIDs: clearedIDs, state: &state, deletedAt: .now)
+        if !clearedIDs.isEmpty {
+            try compactOutboxForClearAll(clearedIDs: clearedIDs, state: &state, deletedAt: .now)
+        }
+        state.importMappings.removeAll(keepingCapacity: false)
+        state.importBatches.removeAll(keepingCapacity: false)
+        state.legacyIdentityMappingIDs.removeAll(keepingCapacity: false)
+        state.legacyGenericTransactionIDs.removeAll(keepingCapacity: false)
         try saveStateUnlocked(state)
+    }
+
+    /// Keeps durable import provenance aligned with the local transaction set.
+    /// A batch is a receipt for rows that still exist locally; once its last
+    /// row is removed, the receipt is dropped as well. Mappings remain until
+    /// `clearAll()` so a user can reuse a reviewed mapping after deleting an
+    /// earlier import.
+    private func pruneImportBatches(_ state: inout State) throws {
+        let transactionIDs = Set(state.transactions.map(\.id))
+        state.importBatches = try state.importBatches.compactMap { batch in
+            let retainedLinks = batch.rowLinks.filter { transactionIDs.contains($0.transactionID) }
+            guard !retainedLinks.isEmpty else { return nil }
+            guard retainedLinks.count != batch.rowLinks.count else { return batch }
+            return try FinanceImportBatchProvenance(
+                id: batch.id,
+                importedAt: batch.importedAt,
+                sourceDigest: batch.sourceDigest,
+                byteCount: batch.byteCount,
+                headerFingerprint: batch.headerFingerprint,
+                delimiter: batch.delimiter,
+                headerRecordIndex: batch.headerRecordIndex,
+                mappingID: batch.mappingID,
+                originalDetection: batch.originalDetection,
+                effectiveDetection: batch.effectiveDetection,
+                rowLinks: retainedLinks
+            )
+        }
     }
 
     public func transactions(in interval: DateInterval?) throws -> [FinanceImportedTransaction] {
@@ -741,7 +1399,7 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         defer { Self.processTransactionLock.unlock() }
         var state = try loadStateUnlocked()
         try validateRemoteOrdering(result, state: state)
-        mergeRemoteUnlocked(result, state: &state)
+        try mergeRemoteUnlocked(result, state: &state)
         normalizeDeferredOperations(&state)
         try saveStateUnlocked(state)
     }
@@ -774,7 +1432,7 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
             // newer than the revision committed by the original request. It
             // cannot prove that the returned row revision belongs to that
             // request, so never advance a superseded clear-all delete from it.
-            mergeRemoteUnlocked(result, state: &state)
+            try mergeRemoteUnlocked(result, state: &state)
             blockSupersededAttemptReceiptUnlocked(reconciliationReceipt.idempotencyKey, state: &state)
             try saveStateUnlocked(state)
             throw FinanceImportedTransactionStoreError.syncReceiptUnresolved
@@ -782,7 +1440,7 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         if isCurrentHead {
             state.outbox.removeFirst()
         }
-        mergeRemoteUnlocked(result, state: &state)
+        try mergeRemoteUnlocked(result, state: &state)
         if let reconciliationReceipt {
             try rebaseSupersededDeletes(
                 receipt: reconciliationReceipt,
@@ -803,7 +1461,7 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         defer { Self.processTransactionLock.unlock() }
         var state = try loadStateUnlocked()
         try validateRemoteOrdering(result, state: state)
-        mergeRemoteUnlocked(result, state: &state)
+        try mergeRemoteUnlocked(result, state: &state)
         // A conflict response is authoritative evidence that this request was
         // rejected. Its snapshot may contain another writer's newer row, so it
         // can never serve as proof for rebasing a superseded delete. Only the
@@ -1055,18 +1713,26 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         }
     }
 
-    private func mergeRemoteUnlocked(_ result: FinanceImportedSyncResult, state: inout State) {
+    private func mergeRemoteUnlocked(_ result: FinanceImportedSyncResult, state: inout State) throws {
         let protectedIDs = Set(state.outbox.flatMap { $0.operations.map(\.recordID) })
         var byID = Dictionary(uniqueKeysWithValues: state.transactions.map { ($0.id, $0) })
         for record in result.snapshot.records where !protectedIDs.contains(record.recordID) {
             byID[record.recordID] = record.transaction
         }
+        var acceptedTombstoneIDs = Set<UUID>()
         for tombstone in result.snapshot.tombstones where !protectedIDs.contains(tombstone.recordID) {
             byID.removeValue(forKey: tombstone.recordID)
+            acceptedTombstoneIDs.insert(tombstone.recordID)
         }
         state.transactions = byID.values.sorted {
             if $0.bookedAt != $1.bookedAt { return $0.bookedAt < $1.bookedAt }
             return $0.id.uuidString < $1.id.uuidString
+        }
+        // Remote tombstones remove their local provenance links together with
+        // the accepted transaction. Protected local outbox rows remain in
+        // `byID`, so their links are retained until the local write resolves.
+        if !acceptedTombstoneIDs.isEmpty {
+            try pruneImportBatches(&state)
         }
         state.remoteRevision = result.snapshot.revision
         state.remoteETag = result.etag
@@ -1408,18 +2074,181 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         state.outbox.append(contentsOf: additions)
     }
 
+    private static let legacyIdentityMarkerKeys: Set<String> = [
+        "identityScheme", "identitySchemeVersion", "identityVersion",
+        "stableIDScheme", "stableIDVersion", "stableIdentityVersion",
+        "identityAlgorithm"
+    ]
+
+    private static func legacyIdentityMappingIDs(in data: Data) -> Set<UUID> {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return []
+        }
+        var ids = Set<UUID>()
+        if let encodedIDs = root["legacyIdentityMappingIDs"] as? [String] {
+            for rawID in encodedIDs {
+                if let id = UUID(uuidString: rawID) { ids.insert(id) }
+            }
+        }
+        guard let mappings = root["importMappings"] as? [[String: Any]] else { return ids }
+        for mapping in mappings {
+            guard let rawID = mapping["id"] as? String,
+                  let id = UUID(uuidString: rawID) else { continue }
+            let marker = mapping.contains { key, value in
+                guard Self.legacyIdentityMarkerKeys.contains(key) else { return false }
+                if let string = value as? String {
+                    let normalized = string.lowercased()
+                    let compact = normalized
+                        .replacingOccurrences(of: "-", with: "")
+                        .replacingOccurrences(of: "_", with: "")
+                    return compact.contains("mappedv2")
+                        || compact == "v2"
+                        || compact == "legacyv2"
+                }
+                if let number = value as? NSNumber { return number.intValue == 2 }
+                return false
+            }
+            if marker { ids.insert(id) }
+        }
+        return ids
+    }
+
+    private static func strippingLegacyIdentityMarkers(from data: Data) -> Data? {
+        guard var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var mappings = root["importMappings"] as? [[String: Any]],
+              !mappings.isEmpty else {
+            return nil
+        }
+        var removed = false
+        for index in mappings.indices {
+            let keys = mappings[index].keys.filter { Self.legacyIdentityMarkerKeys.contains($0) }
+            for key in keys {
+                mappings[index].removeValue(forKey: key)
+                removed = true
+            }
+        }
+        guard removed else { return nil }
+        root["importMappings"] = mappings
+        return try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+    }
+
+    private func readBoundedStateData() throws -> Data {
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forReadingFrom: fileURL)
+        } catch {
+            throw FinanceImportedTransactionStoreError.readFailed
+        }
+        defer { try? handle.close() }
+
+        var data = Data()
+        data.reserveCapacity(min(Self.maximumStateBytes, 64 * 1024))
+        do {
+            while data.count <= Self.maximumStateBytes {
+                let remaining = Self.maximumStateBytes + 1 - data.count
+                guard remaining > 0 else { break }
+                let chunk = try handle.read(upToCount: min(remaining, 64 * 1024)) ?? Data()
+                if chunk.isEmpty { break }
+                data.append(contentsOf: chunk)
+            }
+        } catch {
+            throw FinanceImportedTransactionStoreError.readFailed
+        }
+        guard data.count <= Self.maximumStateBytes else {
+            throw FinanceImportedTransactionStoreError.stateTooLarge
+        }
+        return data
+    }
+
     private func loadStateUnlocked() throws -> State {
         guard fileManager.fileExists(atPath: fileURL.path) else {
             return State(transactions: [], remoteRevision: 0, remoteETag: nil,
-                         remoteRecordRevisions: [:], remoteTombstones: [:], outbox: [])
+                         remoteRecordRevisions: [:], remoteTombstones: [:], outbox: [],
+                         importMappings: [], importBatches: [], legacyIdentityMappingIDs: [],
+                         legacyGenericTransactionIDs: [])
         }
-        let data: Data
-        do { data = try Data(contentsOf: fileURL) } catch { throw FinanceImportedTransactionStoreError.readFailed }
-        guard data.count <= Self.maximumStateBytes else { throw FinanceImportedTransactionStoreError.stateTooLarge }
+        let data = try readBoundedStateData()
+        let detectedLegacyIdentityMappingIDs = Self.legacyIdentityMappingIDs(in: data)
         let envelope: FinanceImportedTransactionStoreEnvelope
-        do { envelope = try JSONDecoder.lifeOS.decode(FinanceImportedTransactionStoreEnvelope.self, from: data) }
-        catch let error as FinanceImportedTransactionStoreError { throw error }
-        catch { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+        do {
+            envelope = try JSONDecoder.lifeOS.decode(FinanceImportedTransactionStoreEnvelope.self, from: data)
+        } catch let error as FinanceImportedTransactionStoreError {
+            throw error
+        } catch {
+            guard !detectedLegacyIdentityMappingIDs.isEmpty,
+                  let sanitizedData = Self.strippingLegacyIdentityMarkers(from: data) else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            do {
+                envelope = try JSONDecoder.lifeOS.decode(FinanceImportedTransactionStoreEnvelope.self, from: sanitizedData)
+            } catch {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+        }
+        let decoderLegacyIdentityMappingIDs = Set(
+            envelope.importMappings.filter(\.usesLegacyIdentityScheme).map(\.id)
+        )
+        let legacyIdentityMappingIDs = Set(envelope.legacyIdentityMappingIDs)
+            .union(decoderLegacyIdentityMappingIDs)
+            .union(detectedLegacyIdentityMappingIDs)
+        var modernMappingsByID: [UUID: FinanceImportMapping] = [:]
+        for mapping in envelope.importMappings where !mapping.usesLegacyIdentityScheme {
+            guard modernMappingsByID[mapping.id] == nil else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            modernMappingsByID[mapping.id] = mapping
+        }
+        var mappedIdentitiesByTransactionID: [UUID: FinanceImportedMappedIdentity] = [:]
+        for batch in envelope.importBatches {
+            guard let mappingID = batch.mappingID,
+                  let mapping = modernMappingsByID[mappingID] else { continue }
+            let mappedIdentity = try FinanceImportedMappedIdentity(mapping: mapping)
+            for link in batch.rowLinks {
+                if let prior = mappedIdentitiesByTransactionID[link.transactionID], prior != mappedIdentity {
+                    throw FinanceImportedTransactionStoreError.invalidEnvelope
+                }
+                mappedIdentitiesByTransactionID[link.transactionID] = mappedIdentity
+            }
+        }
+        for transaction in envelope.transactions {
+            guard let expected = mappedIdentitiesByTransactionID[transaction.id] else { continue }
+            if transaction.identityScheme == .mappedV3,
+               let actual = transaction.mappedIdentity,
+               actual != expected {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+        }
+        let normalizedTransactions = envelope.transactions.map { transaction in
+            guard transaction.source == .genericCSV,
+                  let mappedIdentity = mappedIdentitiesByTransactionID[transaction.id] else {
+                return transaction
+            }
+            return transaction
+                .withIdentityScheme(.mappedV3)
+                .withMappedIdentity(mappedIdentity)
+        }
+        let normalizedMappedIdentitySchemes = normalizedTransactions != envelope.transactions
+        let linkedImportTransactionIDs = Set(envelope.importBatches.flatMap { $0.rowLinks.map(\.transactionID) })
+        let inferredLegacyGenericTransactionIDs = Set(
+            normalizedTransactions
+                .filter {
+                    $0.source == .genericCSV
+                        && $0.identityScheme == .legacyV2
+                        && !linkedImportTransactionIDs.contains($0.id)
+                }
+                .map(\.id)
+        )
+        let legacyGenericCandidates = Set(envelope.legacyGenericTransactionIDs)
+            .union(inferredLegacyGenericTransactionIDs)
+        let legacyGenericTransactionIDs = Set(
+            normalizedTransactions
+                .filter {
+                    $0.source == .genericCSV
+                        && $0.identityScheme == .legacyV2
+                        && legacyGenericCandidates.contains($0.id)
+                }
+                .map(\.id)
+        )
 
         var revisions: [UUID: Int] = [:]
         for (rawID, revision) in envelope.remoteRecordRevisions {
@@ -1436,13 +2265,19 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         }
 
         var state = State(
-            transactions: envelope.transactions, remoteRevision: envelope.remoteRevision, remoteETag: envelope.remoteETag,
-            remoteRecordRevisions: revisions, remoteTombstones: tombstones, outbox: envelope.outbox
+            transactions: normalizedTransactions, remoteRevision: envelope.remoteRevision, remoteETag: envelope.remoteETag,
+            remoteRecordRevisions: revisions, remoteTombstones: tombstones, outbox: envelope.outbox,
+            importMappings: envelope.importMappings, importBatches: envelope.importBatches,
+            legacyIdentityMappingIDs: legacyIdentityMappingIDs.sorted { $0.uuidString < $1.uuidString },
+            legacyGenericTransactionIDs: legacyGenericTransactionIDs.sorted { $0.uuidString < $1.uuidString }
         )
         guard envelope.remoteRevision >= 0, envelope.remoteRevision <= FinanceImportedSyncRecord.maximumSafeCents else {
             throw FinanceImportedTransactionStoreError.invalidEnvelope
         }
         var changed = envelope.schemaVersion != FinanceImportedTransactionStoreEnvelope.currentSchemaVersion
+            || Set(envelope.legacyIdentityMappingIDs) != legacyIdentityMappingIDs
+            || Set(envelope.legacyGenericTransactionIDs) != legacyGenericTransactionIDs
+            || normalizedMappedIdentitySchemes
         if let etag = state.remoteETag,
            (TailscaleSyncClient.validatedFinanceImportedETag(etag) == nil
             || TailscaleSyncClient.financeImportedETagRevision(etag) != state.remoteRevision) {
@@ -1619,9 +2454,86 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
                 _ = try attempted.decodedRequest()
             }
         }
+        guard state.importMappings.count <= Self.maximumImportMappings,
+              state.importBatches.count <= Self.maximumImportBatches,
+              state.importBatches.reduce(0, { $0 + $1.rowLinks.count }) <= Self.maximumImportRowLinks,
+              Set(state.importMappings.map(\.id)).count == state.importMappings.count,
+              Set(state.importBatches.map(\.id)).count == state.importBatches.count,
+              state.legacyIdentityMappingIDs.count <= Self.maximumImportMappings,
+              Set(state.legacyIdentityMappingIDs).count == state.legacyIdentityMappingIDs.count,
+              state.legacyGenericTransactionIDs.count <= Self.maximumTransactions,
+              Set(state.legacyGenericTransactionIDs).count == state.legacyGenericTransactionIDs.count else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        let localTransactionIDs = Set(state.transactions.map(\.id))
+        let transactionsByID = Dictionary(uniqueKeysWithValues: state.transactions.map { ($0.id, $0) })
+        guard Set(state.legacyGenericTransactionIDs).isSubset(of: localTransactionIDs),
+              state.legacyGenericTransactionIDs.allSatisfy({
+                  transactionsByID[$0]?.source == .genericCSV
+                      && transactionsByID[$0]?.identityScheme == .legacyV2
+              }) else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        let mappingIDs = Set(state.importMappings.map(\.id))
+        guard Set(state.legacyIdentityMappingIDs).isSubset(of: mappingIDs) else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        let mappingsByID = Dictionary(uniqueKeysWithValues: state.importMappings.map { ($0.id, $0) })
+        guard state.legacyIdentityMappingIDs.allSatisfy({ mappingsByID[$0]?.usesLegacyIdentityScheme == true }) else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        for batch in state.importBatches {
+            guard batch.mappingID.map(mappingIDs.contains) ?? true,
+                  !batch.rowLinks.isEmpty,
+                  Set(batch.rowLinks.map(\.batchID)) == Set([batch.id]),
+                  Set(batch.rowLinks.map(\.transactionID)).count == batch.rowLinks.count,
+                  batch.rowLinks.allSatisfy({ localTransactionIDs.contains($0.transactionID) }) else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            switch batch.effectiveDetection.state {
+            case .known:
+                guard batch.effectiveDetection.institution != nil, batch.mappingID == nil else {
+                    throw FinanceImportedTransactionStoreError.invalidEnvelope
+                }
+            case .userMapped:
+                guard batch.effectiveDetection.institution == nil, batch.mappingID != nil else {
+                    throw FinanceImportedTransactionStoreError.invalidEnvelope
+                }
+            case .unknown, .ambiguous:
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+        }
+        for mapping in state.importMappings {
+            guard mapping.schemaVersion == FinanceImportMapping.schemaVersion,
+                  mapping.columnCount > 0 else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+        }
     }
 
-    private func saveStateUnlocked(_ state: State) throws {
+    private func reconcileLegacyGenericFence(_ state: inout State) {
+        let linkedTransactionIDs = Set(state.importBatches.flatMap { $0.rowLinks.map(\.transactionID) })
+        let currentGenericTransactionIDs = Set(
+            state.transactions
+                .filter { $0.source == .genericCSV && $0.identityScheme == .legacyV2 }
+                .map(\.id)
+        )
+        let inferred = state.transactions
+            .filter {
+                $0.source == .genericCSV
+                    && $0.identityScheme == .legacyV2
+                    && !linkedTransactionIDs.contains($0.id)
+            }
+            .map(\.id)
+        state.legacyGenericTransactionIDs = Set(state.legacyGenericTransactionIDs)
+            .intersection(currentGenericTransactionIDs)
+            .union(inferred)
+            .sorted { $0.uuidString < $1.uuidString }
+    }
+
+    private func saveStateUnlocked(_ input: State) throws {
+        var state = input
+        reconcileLegacyGenericFence(&state)
         try validateState(state)
         let envelope = FinanceImportedTransactionStoreEnvelope(
             transactions: state.transactions,
@@ -1629,7 +2541,11 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
             remoteETag: state.remoteETag,
             remoteRecordRevisions: Dictionary(uniqueKeysWithValues: state.remoteRecordRevisions.map { ($0.key.uuidString.lowercased(), $0.value) }),
             remoteTombstones: state.remoteTombstones.values.sorted { $0.recordID.uuidString < $1.recordID.uuidString },
-            outbox: state.outbox
+            outbox: state.outbox,
+            importMappings: state.importMappings,
+            importBatches: state.importBatches,
+            legacyIdentityMappingIDs: state.legacyIdentityMappingIDs,
+            legacyGenericTransactionIDs: state.legacyGenericTransactionIDs
         )
         let data: Data
         do { data = try JSONEncoder.lifeOS.encode(envelope) }

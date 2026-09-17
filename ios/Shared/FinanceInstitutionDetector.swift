@@ -4,21 +4,21 @@ import Foundation
 
 /// Institutions represented by the versioned manual-import registry. An
 /// institution can exist in the registry before a safe profile is enabled.
-public enum FinanceInstitution: String, CaseIterable, Equatable, Hashable, Sendable {
+public enum FinanceInstitution: String, CaseIterable, Codable, Equatable, Hashable, Sendable {
     case tradeRepublic = "trade_republic"
     case robinhood
     case sparkasse
     case revolut
 }
 
-public enum FinanceInstitutionDetectionState: String, CaseIterable, Equatable, Sendable {
+public enum FinanceInstitutionDetectionState: String, CaseIterable, Codable, Equatable, Sendable {
     case known
     case unknown
     case ambiguous
     case userMapped
 }
 
-public enum FinanceCSVDelimiter: String, CaseIterable, Equatable, Hashable, Sendable {
+public enum FinanceCSVDelimiter: String, CaseIterable, Codable, Equatable, Hashable, Sendable {
     case comma = ","
     case semicolon = ";"
     case tab = "\t"
@@ -44,7 +44,7 @@ public enum FinanceCSVDelimiter: String, CaseIterable, Equatable, Hashable, Send
 /// Content-free reasons which can be shown in a preview or diagnostic log.
 /// These values intentionally describe only detector decisions, never source
 /// fields or source values.
-public enum FinanceInstitutionDetectionReasonCode: String, CaseIterable, Equatable, Sendable {
+public enum FinanceInstitutionDetectionReasonCode: String, CaseIterable, Codable, Equatable, Sendable {
     case noEligibleProfile = "no_eligible_profile"
     case duplicateNormalizedHeader = "duplicate_normalized_header"
     case missingRequiredHeader = "missing_required_header"
@@ -59,7 +59,7 @@ public enum FinanceInstitutionDetectionReasonCode: String, CaseIterable, Equatab
 }
 
 /// Content-free evidence which supports a detector decision.
-public enum FinanceInstitutionDetectionEvidenceCode: String, CaseIterable, Equatable, Sendable {
+public enum FinanceInstitutionDetectionEvidenceCode: String, CaseIterable, Codable, Equatable, Sendable {
     case requiredHeadersPresent = "required_headers_present"
     case exactHeaderSet = "exact_header_set"
     case delimiterMatched = "delimiter_matched"
@@ -71,7 +71,7 @@ public enum FinanceInstitutionDetectionEvidenceCode: String, CaseIterable, Equat
 
 /// Safe provenance for a detection result. It deliberately contains no file
 /// name, account identifier, raw header, or row value.
-public struct FinanceInstitutionDetectionProvenance: Equatable, Sendable {
+public struct FinanceInstitutionDetectionProvenance: Codable, Equatable, Sendable {
     public static let currentRegistryVersion = "finance-registry-v1"
     public static let currentDetectorVersion = "finance-detector-v1"
     public static let currentNormalizationVersion = "finance-header-normalization-v1"
@@ -109,7 +109,7 @@ public struct FinanceInstitutionDetectionProvenance: Equatable, Sendable {
     }
 }
 
-public struct FinanceInstitutionCandidate: Equatable, Sendable {
+public struct FinanceInstitutionCandidate: Codable, Equatable, Sendable {
     public let institution: FinanceInstitution
     public let profileID: String
     public let profileVersion: Int
@@ -140,7 +140,7 @@ public struct FinanceInstitutionCandidate: Equatable, Sendable {
     }
 }
 
-public struct FinanceInstitutionDetection: Equatable, Sendable {
+public struct FinanceInstitutionDetection: Codable, Equatable, Sendable {
     public let state: FinanceInstitutionDetectionState
     public let institution: FinanceInstitution?
     public let profileID: String?
@@ -164,6 +164,206 @@ public struct FinanceInstitutionDetection: Equatable, Sendable {
     public static let unknown = FinanceInstitutionDetection(state: .unknown)
 
     public var isKnown: Bool { state == .known && institution != nil }
+}
+
+// MARK: - Strict durable detector metadata
+
+private func financeDecodeOptionalStrict<T: Decodable, Key: CodingKey>(
+    _ type: T.Type,
+    forKey key: Key,
+    from container: KeyedDecodingContainer<Key>
+) throws -> T? {
+    guard container.contains(key) else { return nil }
+    guard try !container.decodeNil(forKey: key) else {
+        throw DecodingError.valueNotFound(
+            type,
+            .init(
+                codingPath: container.codingPath + [key],
+                debugDescription: "Explicit null is not accepted"
+            )
+        )
+    }
+    return try container.decode(type, forKey: key)
+}
+
+extension FinanceInstitutionDetectionProvenance {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case registryVersion, detectorVersion, normalizationVersion
+        case profileID, profileVersion, delimiter, legacyLayoutCompatibility
+        case reasonCodes, evidenceCodes
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: Set(CodingKeys.allCases.map(\.stringValue)))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let optionalKeys: Set<CodingKeys> = [.profileID, .profileVersion, .delimiter]
+        let requiredKeys = Set(CodingKeys.allCases).subtracting(optionalKeys)
+        guard requiredKeys.isSubset(of: Set(container.allKeys)),
+              Set(container.allKeys).isSubset(of: Set(CodingKeys.allCases)) else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Incomplete finance detection provenance"
+            ))
+        }
+        let registryVersion = try container.decode(String.self, forKey: .registryVersion)
+        let detectorVersion = try container.decode(String.self, forKey: .detectorVersion)
+        let normalizationVersion = try container.decode(String.self, forKey: .normalizationVersion)
+        let profileID = try financeDecodeOptionalStrict(String.self, forKey: .profileID, from: container)
+        let profileVersion = try financeDecodeOptionalStrict(Int.self, forKey: .profileVersion, from: container)
+        let delimiter = try financeDecodeOptionalStrict(FinanceCSVDelimiter.self, forKey: .delimiter, from: container)
+        let legacyLayoutCompatibility = try container.decode(Bool.self, forKey: .legacyLayoutCompatibility)
+        let reasonCodes = try container.decode([FinanceInstitutionDetectionReasonCode].self, forKey: .reasonCodes)
+        let evidenceCodes = try container.decode([FinanceInstitutionDetectionEvidenceCode].self, forKey: .evidenceCodes)
+        guard !registryVersion.isEmpty, registryVersion.utf8.count <= 128,
+              !detectorVersion.isEmpty, detectorVersion.utf8.count <= 128,
+              !normalizationVersion.isEmpty, normalizationVersion.utf8.count <= 128,
+              profileID.map({ !$0.isEmpty && $0.utf8.count <= 128 }) ?? true,
+              profileVersion.map({ $0 > 0 }) ?? true,
+              (profileID == nil) == (profileVersion == nil),
+              Set(reasonCodes).count == reasonCodes.count,
+              Set(evidenceCodes).count == evidenceCodes.count,
+              reasonCodes.count <= FinanceInstitutionDetectionReasonCode.allCases.count,
+              evidenceCodes.count <= FinanceInstitutionDetectionEvidenceCode.allCases.count else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Invalid finance detection provenance"
+            ))
+        }
+        self.init(
+            registryVersion: registryVersion,
+            detectorVersion: detectorVersion,
+            normalizationVersion: normalizationVersion,
+            profileID: profileID,
+            profileVersion: profileVersion,
+            delimiter: delimiter,
+            legacyLayoutCompatibility: legacyLayoutCompatibility,
+            reasonCodes: reasonCodes,
+            evidenceCodes: evidenceCodes
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(registryVersion, forKey: .registryVersion)
+        try container.encode(detectorVersion, forKey: .detectorVersion)
+        try container.encode(normalizationVersion, forKey: .normalizationVersion)
+        try container.encodeIfPresent(profileID, forKey: .profileID)
+        try container.encodeIfPresent(profileVersion, forKey: .profileVersion)
+        try container.encodeIfPresent(delimiter, forKey: .delimiter)
+        try container.encode(legacyLayoutCompatibility, forKey: .legacyLayoutCompatibility)
+        try container.encode(reasonCodes, forKey: .reasonCodes)
+        try container.encode(evidenceCodes, forKey: .evidenceCodes)
+    }
+}
+
+extension FinanceInstitutionCandidate {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case institution, profileID, profileVersion, isEnabled, isEligible
+        case score, reasonCodes, evidenceCodes
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: Set(CodingKeys.allCases.map(\.stringValue)))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let requiredKeys = Set(CodingKeys.allCases)
+        guard requiredKeys.isSubset(of: Set(container.allKeys)),
+              Set(container.allKeys).isSubset(of: Set(CodingKeys.allCases)) else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Incomplete finance institution candidate"
+            ))
+        }
+        let institution = try container.decode(FinanceInstitution.self, forKey: .institution)
+        let profileID = try container.decode(String.self, forKey: .profileID)
+        let profileVersion = try container.decode(Int.self, forKey: .profileVersion)
+        let isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
+        let isEligible = try container.decode(Bool.self, forKey: .isEligible)
+        let score = try container.decode(Int.self, forKey: .score)
+        let reasonCodes = try container.decode([FinanceInstitutionDetectionReasonCode].self, forKey: .reasonCodes)
+        let evidenceCodes = try container.decode([FinanceInstitutionDetectionEvidenceCode].self, forKey: .evidenceCodes)
+        guard !profileID.isEmpty, profileID.utf8.count <= 128,
+              profileVersion > 0, score >= 0, score <= 1_000,
+              Set(reasonCodes).count == reasonCodes.count,
+              Set(evidenceCodes).count == evidenceCodes.count else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Invalid finance institution candidate"
+            ))
+        }
+        self.init(
+            institution: institution,
+            profileID: profileID,
+            profileVersion: profileVersion,
+            isEnabled: isEnabled,
+            isEligible: isEligible,
+            score: score,
+            reasonCodes: reasonCodes,
+            evidenceCodes: evidenceCodes
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(institution, forKey: .institution)
+        try container.encode(profileID, forKey: .profileID)
+        try container.encode(profileVersion, forKey: .profileVersion)
+        try container.encode(isEnabled, forKey: .isEnabled)
+        try container.encode(isEligible, forKey: .isEligible)
+        try container.encode(score, forKey: .score)
+        try container.encode(reasonCodes, forKey: .reasonCodes)
+        try container.encode(evidenceCodes, forKey: .evidenceCodes)
+    }
+}
+
+extension FinanceInstitutionDetection {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case state, institution, profileID, candidates, provenance
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: Set(CodingKeys.allCases.map(\.stringValue)))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let optionalKeys: Set<CodingKeys> = [.institution, .profileID]
+        let requiredKeys = Set(CodingKeys.allCases).subtracting(optionalKeys)
+        guard requiredKeys.isSubset(of: Set(container.allKeys)),
+              Set(container.allKeys).isSubset(of: Set(CodingKeys.allCases)) else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Incomplete finance institution detection"
+            ))
+        }
+        let state = try container.decode(FinanceInstitutionDetectionState.self, forKey: .state)
+        let institution = try financeDecodeOptionalStrict(FinanceInstitution.self, forKey: .institution, from: container)
+        let profileID = try financeDecodeOptionalStrict(String.self, forKey: .profileID, from: container)
+        let candidates = try container.decode([FinanceInstitutionCandidate].self, forKey: .candidates)
+        let provenance = try container.decode(FinanceInstitutionDetectionProvenance.self, forKey: .provenance)
+        guard candidates.count <= FinanceInstitutionRegistry.profiles.count,
+              profileID.map({ !$0.isEmpty && $0.utf8.count <= 128 }) ?? true,
+              (institution == nil || profileID != nil),
+              (state != .known || (institution != nil && profileID != nil)),
+              (state != .userMapped || (institution == nil && profileID == nil)) else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Invalid finance institution detection"
+            ))
+        }
+        self.init(
+            state: state,
+            institution: institution,
+            profileID: profileID,
+            candidates: candidates,
+            provenance: provenance
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(state, forKey: .state)
+        try container.encodeIfPresent(institution, forKey: .institution)
+        try container.encodeIfPresent(profileID, forKey: .profileID)
+        try container.encode(candidates, forKey: .candidates)
+        try container.encode(provenance, forKey: .provenance)
+    }
 }
 
 /// A registry entry is either an exact enabled schema or a disabled marker
@@ -413,6 +613,53 @@ public enum FinanceInstitutionDetector {
             return (!profile.isEnabled && candidate.isEligible)
                 || Self.isNearMatch(profile: profile, normalizedHeaders: normalized, delimiter: delimiter)
         }
+    }
+
+    /// Classifies the raw, unmodified header before any user-selected column
+    /// mapping is applied. This is deliberately separate from `detect()`:
+    /// duplicate headers make ordinary detection unknown, but they must not
+    /// hide a disabled brokerage marker or an unsupported near match.
+    public static func mappingEligibility(
+        headers: [String],
+        delimiter: FinanceCSVDelimiter
+    ) -> FinanceImportMappingEligibility {
+        let normalized = normalizedHeaders(headers)
+        var blockedReasons: [FinanceInstitutionDetectionReasonCode] = []
+
+        for profile in FinanceInstitutionRegistry.profiles {
+            let candidate = candidate(for: profile, headers: normalized, delimiter: delimiter)
+            if !profile.isEnabled && candidate.isEligible {
+                blockedReasons.append(.disabledProfile)
+                break
+            }
+        }
+
+        if blockedReasons.isEmpty {
+            for profile in FinanceInstitutionRegistry.profiles where isNearMatch(
+                profile: profile,
+                normalizedHeaders: normalized,
+                delimiter: delimiter
+            ) {
+                blockedReasons.append(.unsupportedNearMatch)
+                break
+            }
+        }
+
+        let detection = detect(headers: headers, delimiter: delimiter)
+        let state: FinanceImportMappingEligibilityState
+        if !blockedReasons.isEmpty {
+            state = .blocked
+        } else if detection.isKnown {
+            state = .known
+        } else {
+            state = .requiresMapping
+        }
+        let reasons = Array(Set(detection.provenance.reasonCodes + blockedReasons)).sorted { $0.rawValue < $1.rawValue }
+        return FinanceImportMappingEligibility(
+            state: state,
+            originalDetection: detection,
+            reasonCodes: reasons
+        )
     }
 
     /// Detects only from a hard eligible fingerprint. `validEURRowCount` is

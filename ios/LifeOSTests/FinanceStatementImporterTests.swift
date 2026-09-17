@@ -957,6 +957,54 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(first.transactions.map(\.id), reordered.transactions.map(\.id))
     }
 
+    func testKnownPrepareCollapsesExactAndRejectsConflictingProviderRepeats() throws {
+        let exportRows = tradeRepublicRealExportCSV()
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+        let header = exportRows[0]
+        let originalRow = exportRows[1]
+        let correctedRow = originalRow.replacingOccurrences(of: "-23.450000", with: "-24.450000")
+
+        let duplicateData = Data([header, originalRow, originalRow].joined(separator: "\n").utf8)
+        let duplicateResult = try FinanceStatementImporter.parseCSV(data: duplicateData)
+        let duplicateInspection = try FinanceStatementImporter.inspectCSV(data: duplicateData)
+        let duplicatePrepared = try FinanceStatementImporter.prepareKnownImport(
+            result: duplicateResult,
+            inspection: duplicateInspection,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000041")!,
+            revision: 0
+        )
+
+        XCTAssertEqual(duplicateResult.transactions.count, 1)
+        XCTAssertEqual(duplicateResult.skippedRowCount, 1)
+        XCTAssertEqual(duplicateResult.diagnostics.first?.duplicateDisposition, .exactRepeat)
+        XCTAssertEqual(duplicatePrepared.transactions.count, 1)
+        XCTAssertEqual(duplicatePrepared.skippedRowCount, 1)
+        XCTAssertEqual(duplicatePrepared.batchProvenance.rowLinks.count, 1)
+        XCTAssertEqual(duplicatePrepared.rows.map(\.sourceRowNumber), [2])
+
+        let conflictData = Data([header, originalRow, correctedRow].joined(separator: "\n").utf8)
+        let conflictResult = try FinanceStatementImporter.parseCSV(data: conflictData)
+        let conflictInspection = try FinanceStatementImporter.inspectCSV(data: conflictData)
+        XCTAssertEqual(conflictResult.transactions.count, 0)
+        XCTAssertEqual(conflictResult.skippedRowCount, 2)
+        XCTAssertEqual(conflictResult.diagnostics.map(\.rowNumber), [2, 3])
+        XCTAssertEqual(
+            conflictResult.diagnostics.map(\.duplicateDisposition),
+            [.conflictingProviderID, .conflictingProviderID]
+        )
+        XCTAssertThrowsError(
+            try FinanceStatementImporter.prepareKnownImport(
+                result: conflictResult,
+                inspection: conflictInspection,
+                sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000042")!,
+                revision: 0
+            )
+        ) { error in
+            XCTAssertEqual(error as? FinanceImportMappingError, .invalidMapping)
+        }
+    }
+
     // MARK: 9. Real Trade Republic 23-column export: merchant (`name`) wins
     // over the generic `description` column for card purchases; transfers
     // (empty `name`) fall back to the meaningful `description`. All values
@@ -1015,5 +1063,519 @@ final class FinanceStatementImporterTests: XCTestCase {
 
         let international = result.transactions.first { $0.description == "ALLCHINABUY.COM" }
         XCTAssertEqual(international?.amountCents, -5928)
+    }
+
+    // MARK: Stage-1 explicit mapping contract
+
+    private func makeMapping(
+        headers: [String],
+        delimiter: FinanceCSVDelimiter,
+        accountID: UUID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+        dateColumn: Int = 0,
+        dateFormat: FinanceImportDateFormat = .yearMonthDay,
+        amount: FinanceImportAmountSelection,
+        currency: FinanceImportCurrencySelection = .constantEUR,
+        descriptionColumn: Int? = 1,
+        providerIDColumn: Int? = nil,
+        merchantColumn: Int? = nil,
+        sourceAccountColumn: Int? = nil,
+        headerRecordIndex: Int = 0
+    ) throws -> FinanceImportMapping {
+        let account = try FinanceImportAccountIdentity(id: accountID, label: "Synthetic test account")
+        let draft = FinanceImportMappingDraft(
+            delimiter: delimiter,
+            headerRecordIndex: headerRecordIndex,
+            dateColumn: dateColumn,
+            dateFormat: dateFormat,
+            amount: amount,
+            currency: currency,
+            account: FinanceImportAccountSelection(identity: account, sourceColumn: sourceAccountColumn),
+            description: descriptionColumn.map {
+                FinanceImportDescriptionSelection.column(index: $0)
+            } ?? FinanceImportDescriptionSelection.none,
+            providerIDColumn: providerIDColumn,
+            merchantColumn: merchantColumn
+        )
+        return try FinanceImportMapping(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000099")!,
+            draft: draft,
+            headerColumns: headers
+        )
+    }
+
+    func testMappingCodableRoundTripOmitsNilOptionalColumns() throws {
+        let headers = ["date", "description", "amount"]
+        let mapping = try makeMapping(
+            headers: headers,
+            delimiter: .comma,
+            amount: .signed(column: 2)
+        )
+
+        let data = try JSONEncoder.lifeOS.encode(mapping)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertNil(object["providerIDColumn"])
+        XCTAssertNil(object["merchantColumn"])
+
+        let decoded = try JSONDecoder.lifeOS.decode(FinanceImportMapping.self, from: data)
+        XCTAssertEqual(decoded, mapping)
+    }
+
+    func testMappingWithoutIdentityMarkerDecodesAsLegacyV2AndReencodesMarker() throws {
+        let mapping = try makeMapping(
+            headers: ["date", "description", "amount"],
+            delimiter: .comma,
+            amount: .signed(column: 2)
+        )
+        XCTAssertEqual(mapping.identityScheme, .mappedV3)
+
+        var legacyObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder.lifeOS.encode(mapping)) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "identityScheme")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let decodedLegacy = try JSONDecoder.lifeOS.decode(FinanceImportMapping.self, from: legacyData)
+
+        XCTAssertEqual(decodedLegacy.identityScheme, .legacyV2)
+        XCTAssertTrue(decodedLegacy.usesLegacyIdentityScheme)
+        XCTAssertTrue(mapping.hasSameLayout(as: decodedLegacy))
+        XCTAssertFalse(mapping.hasSameConfiguration(as: decodedLegacy))
+
+        let reencoded = try JSONSerialization.jsonObject(
+            with: JSONEncoder.lifeOS.encode(decodedLegacy)
+        ) as? [String: Any]
+        XCTAssertEqual(reencoded?["identityScheme"] as? String, FinanceImportIdentityScheme.legacyV2.rawValue)
+    }
+
+    func testPreparedBatchReceiptRoundTripsThroughJSONAndStoreReload() throws {
+        let data = Data("date,description,amount\n2026-08-01,Synthetic merchant,-10.00".utf8)
+        let inspection = try FinanceStatementImporter.inspectCSV(data: data)
+        let mapping = try makeMapping(
+            headers: try FinanceStatementImporter.headerColumnNames(data: data, inspection: inspection),
+            delimiter: .comma,
+            amount: .signed(column: 2)
+        )
+        let prepared = try FinanceStatementImporter.prepareMappedImport(
+            data: data,
+            mapping: mapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000043")!,
+            revision: 0
+        )
+
+        let canonical = FinanceImportBatchProvenance.canonicalImportedAt(prepared.batchProvenance.importedAt)
+        XCTAssertEqual(prepared.batchProvenance.importedAt, canonical)
+        let encoded = try JSONEncoder.lifeOS.encode(prepared.batchProvenance)
+        let decoded = try JSONDecoder.lifeOS.decode(FinanceImportBatchProvenance.self, from: encoded)
+        XCTAssertEqual(decoded, prepared.batchProvenance)
+
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lifeos-finance-receipt-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let store = try FinanceImportedTransactionStore(url: fileURL)
+        _ = try store.commitPreparedImport(prepared)
+        let reloadedStore = try FinanceImportedTransactionStore(url: fileURL)
+        XCTAssertEqual(try reloadedStore.importBatches(), [prepared.batchProvenance])
+    }
+
+    func testStrictDateAndAmountScalarsAndDebitCreditMapping() throws {
+        XCTAssertNotNil(FinanceImportDateFormat.yearMonthDay.parse("2024-02-29"))
+        XCTAssertNil(FinanceImportDateFormat.yearMonthDay.parse("2023-02-29"))
+        XCTAssertNil(FinanceImportDateFormat.yearMonthDay.parse("2024-2-29"))
+        XCTAssertNil(FinanceImportDateFormat.yearMonthDay.parse("2024-02-29T00:00:00"))
+
+        let europeanFormat = FinanceImportAmountFormat(
+            decimalSeparator: .comma,
+            groupingSeparator: .dot
+        )
+        XCTAssertEqual(
+            FinanceImportStrictValueParser.parseCents(
+                "1.234,56",
+                format: europeanFormat,
+                allowSign: false
+            ),
+            123_456
+        )
+        XCTAssertEqual(
+            FinanceImportStrictValueParser.parseCents(
+                "+1,50",
+                format: europeanFormat,
+                allowSign: true
+            ),
+            150
+        )
+        XCTAssertNil(
+            FinanceImportStrictValueParser.parseCents(
+                "-1,00",
+                format: europeanFormat,
+                allowSign: false
+            )
+        )
+        XCTAssertNil(
+            FinanceImportStrictValueParser.parseCents(
+                "1.234,567",
+                format: europeanFormat,
+                allowSign: false
+            )
+        )
+
+        let csv = """
+        date;description;debit;credit
+        2024-02-29;Synthetic debit;1.234,56;
+        2024-03-01;Synthetic credit;;2.000,00
+        """
+        let data = Data(csv.utf8)
+        let inspection = try FinanceStatementImporter.inspectCSV(data: data)
+        let mapping = try makeMapping(
+            headers: try FinanceStatementImporter.headerColumnNames(data: data, inspection: inspection),
+            delimiter: .semicolon,
+            amount: .debitCredit(
+                debitColumn: 2,
+                creditColumn: 3,
+                format: europeanFormat
+            )
+        )
+        let prepared = try FinanceStatementImporter.prepareMappedImport(
+            data: data,
+            mapping: mapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000010")!,
+            revision: 3
+        )
+
+        XCTAssertEqual(prepared.transactions.map(\.amountCents), [-123_456, 200_000])
+        XCTAssertEqual(prepared.rows.map(\.sourceRowNumber), [2, 3])
+        XCTAssertEqual(prepared.effectiveDetection.state, .userMapped)
+    }
+
+    func testUnknownCSVRequiresExplicitMappingAndKnownCSVRejectsIt() throws {
+        let unknownData = Data("date,description,amount\n2026-08-01,Synthetic merchant,-10.00".utf8)
+        let unknownInspection = try FinanceStatementImporter.inspectCSV(data: unknownData)
+        XCTAssertEqual(unknownInspection.mappingEligibility.state, .requiresMapping)
+        XCTAssertEqual(unknownInspection.originalDetection.state, .unknown)
+        XCTAssertTrue(unknownInspection.mappingEligibility.requiresExplicitMapping)
+
+        let unknownMapping = try makeMapping(
+            headers: try FinanceStatementImporter.headerColumnNames(data: unknownData, inspection: unknownInspection),
+            delimiter: .comma,
+            amount: .signed(column: 2)
+        )
+        let prepared = try FinanceStatementImporter.prepareMappedImport(
+            data: unknownData,
+            mapping: unknownMapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000011")!,
+            revision: 0
+        )
+        XCTAssertEqual(prepared.transactions.count, 1)
+        XCTAssertEqual(prepared.effectiveDetection.state, .userMapped)
+
+        let knownData = Data("Datum;Typ;Beschreibung;Betrag\n14.08.2026;Karte;Synthetic merchant;-1,00".utf8)
+        let knownInspection = try FinanceStatementImporter.inspectCSV(data: knownData)
+        XCTAssertEqual(knownInspection.mappingEligibility.state, .known)
+        let knownMapping = try makeMapping(
+            headers: try FinanceStatementImporter.headerColumnNames(data: knownData, inspection: knownInspection),
+            delimiter: .semicolon,
+            dateFormat: .dayMonthYearDot,
+            amount: .signed(
+                column: 3,
+                format: FinanceImportAmountFormat(decimalSeparator: .comma, groupingSeparator: .none)
+            ),
+            descriptionColumn: 2
+        )
+        XCTAssertThrowsError(
+            try FinanceStatementImporter.prepareMappedImport(
+                data: knownData,
+                mapping: knownMapping,
+                sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000012")!,
+                revision: 0
+            )
+        ) { error in
+            XCTAssertEqual(error as? FinanceImportMappingError, .mappingNotRequired)
+        }
+    }
+
+    func testInspectionReportsCandidatesAndSupportsAlternateMappedHeader() throws {
+        let data = Data("date,amount\ndate,description,amount\n2026-08-01,Synthetic merchant,-10.00".utf8)
+        let inspection = try FinanceStatementImporter.inspectCSV(data: data)
+
+        XCTAssertEqual(inspection.candidateHeaderRecordIndices, [0, 1])
+        XCTAssertEqual(inspection.headerRecordIndex, 0)
+        XCTAssertEqual(
+            try FinanceStatementImporter.headerColumnNames(data: data, inspection: inspection),
+            ["date", "amount"]
+        )
+
+        // The current API supports choosing a later candidate by binding the
+        // validated mapping to that record index and its exact header list.
+        let alternateMapping = try makeMapping(
+            headers: ["date", "description", "amount"],
+            delimiter: .comma,
+            amount: .signed(column: 2),
+            headerRecordIndex: 1
+        )
+        let prepared = try FinanceStatementImporter.prepareMappedImport(
+            data: data,
+            mapping: alternateMapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000015")!,
+            revision: 0
+        )
+        XCTAssertEqual(prepared.transactions.count, 1)
+        XCTAssertEqual(prepared.transactions.first?.description, "Synthetic merchant")
+        XCTAssertEqual(prepared.rows.map(\.sourceRowNumber), [3])
+    }
+
+    func testHeaderCandidatesFindLaterTableAfterUnfamiliarPreamble() throws {
+        let data = Data("""
+        Generated export,Acme Bank
+        Account label,Personal account
+        Date,Details,Value
+        2026-08-01,Coffee,-10.00
+        """.utf8)
+        let inspection = try FinanceStatementImporter.inspectCSV(data: data)
+
+        XCTAssertEqual(inspection.headerRecordIndex, 2)
+        XCTAssertEqual(inspection.candidateHeaderRecordIndices, [2])
+        let candidates = try FinanceStatementImporter.headerCandidates(data: data, inspection: inspection)
+        XCTAssertEqual(candidates.map(\.recordIndex), [2])
+        XCTAssertEqual(candidates.first?.labels, ["Date", "Details", "Value"])
+        XCTAssertEqual(
+            try FinanceStatementImporter.headerColumnNames(data: data, inspection: inspection),
+            ["Date", "Details", "Value"]
+        )
+    }
+
+    func testExplicitMappingCannotEnableDisabledOrNearMatchExports() throws {
+        let disabledHeaders = ["Activity Date", "Trans Code", "Net Amount", "date", "description", "netto"]
+        let disabledData = Data(
+            (disabledHeaders.joined(separator: ",")
+                + "\n2026-08-01,, -10.00,2026-08-01,Synthetic merchant,-10.00").utf8
+        )
+        let disabledInspection = try FinanceStatementImporter.inspectCSV(data: disabledData)
+        XCTAssertEqual(disabledInspection.mappingEligibility.state, .blocked)
+        XCTAssertTrue(disabledInspection.mappingEligibility.reasonCodes.contains(.disabledProfile))
+        let disabledMapping = try makeMapping(
+            headers: disabledHeaders,
+            delimiter: .comma,
+            dateColumn: 3,
+            amount: .signed(column: 5),
+            descriptionColumn: 4
+        )
+        XCTAssertThrowsError(
+            try FinanceStatementImporter.prepareMappedImport(
+                data: disabledData,
+                mapping: disabledMapping,
+                sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000013")!,
+                revision: 0
+            )
+        ) { error in
+            XCTAssertEqual(error as? FinanceImportMappingError, .unsupportedProfile)
+        }
+
+        let nearMatchHeaders = ["date", "description", "amount", "counterparty_name", "original_amount"]
+        let nearMatchData = Data(
+            (nearMatchHeaders.joined(separator: ",")
+                + "\n2026-08-01,Synthetic merchant,-10.00,Synthetic counterparty,1.00").utf8
+        )
+        let nearMatchInspection = try FinanceStatementImporter.inspectCSV(data: nearMatchData)
+        XCTAssertEqual(nearMatchInspection.mappingEligibility.state, .blocked)
+        XCTAssertTrue(nearMatchInspection.mappingEligibility.reasonCodes.contains(.unsupportedNearMatch))
+        let nearMatchMapping = try makeMapping(
+            headers: nearMatchHeaders,
+            delimiter: .comma,
+            amount: .signed(column: 2)
+        )
+        XCTAssertThrowsError(
+            try FinanceStatementImporter.prepareMappedImport(
+                data: nearMatchData,
+                mapping: nearMatchMapping,
+                sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000014")!,
+                revision: 0
+            )
+        ) { error in
+            XCTAssertEqual(error as? FinanceImportMappingError, .unsupportedProfile)
+        }
+    }
+
+    func testMappedIDsSeparateAccountsCollapseDuplicateProvidersAndPreserveFallbackMultiplicity() throws {
+        let providerHeaders = ["date", "description", "amount", "provider_id"]
+        let providerData = Data("""
+        date,description,amount,provider_id
+        2026-08-01,Synthetic merchant,-10.00,provider-1
+        2026-08-01,Synthetic merchant,-10.00,provider-1
+        """.utf8)
+        let accountA = UUID(uuidString: "00000000-0000-4000-8000-000000000021")!
+        let accountB = UUID(uuidString: "00000000-0000-4000-8000-000000000022")!
+        let mappingA = try makeMapping(
+            headers: providerHeaders,
+            delimiter: .comma,
+            accountID: accountA,
+            amount: .signed(column: 2),
+            providerIDColumn: 3
+        )
+        let mappingB = try makeMapping(
+            headers: providerHeaders,
+            delimiter: .comma,
+            accountID: accountB,
+            amount: .signed(column: 2),
+            providerIDColumn: 3
+        )
+        let preparedA = try FinanceStatementImporter.prepareMappedImport(
+            data: providerData,
+            mapping: mappingA,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000023")!,
+            revision: 0
+        )
+        let repeatedA = try FinanceStatementImporter.prepareMappedImport(
+            data: providerData,
+            mapping: mappingA,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000024")!,
+            revision: 0
+        )
+        let preparedB = try FinanceStatementImporter.prepareMappedImport(
+            data: providerData,
+            mapping: mappingB,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000025")!,
+            revision: 0
+        )
+        let idsA = preparedA.transactions.map(\.id)
+        let idsB = preparedB.transactions.map(\.id)
+        XCTAssertEqual(preparedA.transactions.count, 1, "exact provider repeats must collapse")
+        XCTAssertEqual(preparedA.skippedRowCount, 1)
+        XCTAssertEqual(preparedA.diagnostics.map(\.rowNumber), [3])
+        XCTAssertEqual(preparedA.diagnostics.first?.duplicateDisposition, .exactRepeat)
+        XCTAssertEqual(idsA, repeatedA.transactions.map(\.id))
+        XCTAssertTrue(Set(idsA).isDisjoint(with: Set(idsB)), "account identity must be part of mapped row identity")
+
+        let fallbackData = Data("""
+        date,description,amount
+        2026-08-01,Synthetic merchant,-10.00
+        2026-08-01,Synthetic merchant,-10.00
+        """.utf8)
+        let fallbackMapping = try makeMapping(
+            headers: ["date", "description", "amount"],
+            delimiter: .comma,
+            accountID: accountA,
+            amount: .signed(column: 2)
+        )
+        let fallback = try FinanceStatementImporter.prepareMappedImport(
+            data: fallbackData,
+            mapping: fallbackMapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000026")!,
+            revision: 0
+        )
+        XCTAssertEqual(Set(fallback.transactions.map(\.id)).count, 2, "identical fallback rows must retain multiplicity")
+    }
+
+    func testMappedProviderIDIsStableAcrossCorrectedExportRows() throws {
+        let headers = ["date", "description", "amount", "provider_id"]
+        let mapping = try makeMapping(
+            headers: headers,
+            delimiter: .comma,
+            accountID: UUID(uuidString: "00000000-0000-4000-8000-000000000031")!,
+            amount: .signed(column: 2),
+            providerIDColumn: 3
+        )
+        let original = try FinanceStatementImporter.prepareMappedImport(
+            data: Data("date,description,amount,provider_id\n2026-08-01,Original merchant,-10.00,provider-1\n".utf8),
+            mapping: mapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000032")!,
+            revision: 0
+        )
+        let corrected = try FinanceStatementImporter.prepareMappedImport(
+            data: Data("date,description,amount,provider_id\n2026-08-03,Corrected merchant,-12.50,provider-1\n".utf8),
+            mapping: mapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000033")!,
+            revision: 1
+        )
+
+        XCTAssertEqual(original.transactions.count, 1)
+        XCTAssertEqual(corrected.transactions.count, 1)
+        XCTAssertEqual(original.transactions.first?.id, corrected.transactions.first?.id)
+        XCTAssertNotEqual(original.transactions.first?.amountCents, corrected.transactions.first?.amountCents)
+        XCTAssertNotEqual(original.transactions.first?.description, corrected.transactions.first?.description)
+    }
+
+    func testMappedProviderIDsSeparateSelectedSourceAccounts() throws {
+        let headers = ["date", "source_account", "description", "amount", "provider_id"]
+        let mapping = try makeMapping(
+            headers: headers,
+            delimiter: .comma,
+            accountID: UUID(uuidString: "00000000-0000-4000-8000-000000000034")!,
+            amount: .signed(column: 3),
+            descriptionColumn: 2,
+            providerIDColumn: 4,
+            sourceAccountColumn: 1
+        )
+        let prepared = try FinanceStatementImporter.prepareMappedImport(
+            data: Data("""
+            date,source_account,description,amount,provider_id
+            2026-08-01,Checking,Same merchant,-10.00,provider-1
+            2026-08-01,Savings,Same merchant,-10.00,provider-1
+            """.utf8),
+            mapping: mapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000035")!,
+            revision: 0
+        )
+
+        XCTAssertEqual(prepared.transactions.count, 2)
+        XCTAssertEqual(prepared.skippedRowCount, 0)
+        XCTAssertEqual(Set(prepared.transactions.map(\.id)).count, 2)
+    }
+
+    func testMappedOpaqueProviderAndSourceAccountValuesRemainDistinct() throws {
+        let headers = ["date", "source_account", "description", "amount", "provider_id"]
+        let mapping = try makeMapping(
+            headers: headers,
+            delimiter: .comma,
+            accountID: UUID(uuidString: "00000000-0000-4000-8000-000000000038")!,
+            amount: .signed(column: 3),
+            descriptionColumn: 2,
+            providerIDColumn: 4,
+            sourceAccountColumn: 1
+        )
+        let prepared = try FinanceStatementImporter.prepareMappedImport(
+            data: Data("""
+            date,source_account,description,amount,provider_id
+            2026-08-01,Primary,Same merchant,-10.00,AbC
+            2026-08-01,Primary,Same merchant,-10.00,abc
+            2026-08-01,Account  A,Same merchant,-10.00,same-provider
+            2026-08-01,account A,Same merchant,-10.00,same-provider
+            """.utf8),
+            mapping: mapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000039")!,
+            revision: 0
+        )
+
+        XCTAssertEqual(prepared.transactions.count, 4)
+        XCTAssertEqual(prepared.skippedRowCount, 0)
+        XCTAssertEqual(Set(prepared.transactions.map(\.id)).count, 4)
+    }
+
+    func testMappedConflictingProviderIDQuarantinesEveryObservation() throws {
+        let headers = ["date", "description", "amount", "provider_id"]
+        let mapping = try makeMapping(
+            headers: headers,
+            delimiter: .comma,
+            accountID: UUID(uuidString: "00000000-0000-4000-8000-000000000036")!,
+            amount: .signed(column: 2),
+            providerIDColumn: 3
+        )
+        let prepared = try FinanceStatementImporter.prepareMappedImport(
+            data: Data("""
+            date,description,amount,provider_id
+            2026-08-01,Original merchant,-10.00,provider-1
+            2026-08-03,Corrected merchant,-12.50,provider-1
+            """.utf8),
+            mapping: mapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000037")!,
+            revision: 0
+        )
+
+        XCTAssertEqual(prepared.transactions.count, 0)
+        XCTAssertEqual(prepared.skippedRowCount, 2)
+        XCTAssertEqual(prepared.diagnostics.map(\.rowNumber), [2, 3])
+        XCTAssertEqual(
+            prepared.diagnostics.map(\.duplicateDisposition),
+            [.conflictingProviderID, .conflictingProviderID]
+        )
+        XCTAssertTrue(prepared.rows.isEmpty)
+        XCTAssertTrue(prepared.batchProvenance.rowLinks.isEmpty)
     }
 }

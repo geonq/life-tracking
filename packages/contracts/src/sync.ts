@@ -202,6 +202,13 @@ export const FinanceImportedSyncDomain = z.literal('finance');
 export const FinanceImportedSyncLedger = z.literal('manual_import');
 export const FinanceImportedSource = z.enum(['tradeRepublicCSV', 'genericCSV']);
 export type FinanceImportedSource = z.infer<typeof FinanceImportedSource>;
+export const FinanceImportedIdentityScheme = z.enum(['legacyCSVv2', 'mappedV3']);
+export type FinanceImportedIdentityScheme = z.infer<typeof FinanceImportedIdentityScheme>;
+export const FinanceImportedMappedIdentity = z.object({
+  accountID: z.string().uuid().transform(value => value.toLowerCase()),
+  configurationDigest: z.string().regex(/^[0-9a-fA-F]{64}$/).transform(value => value.toLowerCase()),
+}).strict();
+export type FinanceImportedMappedIdentity = z.infer<typeof FinanceImportedMappedIdentity>;
 export const FinanceImportedKind = z.enum(['cash', 'investmentOrder']);
 export type FinanceImportedKind = z.infer<typeof FinanceImportedKind>;
 export const FinanceImportedCategory = z.enum([
@@ -264,6 +271,10 @@ export const FinanceImportedRecord = z.object({
   sourceCategory: financeImportedNullableText(128),
   providerCode: financeImportedNullableText(64),
   source: FinanceImportedSource,
+  /** Missing on older v2 clients; those rows remain legacy by default. */
+  identityScheme: FinanceImportedIdentityScheme.default('legacyCSVv2'),
+  /** Null on legacy rows; required for mappedV3 rows. */
+  mappedIdentity: FinanceImportedMappedIdentity.nullable().default(null),
   importedAt: financeImportedTimestamp,
   kind: FinanceImportedKind,
   investment: FinanceImportedInvestment.nullable(),
@@ -273,6 +284,9 @@ export const FinanceImportedRecord = z.object({
   }
   if (value.investment !== null && value.investment.currency !== 'EUR') {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['investment', 'currency'], message: 'manual ledger is EUR-only' });
+  }
+  if (value.identityScheme === 'mappedV3' && (value.source !== 'genericCSV' || value.mappedIdentity === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['identityScheme'], message: 'mapped identity is only valid for generic mapped CSV rows with identity metadata' });
   }
 });
 export type FinanceImportedRecord = z.infer<typeof FinanceImportedRecord>;

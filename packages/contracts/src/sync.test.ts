@@ -115,6 +115,39 @@ describe('manual imported-finance synchronization contract v2', () => {
     }]))).toThrow();
   });
 
+  it('requires account-scoped metadata for modern mapped CSV identities', () => {
+    const mapped = {
+      ...newRecord,
+      source: 'genericCSV' as const,
+      identityScheme: 'mappedV3' as const,
+      mappedIdentity: {
+        accountID: '00000000-0000-4000-8000-000000000071',
+        configurationDigest: 'AB'.repeat(32),
+      },
+    };
+    const parsed = FinanceImportedSyncRequest.parse(request([{
+      operation: 'upsert', record: mapped, expectedSourceRevision: 0,
+    }]));
+    const operation = parsed.operations[0];
+    if (operation.operation !== 'upsert') throw new Error('expected upsert');
+    expect(operation.record.identityScheme).toBe('mappedV3');
+    expect(operation.record.mappedIdentity).toEqual({
+      accountID: '00000000-0000-4000-8000-000000000071',
+      configurationDigest: 'ab'.repeat(32),
+    });
+
+    expect(() => FinanceImportedSyncRequest.parse(request([{
+      operation: 'upsert',
+      record: { ...mapped, mappedIdentity: null },
+      expectedSourceRevision: 0,
+    }]))).toThrow();
+    expect(() => FinanceImportedSyncRequest.parse(request([{
+      operation: 'upsert',
+      record: { ...mapped, source: 'tradeRepublicCSV' as const },
+      expectedSourceRevision: 0,
+    }]))).toThrow();
+  });
+
   it('rejects duplicate IDs and every unknown key, including the old v1 operation shape', () => {
     expect(() => FinanceImportedSyncRequest.parse(request([
       { operation: 'delete', recordID, expectedSourceRevision: 1, deletedAt: observedAt },

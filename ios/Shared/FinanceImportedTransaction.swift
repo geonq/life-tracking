@@ -11,6 +11,51 @@ public enum FinanceImportSource: String, Codable, CaseIterable, Hashable, Sendab
     case genericCSV
 }
 
+/// Stable identity provenance for a manually imported row. Rows written by
+/// the original generic importer have no safe account-scoped correspondence
+/// after synchronization, so they remain fenced as legacy until reconciled.
+public enum FinanceImportedIdentityScheme: String, Codable, Equatable, Sendable {
+    case legacyV2 = "legacyCSVv2"
+    case mappedV3
+}
+
+/// Content-free account and mapping identity carried with modern mapped rows.
+/// It lets a second device prove that a reviewed mapping is compatible without
+/// synchronizing account labels or raw CSV values.
+public struct FinanceImportedMappedIdentity: Codable, Equatable, Sendable {
+    public let accountID: UUID
+    public let configurationDigest: String
+
+    public init(accountID: UUID, configurationDigest: String) throws {
+        guard configurationDigest.count == 64,
+              configurationDigest.allSatisfy(\.isHexDigit) else {
+            throw FinanceImportMappingError.invalidMapping
+        }
+        self.accountID = accountID
+        self.configurationDigest = configurationDigest.lowercased()
+    }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable { case accountID, configurationDigest }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: Set(CodingKeys.allCases.map(\.stringValue)))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard Set(container.allKeys) == Set(CodingKeys.allCases) else {
+            throw FinanceImportMappingError.invalidMapping
+        }
+        try self.init(
+            accountID: container.decode(UUID.self, forKey: .accountID),
+            configurationDigest: container.decode(String.self, forKey: .configurationDigest)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(accountID, forKey: .accountID)
+        try container.encode(configurationDigest, forKey: .configurationDigest)
+    }
+}
+
 /// A manual import row is either a cash movement or an investment order. An
 /// investment order is still a cash ledger event, but it must never be
 /// mistaken for a current holding or a wealth valuation.
@@ -128,13 +173,19 @@ public struct FinanceImportedTransaction: Codable, Equatable, Identifiable, Send
     /// an existing import.
     public let providerCode: String?
     public let source: FinanceImportSource
+    /// The identity contract travels with the row through the gateway so a
+    /// modern mapped row received on another device cannot be mistaken for a
+    /// legacy generic row that needs migration.
+    public let identityScheme: FinanceImportedIdentityScheme
+    public let mappedIdentity: FinanceImportedMappedIdentity?
     /// When this row was imported into LifeOS (not when it was booked).
     public let importedAt: Date
     public let kind: FinanceImportedTransactionKind
     public let investment: FinanceImportedInvestmentDetails?
 
     private enum CodingKeys: String, CodingKey {
-        case id, bookedAt, amountCents, description, category, sourceCategory, providerCode, source, importedAt, kind, investment
+        case id, bookedAt, amountCents, description, category, sourceCategory, providerCode
+        case source, identityScheme, mappedIdentity, importedAt, kind, investment
     }
 
     public init(
@@ -144,6 +195,8 @@ public struct FinanceImportedTransaction: Codable, Equatable, Identifiable, Send
         description: String,
         category: String? = nil,
         source: FinanceImportSource,
+        identityScheme: FinanceImportedIdentityScheme = .legacyV2,
+        mappedIdentity: FinanceImportedMappedIdentity? = nil,
         importedAt: Date = .now,
         sourceCategory: String? = nil,
         providerCode: String? = nil,
@@ -158,6 +211,8 @@ public struct FinanceImportedTransaction: Codable, Equatable, Identifiable, Send
         self.sourceCategory = sourceCategory?.nilIfBlank
         self.providerCode = providerCode?.nilIfBlank
         self.source = source
+        self.identityScheme = identityScheme
+        self.mappedIdentity = mappedIdentity
         self.importedAt = importedAt
         self.kind = investment == nil ? kind : .investmentOrder
         self.investment = investment
@@ -173,6 +228,8 @@ public struct FinanceImportedTransaction: Codable, Equatable, Identifiable, Send
         sourceCategory = try container.decodeIfPresent(String.self, forKey: .sourceCategory)
         providerCode = try container.decodeIfPresent(String.self, forKey: .providerCode)
         source = try container.decode(FinanceImportSource.self, forKey: .source)
+        identityScheme = try container.decodeIfPresent(FinanceImportedIdentityScheme.self, forKey: .identityScheme) ?? .legacyV2
+        mappedIdentity = try container.decodeIfPresent(FinanceImportedMappedIdentity.self, forKey: .mappedIdentity)
         importedAt = try container.decode(Date.self, forKey: .importedAt)
         investment = try container.decodeIfPresent(FinanceImportedInvestmentDetails.self, forKey: .investment)
         kind = try container.decodeIfPresent(FinanceImportedTransactionKind.self, forKey: .kind)
@@ -189,6 +246,8 @@ public struct FinanceImportedTransaction: Codable, Equatable, Identifiable, Send
         try container.encodeIfPresent(sourceCategory, forKey: .sourceCategory)
         try container.encodeIfPresent(providerCode, forKey: .providerCode)
         try container.encode(source, forKey: .source)
+        try container.encode(identityScheme, forKey: .identityScheme)
+        try container.encodeIfPresent(mappedIdentity, forKey: .mappedIdentity)
         try container.encode(importedAt, forKey: .importedAt)
         try container.encode(kind, forKey: .kind)
         try container.encodeIfPresent(investment, forKey: .investment)
@@ -211,8 +270,46 @@ public struct FinanceImportedTransaction: Codable, Equatable, Identifiable, Send
             && sourceCategory == other.sourceCategory
             && providerCode == other.providerCode
             && source == other.source
+            && identityScheme == other.identityScheme
+            && mappedIdentity == other.mappedIdentity
             && kind == other.kind
             && investment == other.investment
+    }
+
+    public func withIdentityScheme(_ identityScheme: FinanceImportedIdentityScheme) -> FinanceImportedTransaction {
+        FinanceImportedTransaction(
+            id: id,
+            bookedAt: bookedAt,
+            amountCents: amountCents,
+            description: description,
+            category: category,
+            source: source,
+            identityScheme: identityScheme,
+            mappedIdentity: mappedIdentity,
+            importedAt: importedAt,
+            sourceCategory: sourceCategory,
+            providerCode: providerCode,
+            kind: kind,
+            investment: investment
+        )
+    }
+
+    public func withMappedIdentity(_ mappedIdentity: FinanceImportedMappedIdentity) -> FinanceImportedTransaction {
+        FinanceImportedTransaction(
+            id: id,
+            bookedAt: bookedAt,
+            amountCents: amountCents,
+            description: description,
+            category: category,
+            source: source,
+            identityScheme: identityScheme,
+            mappedIdentity: mappedIdentity,
+            importedAt: importedAt,
+            sourceCategory: sourceCategory,
+            providerCode: providerCode,
+            kind: kind,
+            investment: investment
+        )
     }
 }
 
@@ -334,13 +431,15 @@ public struct FinanceImportedSyncRecord: Codable, Equatable, Sendable {
     public let sourceCategory: String?
     public let providerCode: String?
     public let source: FinanceImportSource
+    public let identityScheme: FinanceImportedIdentityScheme
+    public let mappedIdentity: FinanceImportedMappedIdentity?
     public let importedAt: Date
     public let kind: FinanceImportedTransactionKind
     public let investment: FinanceImportedInvestmentDetails?
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case recordID, sourceRevision, bookedAt, amountCents, description, categoryOverride
-        case sourceCategory, providerCode, source, importedAt, kind, investment
+        case sourceCategory, providerCode, source, identityScheme, mappedIdentity, importedAt, kind, investment
     }
 
     public init(transaction: FinanceImportedTransaction, sourceRevision: Int = 0) {
@@ -353,6 +452,8 @@ public struct FinanceImportedSyncRecord: Codable, Equatable, Sendable {
         self.sourceCategory = transaction.sourceCategory
         self.providerCode = transaction.providerCode
         self.source = transaction.source
+        self.identityScheme = transaction.identityScheme
+        self.mappedIdentity = transaction.mappedIdentity
         self.importedAt = transaction.importedAt
         self.kind = transaction.kind
         self.investment = transaction.investment
@@ -376,6 +477,8 @@ public struct FinanceImportedSyncRecord: Codable, Equatable, Sendable {
         sourceCategory: String?,
         providerCode: String?,
         source: FinanceImportSource,
+        identityScheme: FinanceImportedIdentityScheme = .legacyV2,
+        mappedIdentity: FinanceImportedMappedIdentity? = nil,
         importedAt: Date,
         kind: FinanceImportedTransactionKind,
         investment: FinanceImportedInvestmentDetails?
@@ -389,6 +492,8 @@ public struct FinanceImportedSyncRecord: Codable, Equatable, Sendable {
         self.sourceCategory = sourceCategory
         self.providerCode = providerCode
         self.source = source
+        self.identityScheme = identityScheme
+        self.mappedIdentity = mappedIdentity
         self.importedAt = importedAt
         self.kind = kind
         self.investment = investment
@@ -398,7 +503,9 @@ public struct FinanceImportedSyncRecord: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         try rejectUnknownLifeOSKeys(decoder, allowed: Set(CodingKeys.allCases.map(\.stringValue)))
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        guard Set(container.allKeys) == Set(CodingKeys.allCases) else {
+        let requiredKeys = Set(CodingKeys.allCases).subtracting([.identityScheme, .mappedIdentity])
+        guard requiredKeys.isSubset(of: Set(container.allKeys)),
+              Set(container.allKeys).isSubset(of: Set(CodingKeys.allCases)) else {
             throw FinanceImportedSyncError.invalidResponse
         }
         recordID = try container.decode(UUID.self, forKey: .recordID)
@@ -414,6 +521,8 @@ public struct FinanceImportedSyncRecord: Codable, Equatable, Sendable {
         sourceCategory = try container.decodeIfPresent(String.self, forKey: .sourceCategory)
         providerCode = try container.decodeIfPresent(String.self, forKey: .providerCode)
         source = try container.decode(FinanceImportSource.self, forKey: .source)
+        identityScheme = try container.decodeIfPresent(FinanceImportedIdentityScheme.self, forKey: .identityScheme) ?? .legacyV2
+        mappedIdentity = try container.decodeIfPresent(FinanceImportedMappedIdentity.self, forKey: .mappedIdentity)
         importedAt = try container.decode(Date.self, forKey: .importedAt)
         kind = try container.decode(FinanceImportedTransactionKind.self, forKey: .kind)
         if try container.decodeNil(forKey: .investment) {
@@ -436,6 +545,8 @@ public struct FinanceImportedSyncRecord: Codable, Equatable, Sendable {
         try container.encode(sourceCategory, forKey: .sourceCategory)
         try container.encode(providerCode, forKey: .providerCode)
         try container.encode(source, forKey: .source)
+        try container.encode(identityScheme, forKey: .identityScheme)
+        try container.encode(mappedIdentity, forKey: .mappedIdentity)
         try container.encode(importedAt, forKey: .importedAt)
         try container.encode(kind, forKey: .kind)
         try container.encode(investment.map(FinanceImportedSyncInvestment.init), forKey: .investment)
@@ -444,7 +555,7 @@ public struct FinanceImportedSyncRecord: Codable, Equatable, Sendable {
     public var transaction: FinanceImportedTransaction {
         FinanceImportedTransaction(id: recordID, bookedAt: bookedAt, amountCents: amountCents,
                                    description: description, category: categoryOverride?.rawValue,
-                                   source: source, importedAt: importedAt, sourceCategory: sourceCategory,
+                                   source: source, identityScheme: identityScheme, mappedIdentity: mappedIdentity, importedAt: importedAt, sourceCategory: sourceCategory,
                                    providerCode: providerCode, kind: kind, investment: investment)
     }
 
@@ -452,7 +563,7 @@ public struct FinanceImportedSyncRecord: Codable, Equatable, Sendable {
         try FinanceImportedSyncRecord(recordID: recordID, sourceRevision: revision, bookedAt: bookedAt,
                                       amountCents: amountCents, description: description,
                                       categoryOverride: categoryOverride, sourceCategory: sourceCategory,
-                                      providerCode: providerCode, source: source, importedAt: importedAt,
+                                      providerCode: providerCode, source: source, identityScheme: identityScheme, mappedIdentity: mappedIdentity, importedAt: importedAt,
                                       kind: kind, investment: investment)
     }
 
@@ -466,6 +577,8 @@ public struct FinanceImportedSyncRecord: Codable, Equatable, Sendable {
         }
         guard validateText(sourceCategory, maximum: Self.maximumTextBytes),
               validateText(providerCode, maximum: Self.maximumProviderCodeBytes),
+              identityScheme == .legacyV2
+                || (identityScheme == .mappedV3 && source == .genericCSV && mappedIdentity != nil),
               kind == .investmentOrder || investment == nil,
               bookedAt.timeIntervalSinceNow <= 5,
               importedAt.timeIntervalSinceNow <= 5 else {
@@ -719,6 +832,142 @@ public struct FinanceImportedSyncRequest: Codable, Equatable, Sendable {
         let data = try encoder.encode(self)
         guard data.count <= Self.maximumRequestBytes else { throw FinanceImportedSyncError.requestTooLarge }
         return data
+    }
+
+    /// Recreates the canonical request bytes written by the pre-identity
+    /// version of the v2 client. This is used only to validate an immutable
+    /// attempted request that was already persisted before mapped identity
+    /// metadata was added; the original bytes remain the retry payload.
+    internal func legacyIdentityCanonicalData() throws -> Data {
+        let legacy = try FinanceImportedLegacyIdentityRequest(request: self)
+        let encoder = JSONEncoder.lifeOS
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(legacy)
+        guard data.count <= Self.maximumRequestBytes else { throw FinanceImportedSyncError.requestTooLarge }
+        return data
+    }
+}
+
+private struct FinanceImportedLegacyIdentityRecord: Encodable {
+    let recordID: UUID
+    let sourceRevision: Int
+    let bookedAt: Date
+    let amountCents: Int
+    let description: String
+    let categoryOverride: String?
+    let sourceCategory: String?
+    let providerCode: String?
+    let source: FinanceImportSource
+    let importedAt: Date
+    let kind: FinanceImportedTransactionKind
+    let investment: FinanceImportedSyncInvestment?
+
+    private enum CodingKeys: String, CodingKey {
+        case recordID, sourceRevision, bookedAt, amountCents, description, categoryOverride
+        case sourceCategory, providerCode, source, importedAt, kind, investment
+    }
+
+    init(record: FinanceImportedSyncRecord) throws {
+        guard record.identityScheme == .legacyV2, record.mappedIdentity == nil else {
+            throw FinanceImportedSyncError.invalidRequest
+        }
+        recordID = record.recordID
+        sourceRevision = record.sourceRevision
+        bookedAt = record.bookedAt
+        amountCents = record.amountCents
+        description = record.description
+        categoryOverride = record.categoryOverride?.rawValue
+        sourceCategory = record.sourceCategory
+        providerCode = record.providerCode
+        source = record.source
+        importedAt = record.importedAt
+        kind = record.kind
+        investment = record.investment.map(FinanceImportedSyncInvestment.init)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(recordID, forKey: .recordID)
+        try container.encode(sourceRevision, forKey: .sourceRevision)
+        try container.encode(bookedAt, forKey: .bookedAt)
+        try container.encode(amountCents, forKey: .amountCents)
+        try container.encode(description, forKey: .description)
+        try container.encode(categoryOverride, forKey: .categoryOverride)
+        try container.encode(sourceCategory, forKey: .sourceCategory)
+        try container.encode(providerCode, forKey: .providerCode)
+        try container.encode(source, forKey: .source)
+        try container.encode(importedAt, forKey: .importedAt)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(investment, forKey: .investment)
+    }
+}
+
+private enum FinanceImportedLegacyIdentityOperation: Encodable {
+    case upsert(record: FinanceImportedLegacyIdentityRecord, expectedSourceRevision: Int)
+    case categorySet(recordID: UUID, expectedSourceRevision: Int, categoryOverride: FinanceTransactionCategory)
+    case categoryClear(recordID: UUID, expectedSourceRevision: Int)
+    case delete(recordID: UUID, expectedSourceRevision: Int, deletedAt: Date)
+    case restore(record: FinanceImportedLegacyIdentityRecord, expectedTombstoneRevision: Int)
+
+    init(operation: FinanceImportedSyncOperation) throws {
+        switch operation {
+        case let .upsert(record, expectedSourceRevision):
+            self = .upsert(record: try FinanceImportedLegacyIdentityRecord(record: record), expectedSourceRevision: expectedSourceRevision)
+        case let .categorySet(recordID, expectedSourceRevision, categoryOverride):
+            self = .categorySet(recordID: recordID, expectedSourceRevision: expectedSourceRevision, categoryOverride: categoryOverride)
+        case let .categoryClear(recordID, expectedSourceRevision):
+            self = .categoryClear(recordID: recordID, expectedSourceRevision: expectedSourceRevision)
+        case let .delete(recordID, expectedSourceRevision, deletedAt):
+            self = .delete(recordID: recordID, expectedSourceRevision: expectedSourceRevision, deletedAt: deletedAt)
+        case let .restore(record, expectedTombstoneRevision):
+            self = .restore(record: try FinanceImportedLegacyIdentityRecord(record: record), expectedTombstoneRevision: expectedTombstoneRevision)
+        case .legacyUpsert, .legacyDelete:
+            throw FinanceImportedSyncError.invalidRequest
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        enum CodingKeys: String, CodingKey {
+            case operation, record, recordID, expectedSourceRevision, categoryOverride
+            case deletedAt, expectedTombstoneRevision
+        }
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .upsert(record, expectedSourceRevision):
+            try container.encode("upsert", forKey: .operation)
+            try container.encode(record, forKey: .record)
+            try container.encode(expectedSourceRevision, forKey: .expectedSourceRevision)
+        case let .categorySet(recordID, expectedSourceRevision, categoryOverride):
+            try container.encode("categorySet", forKey: .operation)
+            try container.encode(recordID, forKey: .recordID)
+            try container.encode(expectedSourceRevision, forKey: .expectedSourceRevision)
+            try container.encode(categoryOverride, forKey: .categoryOverride)
+        case let .categoryClear(recordID, expectedSourceRevision):
+            try container.encode("categoryClear", forKey: .operation)
+            try container.encode(recordID, forKey: .recordID)
+            try container.encode(expectedSourceRevision, forKey: .expectedSourceRevision)
+        case let .delete(recordID, expectedSourceRevision, deletedAt):
+            try container.encode("delete", forKey: .operation)
+            try container.encode(recordID, forKey: .recordID)
+            try container.encode(expectedSourceRevision, forKey: .expectedSourceRevision)
+            try container.encode(deletedAt, forKey: .deletedAt)
+        case let .restore(record, expectedTombstoneRevision):
+            try container.encode("restore", forKey: .operation)
+            try container.encode(record, forKey: .record)
+            try container.encode(expectedTombstoneRevision, forKey: .expectedTombstoneRevision)
+        }
+    }
+}
+
+private struct FinanceImportedLegacyIdentityRequest: Encodable {
+    let schemaVersion: Int
+    let baseRevision: Int
+    let operations: [FinanceImportedLegacyIdentityOperation]
+
+    init(request: FinanceImportedSyncRequest) throws {
+        schemaVersion = request.schemaVersion
+        baseRevision = request.baseRevision
+        operations = try request.operations.map(FinanceImportedLegacyIdentityOperation.init(operation:))
     }
 }
 

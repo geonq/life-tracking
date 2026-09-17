@@ -195,4 +195,34 @@ final class FinanceInstitutionDetectorTests: XCTestCase {
         XCTAssertTrue(candidate.reasonCodes.contains(.missingRequiredHeader))
         XCTAssertFalse(candidate.reasonCodes.contains(.extraHeader))
     }
+
+    func testMappingEligibilityRequiresMappingForUnknownHeaders() {
+        let eligibility = FinanceInstitutionDetector.mappingEligibility(
+            headers: ["date", "description", "amount"],
+            delimiter: .comma
+        )
+
+        XCTAssertEqual(eligibility.state, .requiresMapping)
+        XCTAssertTrue(eligibility.requiresExplicitMapping)
+        XCTAssertFalse(eligibility.isBlocked)
+        XCTAssertEqual(eligibility.originalDetection.state, .unknown)
+    }
+
+    func testMappingEligibilityBlocksDisabledAndUnsupportedNearMatches() {
+        let disabled = FinanceInstitutionDetector.mappingEligibility(
+            headers: ["Activity Date", "Trans Code", "Net Amount"],
+            delimiter: .comma
+        )
+        XCTAssertEqual(disabled.state, .blocked)
+        XCTAssertTrue(disabled.isBlocked)
+        XCTAssertTrue(disabled.reasonCodes.contains(.disabledProfile))
+
+        let nearMatch = FinanceInstitutionDetector.mappingEligibility(
+            headers: ["date", "description", "amount", "counterparty_name", "original_amount"],
+            delimiter: .comma
+        )
+        XCTAssertEqual(nearMatch.state, .blocked)
+        XCTAssertTrue(nearMatch.isBlocked)
+        XCTAssertTrue(nearMatch.reasonCodes.contains(.unsupportedNearMatch))
+    }
 }

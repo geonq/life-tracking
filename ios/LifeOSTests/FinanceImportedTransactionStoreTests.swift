@@ -473,6 +473,78 @@ final class FinanceImportedTransactionStoreTests: XCTestCase {
         )
     }
 
+    private func preparedMappedImport(
+        accountID: UUID = UUID(uuidString: "00000000-0000-4000-8000-000000000031")!,
+        mappingID: UUID = UUID(uuidString: "00000000-0000-4000-8000-000000000032")!,
+        csv: String = "date,description,amount\n2026-08-01,Synthetic merchant,-10.00"
+    ) throws -> FinancePreparedImport {
+        let data = Data(csv.utf8)
+        let inspection = try FinanceStatementImporter.inspectCSV(data: data)
+        let headers = try FinanceStatementImporter.headerColumnNames(data: data, inspection: inspection)
+        let account = try FinanceImportAccountIdentity(id: accountID, label: "Synthetic test account")
+        let draft = FinanceImportMappingDraft(
+            delimiter: inspection.delimiter,
+            headerRecordIndex: inspection.headerRecordIndex,
+            dateColumn: 0,
+            dateFormat: .yearMonthDay,
+            amount: .signed(column: 2),
+            currency: .constantEUR,
+            account: FinanceImportAccountSelection(identity: account),
+            description: .column(index: 1)
+        )
+        let mapping = try FinanceImportMapping(
+            id: mappingID,
+            draft: draft,
+            headerColumns: headers
+        )
+        return try FinanceStatementImporter.prepareMappedImport(
+            data: data,
+            mapping: mapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000033")!,
+            revision: 0
+        )
+    }
+
+    private func preparedProviderImport(
+        csv: String,
+        accountID: UUID = UUID(uuidString: "00000000-0000-4000-8000-000000000041")!,
+        mappingID: UUID = UUID(uuidString: "00000000-0000-4000-8000-000000000042")!
+    ) throws -> FinancePreparedImport {
+        let data = Data(csv.utf8)
+        let inspection = try FinanceStatementImporter.inspectCSV(data: data)
+        let headers = try FinanceStatementImporter.headerColumnNames(data: data, inspection: inspection)
+        let account = try FinanceImportAccountIdentity(id: accountID, label: "Synthetic provider account")
+        let mapping = try FinanceImportMapping(
+            id: mappingID,
+            draft: FinanceImportMappingDraft(
+                delimiter: inspection.delimiter,
+                headerRecordIndex: inspection.headerRecordIndex,
+                dateColumn: 0,
+                dateFormat: .yearMonthDay,
+                amount: .signed(column: 3),
+                currency: .constantEUR,
+                account: FinanceImportAccountSelection(identity: account),
+                description: .column(index: 1),
+                providerIDColumn: 2
+            ),
+            headerColumns: headers
+        )
+        return try FinanceStatementImporter.prepareMappedImport(
+            data: data,
+            mapping: mapping,
+            sessionID: UUID(uuidString: "00000000-0000-4000-8000-000000000043")!,
+            revision: 0
+        )
+    }
+
+    private func writeRawEnvelope(_ object: [String: Any], to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: url)
+    }
+
     // MARK: 1. Persistence round-trip / reload after relaunch
 
     func testPersistenceRoundTripSurvivesRelaunch() throws {
@@ -1275,6 +1347,19 @@ final class FinanceImportedTransactionStoreTests: XCTestCase {
         }.joined(separator: ",")
     }
 
+    private func legacyIdentityRequestBody(from body: Data) throws -> Data {
+        var root = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        var operations = try XCTUnwrap(root["operations"] as? [[String: Any]])
+        for index in operations.indices {
+            guard var record = operations[index]["record"] as? [String: Any] else { continue }
+            record.removeValue(forKey: "identityScheme")
+            record.removeValue(forKey: "mappedIdentity")
+            operations[index]["record"] = record
+        }
+        root["operations"] = operations
+        return try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+    }
+
     func testLegacyEnvelopeMigratesToV3AndQueuesImmutableSourceOperation() throws {
         let url = temporaryURL()
         defer { removeStore(at: url) }
@@ -1510,6 +1595,34 @@ final class FinanceImportedTransactionStoreTests: XCTestCase {
         XCTAssertEqual(retry.request, first.request)
     }
 
+    func testLegacyAttemptedBodySurvivesIdentitySchemaUpgradeAndRelaunch() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try FinanceImportedTransactionStore(url: url)
+        try store.adoptRemote(try remoteResult(revision: 0))
+        try store.add([transaction(description: "Legacy attempted body")])
+        let first = try XCTUnwrap(store.pendingSyncRequest())
+        let legacyBody = try legacyIdentityRequestBody(from: first.body)
+
+        var root = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var outbox = try XCTUnwrap(root["outbox"] as? [[String: Any]])
+        var entry = try XCTUnwrap(outbox.first)
+        var attempted = try XCTUnwrap(entry["attemptedRequest"] as? [String: Any])
+        attempted["body"] = legacyBody.base64EncodedString()
+        entry["attemptedRequest"] = attempted
+        outbox[0] = entry
+        root["outbox"] = outbox
+        let upgradedFixture = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        try upgradedFixture.write(to: url, options: .atomic)
+
+        let relaunched = try FinanceImportedTransactionStore(url: url)
+        let retry = try XCTUnwrap(relaunched.pendingSyncRequest())
+        XCTAssertEqual(retry.body, legacyBody)
+        XCTAssertEqual(retry.ifMatch, first.ifMatch)
+        XCTAssertEqual(retry.idempotencyKey, first.idempotencyKey)
+        XCTAssertEqual(retry.request, first.request)
+    }
+
     func testExpiredAndExhaustedOutboxRemainReadableAndExposeBlockedStatus() throws {
         for attemptCase in [
             ("expired", 0, Date().addingTimeInterval(-FinanceImportedTransactionStore.maximumRetryAge - 1)),
@@ -1615,5 +1728,423 @@ final class FinanceImportedTransactionStoreTests: XCTestCase {
             let request = try FinanceImportedSyncRequest(baseRevision: 0, operations: entry.operations)
             XCTAssertLessThanOrEqual(try request.canonicalData().count, FinanceImportedSyncRequest.maximumRequestBytes)
         }
+    }
+
+    // MARK: Stage-1 mapping persistence and wire boundary
+
+    func testPreparedImportCommitAndRetryAreIdempotent() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let prepared = try preparedMappedImport()
+        let store = try FinanceImportedTransactionStore(url: url)
+
+        let first = try store.commitPreparedImport(prepared)
+        let relaunched = try FinanceImportedTransactionStore(url: url)
+        let retry = try relaunched.commitPreparedImport(prepared)
+
+        XCTAssertEqual(first.insertedCount, 1)
+        XCTAssertEqual(first.duplicateCount, 0)
+        XCTAssertEqual(retry.insertedCount, 0)
+        XCTAssertEqual(retry.duplicateCount, 1)
+        XCTAssertEqual(try relaunched.all().count, 1)
+        XCTAssertEqual(try relaunched.importMappings().count, 1)
+        XCTAssertEqual(try relaunched.importBatches().count, 1)
+        XCTAssertEqual(try persistedEnvelope(at: url).outbox.flatMap(\.operations).count, 1)
+
+        let secondLaunch = try FinanceImportedTransactionStore(url: url)
+        XCTAssertEqual(try secondLaunch.importMappings().count, 1)
+        XCTAssertEqual(try secondLaunch.importBatches(), try store.importBatches())
+    }
+
+    func testCommittedBatchRetryCannotUndoLaterProviderCorrection() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let original = try preparedProviderImport(csv: """
+        date,description,provider,amount
+        2026-08-01,Original,p-1,-10.00
+        """)
+        let corrected = try preparedProviderImport(csv: """
+        date,description,provider,amount
+        2026-08-01,Corrected,p-1,-12.00
+        """)
+        XCTAssertEqual(original.transactions.map(\.id), corrected.transactions.map(\.id))
+
+        let store = try FinanceImportedTransactionStore(url: url)
+        XCTAssertEqual(try store.commitPreparedImport(original).insertedCount, 1)
+        XCTAssertEqual(try store.commitPreparedImport(corrected).updatedCount, 1)
+
+        let retry = try store.commitPreparedImport(original)
+        XCTAssertEqual(retry.insertedCount, 0)
+        XCTAssertEqual(retry.updatedCount, 0)
+        XCTAssertEqual(retry.duplicateCount, 1)
+        XCTAssertEqual(try store.all().first?.description, "Corrected")
+        XCTAssertEqual(try store.all().first?.amountCents, -1200)
+    }
+
+    func testLegacyGenericRowsAreFencedBeforeMappedImport() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let oldRow = transaction(description: "Legacy generic row")
+        let rowObject = try JSONSerialization.jsonObject(with: JSONEncoder.lifeOS.encode(oldRow))
+        try writeRawEnvelope([
+            "schemaVersion": FinanceImportedTransactionStoreEnvelope.preProvenanceSchemaVersion,
+            "transactions": [rowObject],
+            "remoteRevision": 0,
+            "remoteETag": NSNull(),
+            "remoteRecordRevisions": [:],
+            "remoteTombstones": [],
+            "outbox": []
+        ], to: url)
+
+        let store = try FinanceImportedTransactionStore(url: url)
+        XCTAssertEqual(try store.all(), [oldRow])
+        XCTAssertEqual(try persistedEnvelope(at: url).legacyGenericTransactionIDs, [oldRow.id])
+
+        XCTAssertThrowsError(try store.commitPreparedImport(try preparedMappedImport())) { error in
+            XCTAssertEqual(error as? FinanceImportedTransactionStoreError, .migrationRequired)
+        }
+        XCTAssertEqual(try store.all(), [oldRow])
+    }
+
+    func testChangedMappingInterpretationForSameSourceRequiresMigration() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let csv = """
+        date,description,provider,amount
+        2026-08-01,Original,p-1,-10.00
+        """
+        let original = try preparedProviderImport(csv: csv)
+        let data = Data(csv.utf8)
+        let inspection = try FinanceStatementImporter.inspectCSV(data: data)
+        let headers = try FinanceStatementImporter.headerColumnNames(data: data, inspection: inspection)
+        let account = try FinanceImportAccountIdentity(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000041")!,
+            label: "Synthetic provider account"
+        )
+        let changedMapping = try FinanceImportMapping(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000044")!,
+            draft: FinanceImportMappingDraft(
+                delimiter: inspection.delimiter,
+                headerRecordIndex: inspection.headerRecordIndex,
+                dateColumn: 0,
+                dateFormat: .yearMonthDay,
+                amount: .signed(column: 3),
+                currency: .constantEUR,
+                account: FinanceImportAccountSelection(identity: account),
+                description: .column(index: 1)
+            ),
+            headerColumns: headers
+        )
+        let changed = try FinanceStatementImporter.prepareMappedImport(
+            data: data,
+            inspection: inspection,
+            mapping: changedMapping,
+            sessionID: UUID(uuidString: "00000000-0000-0000-0000-000000000045")!,
+            revision: 0
+        )
+
+        let store = try FinanceImportedTransactionStore(url: url)
+        _ = try store.commitPreparedImport(original)
+        XCTAssertThrowsError(try store.commitPreparedImport(changed)) { error in
+            XCTAssertEqual(error as? FinanceImportedTransactionStoreError, .migrationRequired)
+        }
+        XCTAssertEqual(try store.all().count, 1)
+        XCTAssertEqual(try store.importBatches().count, 1)
+    }
+
+    func testEquivalentMappingAndBatchAreReusedAcrossFreshPreviewUUIDs() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let first = try preparedMappedImport()
+        let second = try preparedMappedImport(
+            mappingID: UUID(uuidString: "00000000-0000-4000-8000-000000000034")!
+        )
+        XCTAssertNotEqual(first.mapping?.id, second.mapping?.id)
+        XCTAssertEqual(first.transactions.map(\.id), second.transactions.map(\.id))
+
+        let store = try FinanceImportedTransactionStore(url: url)
+        _ = try store.commitPreparedImport(first)
+        let duplicate = try store.commitPreparedImport(second)
+        XCTAssertEqual(duplicate.insertedCount, 0)
+        XCTAssertEqual(duplicate.updatedCount, 0)
+        XCTAssertEqual(duplicate.duplicateCount, 1)
+        XCTAssertEqual(try store.importMappings().count, 1)
+        XCTAssertEqual(try store.importBatches().count, 1)
+        XCTAssertEqual(try persistedEnvelope(at: url).outbox.flatMap(\.operations).count, 1)
+
+        let categoryUpdate = try store.commitPreparedImport(
+            second,
+            categoryEdits: [
+                FinanceImportCategoryEdit(
+                    transactionID: second.transactions[0].id,
+                    category: .groceries
+                )
+            ]
+        )
+        XCTAssertEqual(categoryUpdate.insertedCount, 0)
+        XCTAssertEqual(categoryUpdate.updatedCount, 1)
+        XCTAssertEqual(try store.importBatches().count, 1, "category edits must not append an import receipt")
+        XCTAssertEqual(try store.all().first?.category, FinanceTransactionCategory.groceries.rawValue)
+    }
+
+    func testLegacyMappedV2EnvelopeRequiresMigrationWithoutMutatingLedger() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let prepared = try preparedMappedImport()
+        let mapping = try XCTUnwrap(prepared.mapping)
+        let importedRow = try XCTUnwrap(prepared.transactions.first)
+        let row = FinanceImportedTransaction(
+            id: importedRow.id,
+            bookedAt: importedRow.bookedAt,
+            amountCents: importedRow.amountCents,
+            description: importedRow.description,
+            category: FinanceTransactionCategory.groceries.rawValue,
+            source: importedRow.source,
+            importedAt: importedRow.importedAt,
+            sourceCategory: importedRow.sourceCategory,
+            providerCode: importedRow.providerCode,
+            kind: importedRow.kind,
+            investment: importedRow.investment
+        )
+        let operation = try FinanceImportedSyncOperation.upsert(
+            record: try FinanceImportedSyncRecord(validating: row, sourceRevision: 1),
+            expectedSourceRevision: 1
+        )
+        let tombstoneID = UUID(uuidString: "00000000-0000-4000-8000-000000000035")!
+        let tombstone = try FinanceImportedSyncTombstone(
+            recordID: tombstoneID,
+            revision: 1,
+            deletedAt: now
+        )
+        let pending = try FinanceImportedPendingSyncEntry(
+            idempotencyKey: "legacy-v2-pending",
+            operations: [operation]
+        )
+        let envelope = FinanceImportedTransactionStoreEnvelope(
+            transactions: [row],
+            remoteRevision: 1,
+            remoteRecordRevisions: [row.id.uuidString.lowercased(): 1],
+            remoteTombstones: [tombstone],
+            outbox: [pending],
+            importMappings: [mapping],
+            importBatches: [prepared.batchProvenance]
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder.lifeOS.encode(envelope)) as? [String: Any]
+        )
+        var mappings = try XCTUnwrap(object["importMappings"] as? [[String: Any]])
+        // A legacy envelope predates the identityScheme field. The mapping
+        // decoder must surface that absence as .legacyV2.
+        mappings[0].removeValue(forKey: "identityScheme")
+        object["importMappings"] = mappings
+        try writeRawEnvelope(object, to: url)
+
+        let persistedRow = try JSONDecoder.lifeOS.decode(
+            FinanceImportedTransaction.self,
+            from: JSONEncoder.lifeOS.encode(row)
+        )
+        let store = try FinanceImportedTransactionStore(url: url)
+        // Loading the legacy marker may rewrite only the content-free fence;
+        // the existing transaction, revisions, outbox, and receipt remain.
+        XCTAssertEqual(try store.all(), [persistedRow])
+        let loadedBeforeCommit = try persistedEnvelope(at: url)
+        XCTAssertEqual(loadedBeforeCommit.transactions, [persistedRow])
+        XCTAssertEqual(loadedBeforeCommit.transactions.first?.category, FinanceTransactionCategory.groceries.rawValue)
+        XCTAssertEqual(loadedBeforeCommit.remoteRecordRevisions, envelope.remoteRecordRevisions)
+        XCTAssertEqual(
+            loadedBeforeCommit.remoteTombstones.map(\.recordID),
+            envelope.remoteTombstones.map(\.recordID)
+        )
+        XCTAssertEqual(
+            loadedBeforeCommit.remoteTombstones.map(\.revision),
+            envelope.remoteTombstones.map(\.revision)
+        )
+        XCTAssertEqual(loadedBeforeCommit.outbox.map(\.idempotencyKey), envelope.outbox.map(\.idempotencyKey))
+        XCTAssertEqual(loadedBeforeCommit.outbox.flatMap(\.operations), envelope.outbox.flatMap(\.operations))
+        XCTAssertEqual(loadedBeforeCommit.importMappings.first?.identityScheme, .legacyV2)
+        XCTAssertEqual(loadedBeforeCommit.importBatches.map(\.id), envelope.importBatches.map(\.id))
+        XCTAssertEqual(loadedBeforeCommit.importBatches.flatMap(\.rowLinks), envelope.importBatches.flatMap(\.rowLinks))
+        XCTAssertEqual(loadedBeforeCommit.legacyIdentityMappingIDs, [mapping.id])
+
+        XCTAssertThrowsError(try store.commitPreparedImport(prepared)) { error in
+            XCTAssertEqual(error as? FinanceImportedTransactionStoreError, .migrationRequired)
+        }
+
+        let after = try persistedEnvelope(at: url)
+        XCTAssertEqual(after.transactions, loadedBeforeCommit.transactions)
+        XCTAssertEqual(after.remoteRecordRevisions, loadedBeforeCommit.remoteRecordRevisions)
+        XCTAssertEqual(after.outbox.map(\.idempotencyKey), loadedBeforeCommit.outbox.map(\.idempotencyKey))
+        XCTAssertEqual(after.outbox.flatMap(\.operations), loadedBeforeCommit.outbox.flatMap(\.operations))
+        XCTAssertEqual(after.importBatches.map(\.id), loadedBeforeCommit.importBatches.map(\.id))
+        XCTAssertEqual(after.importBatches.flatMap(\.rowLinks), loadedBeforeCommit.importBatches.flatMap(\.rowLinks))
+        XCTAssertEqual(after.legacyIdentityMappingIDs, [mapping.id])
+    }
+
+    func testBoundedStateReadRejectsMaximumPlusOneBeforeJSONDecode() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        try Data(repeating: 0x20, count: FinanceImportedTransactionStore.maximumStateBytes + 1).write(to: url)
+
+        let store = try FinanceImportedTransactionStore(url: url)
+        XCTAssertThrowsError(try store.all()) { error in
+            XCTAssertEqual(error as? FinanceImportedTransactionStoreError, .stateTooLarge)
+        }
+    }
+
+    func testV1V2V3EnvelopesMigrateToV4WithLocalMetadataEmpty() throws {
+        for schemaVersion in [
+            FinanceImportedTransactionStoreEnvelope.legacySchemaVersion,
+            FinanceImportedTransactionStoreEnvelope.previousSchemaVersion,
+            FinanceImportedTransactionStoreEnvelope.preProvenanceSchemaVersion
+        ] {
+            let url = temporaryURL()
+            defer { removeStore(at: url) }
+            let row = transaction(description: "Synthetic migration \(schemaVersion)")
+            let rowData = try JSONEncoder.lifeOS.encode(row)
+            let rowObject = try XCTUnwrap(JSONSerialization.jsonObject(with: rowData))
+
+            let object: [String: Any]
+            switch schemaVersion {
+            case FinanceImportedTransactionStoreEnvelope.legacySchemaVersion:
+                object = [
+                    "schemaVersion": schemaVersion,
+                    "transactions": [rowObject]
+                ]
+            case FinanceImportedTransactionStoreEnvelope.previousSchemaVersion:
+                object = [
+                    "schemaVersion": schemaVersion,
+                    "transactions": [rowObject],
+                    "remoteRevision": 0,
+                    "remoteETag": NSNull(),
+                    "outbox": []
+                ]
+            default:
+                object = [
+                    "schemaVersion": schemaVersion,
+                    "transactions": [rowObject],
+                    "remoteRevision": 0,
+                    "remoteETag": NSNull(),
+                    "remoteRecordRevisions": [:],
+                    "remoteTombstones": [],
+                    "outbox": []
+                ]
+            }
+            try writeRawEnvelope(object, to: url)
+
+            let store = try FinanceImportedTransactionStore(url: url)
+            XCTAssertEqual(try store.all(), [row], "schema \(schemaVersion)")
+            let migrated = try persistedEnvelope(at: url)
+            XCTAssertEqual(migrated.schemaVersion, FinanceImportedTransactionStoreEnvelope.currentSchemaVersion)
+            XCTAssertTrue(migrated.importMappings.isEmpty, "schema \(schemaVersion)")
+            XCTAssertTrue(migrated.importBatches.isEmpty, "schema \(schemaVersion)")
+            XCTAssertEqual(migrated.legacyGenericTransactionIDs, [row.id], "schema \(schemaVersion)")
+            if schemaVersion == FinanceImportedTransactionStoreEnvelope.legacySchemaVersion {
+                XCTAssertEqual(migrated.outbox.flatMap(\.operations).count, 1)
+            } else {
+                XCTAssertTrue(migrated.outbox.isEmpty, "schema \(schemaVersion)")
+            }
+        }
+    }
+
+    func testBatchProvenancePrunesLinksAsTransactionsAreRemoved() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let prepared = try preparedMappedImport(csv: """
+        date,description,amount
+        2026-08-01,Synthetic first,-10.00
+        2026-08-02,Synthetic second,-20.00
+        """)
+        let store = try FinanceImportedTransactionStore(url: url)
+        try store.commitPreparedImport(prepared)
+        let firstID = prepared.transactions[0].id
+        let secondID = prepared.transactions[1].id
+
+        XCTAssertEqual(try store.importBatches().first?.rowLinks.count, 2)
+        try store.remove(id: firstID)
+        let partial = try XCTUnwrap(try store.importBatches().first)
+        XCTAssertEqual(partial.rowLinks.map(\.transactionID), [secondID])
+        XCTAssertEqual(try store.importMappings().count, 1, "the reviewed mapping remains reusable")
+
+        try store.remove(id: secondID)
+        XCTAssertTrue(try store.importBatches().isEmpty)
+    }
+
+    func testV4BatchWithOrphanRowLinkFailsClosed() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let headers = ["date", "description", "amount"]
+        let account = try FinanceImportAccountIdentity(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000041")!,
+            label: "Synthetic orphan test account"
+        )
+        let mapping = try FinanceImportMapping(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000042")!,
+            draft: FinanceImportMappingDraft(
+                delimiter: .comma,
+                headerRecordIndex: 0,
+                dateColumn: 0,
+                dateFormat: .yearMonthDay,
+                amount: .signed(column: 2),
+                currency: .constantEUR,
+                account: FinanceImportAccountSelection(identity: account),
+                description: .column(index: 1)
+            ),
+            headerColumns: headers
+        )
+        let batchID = UUID(uuidString: "00000000-0000-4000-8000-000000000043")!
+        let orphanID = UUID(uuidString: "00000000-0000-4000-8000-000000000044")!
+        let rowLink = try FinanceImportRowProvenance(
+            batchID: batchID,
+            sourceRowNumber: 2,
+            transactionID: orphanID
+        )
+        let batch = try FinanceImportBatchProvenance(
+            id: batchID,
+            importedAt: now,
+            sourceDigest: String(repeating: "a", count: 64),
+            byteCount: 42,
+            headerFingerprint: mapping.headerFingerprint,
+            delimiter: .comma,
+            headerRecordIndex: 0,
+            mappingID: mapping.id,
+            originalDetection: .unknown,
+            effectiveDetection: FinanceInstitutionDetection(state: .userMapped),
+            rowLinks: [rowLink]
+        )
+        let envelope = FinanceImportedTransactionStoreEnvelope(
+            importMappings: [mapping],
+            importBatches: [batch]
+        )
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try JSONEncoder.lifeOS.encode(envelope).write(to: url)
+
+        let store = try FinanceImportedTransactionStore(url: url)
+        XCTAssertThrowsError(try store.all()) { error in
+            XCTAssertEqual(error as? FinanceImportedTransactionStoreError, .invalidEnvelope)
+        }
+    }
+
+    func testSyncWireExcludesLocalMappingAndProvenance() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let prepared = try preparedMappedImport()
+        let store = try FinanceImportedTransactionStore(url: url)
+        try store.adoptRemote(try remoteResult(revision: 0))
+        try store.commitPreparedImport(prepared)
+
+        let pending = try XCTUnwrap(try store.pendingSyncRequest())
+        let wire = String(decoding: pending.body, as: UTF8.self)
+        for localOnlyKey in [
+            "importMappings", "importBatches", "mappingID", "rowLinks",
+            "headerFingerprint", "sourceDigest", "Synthetic test account"
+        ] {
+            XCTAssertFalse(wire.contains(localOnlyKey), "local-only key leaked: \(localOnlyKey)")
+        }
+        XCTAssertNoThrow(try JSONDecoder.lifeOS.decode(FinanceImportedSyncRequest.self, from: pending.body))
+        XCTAssertEqual(try persistedEnvelope(at: url).importMappings.count, 1)
+        XCTAssertEqual(try persistedEnvelope(at: url).importBatches.count, 1)
     }
 }

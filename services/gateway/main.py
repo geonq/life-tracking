@@ -566,6 +566,7 @@ FINANCE_IMPORTED_WHITESPACE = frozenset({
 })
 FINANCE_IMPORTED_PATH = DATA_DIR / "finance-imported.json"
 FINANCE_IMPORTED_SOURCES = frozenset({"tradeRepublicCSV", "genericCSV"})
+FINANCE_IMPORTED_IDENTITY_SCHEMES = frozenset({"legacyCSVv2", "mappedV3"})
 FINANCE_IMPORTED_KINDS = frozenset({"cash", "investmentOrder"})
 FINANCE_IMPORTED_CATEGORIES = frozenset({
     "groceries", "dining", "transport", "shopping", "bills", "subscriptions",
@@ -2543,13 +2544,32 @@ def _validate_finance_imported_investment(value: object) -> dict | None:
     }
 
 
+def _validate_finance_imported_mapped_identity(value: object) -> dict | None:
+    if value is None:
+        return None
+    required = {"accountID", "configurationDigest"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise ValueError("invalid imported finance mapped identity")
+    account_id = _finance_imported_uuid(value["accountID"])
+    digest = value["configurationDigest"]
+    if not isinstance(digest, str) or not SYNC_FINGERPRINT_PATTERN.fullmatch(digest):
+        raise ValueError("invalid imported finance mapping digest")
+    return {"accountID": account_id, "configurationDigest": digest.lower()}
+
+
 def _validate_finance_imported_record(value: object, *, legacy: bool = False, snapshot_revision: int | None = None) -> dict:
     base_fields = {
         "recordID", "bookedAt", "amountCents", "description", "categoryOverride",
         "sourceCategory", "providerCode", "source", "importedAt", "kind", "investment",
     }
     required = base_fields if legacy else base_fields | {"sourceRevision"}
-    if not isinstance(value, dict) or set(value) != required:
+    allowed = required if legacy else required | {"identityScheme", "mappedIdentity"}
+    allowed_without_identity_metadata = required if legacy else required | {"identityScheme"}
+    if not isinstance(value, dict) or (
+        set(value) != required
+        and set(value) != allowed
+        and set(value) != allowed_without_identity_metadata
+    ):
         raise ValueError("invalid imported finance record")
     source_revision = 0 if legacy else _finance_imported_revision(value["sourceRevision"])
     if snapshot_revision is not None:
@@ -2570,11 +2590,21 @@ def _validate_finance_imported_record(value: object, *, legacy: bool = False, sn
         "sourceCategory": _finance_imported_text(value["sourceCategory"], 128, nullable=True),
         "providerCode": _finance_imported_text(value["providerCode"], 64, nullable=True),
         "source": value["source"],
+        "identityScheme": value.get("identityScheme", "legacyCSVv2"),
+        "mappedIdentity": _validate_finance_imported_mapped_identity(value.get("mappedIdentity")),
         "importedAt": _finance_imported_timestamp(value["importedAt"]),
         "kind": value["kind"],
         "investment": _validate_finance_imported_investment(value["investment"]),
     }
-    if record["source"] not in FINANCE_IMPORTED_SOURCES or record["kind"] not in FINANCE_IMPORTED_KINDS:
+    if (
+        record["source"] not in FINANCE_IMPORTED_SOURCES
+        or record["identityScheme"] not in FINANCE_IMPORTED_IDENTITY_SCHEMES
+        or record["kind"] not in FINANCE_IMPORTED_KINDS
+        or (
+            record["identityScheme"] == "mappedV3"
+            and (record["source"] != "genericCSV" or record["mappedIdentity"] is None)
+        )
+    ):
         raise ValueError("invalid imported finance source or kind")
     if record["kind"] == "cash" and record["investment"] is not None:
         raise ValueError("cash row cannot carry investment details")
@@ -6131,6 +6161,8 @@ def _finance_imported_source_observation(record: dict) -> tuple:
         record["sourceCategory"],
         record["providerCode"],
         record["source"],
+        record["identityScheme"],
+        json.dumps(record["mappedIdentity"], sort_keys=True, separators=(",", ":"), ensure_ascii=False),
         record["kind"],
         json.dumps(record["investment"], sort_keys=True, separators=(",", ":"), ensure_ascii=False),
     )
