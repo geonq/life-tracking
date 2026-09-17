@@ -1,11 +1,11 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-17 Europe/Berlin. Release: **NO-GO**. Local and remote `main`
-are clean and equal at `453d304`; coordination docs record the storage guard
-and the recurring-payment checkpoint.
-Track completion separately as
-approximately **70–75% implemented** and **35–45% release-ready**. T12c and
-D1/D2 have Astra Medium source **MERGE** reviews.
+are clean and equal at `2d33ad5`; implementation checkpoint `8c1a225` adds
+the reviewed finance investment validation and Usage v2 provider registry.
+Do not use unverified percentage estimates for completion. Acceptance is
+tracked by registry gates and their required live, runtime, device, visual,
+security, and operator evidence.
 
 ## Ordered work
 
@@ -94,6 +94,13 @@ The D1 store-bound repair is pushed at `16e0855`; D2a/D2b is locally merged at
 actool by the missing simulator runtime. These results
 do not prove live, runtime, device, visual, or operational
 completion.
+
+The Robinhood investment packet is strict and separate from bank transactions;
+its focused macOS suite passes 21/21. Usage v2 retains Claude, keeps Gemini
+subscription usage manual/unsupported without an official quota endpoint, and
+keeps Gemini API usage separate; its contracts pass 212/212 with typecheck and
+build. Both packets received final Astra Medium **MERGE** reviews. Native
+watcher integration remains open.
 
 No scheduler or automatic deletion of source/personal/final evidence was
 added. Future Apple work must use the guard and owned per-lane DerivedData;
