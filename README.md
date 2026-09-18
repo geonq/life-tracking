@@ -33,8 +33,10 @@ usage and WidgetKit source plus a macOS validation path. The current serial
 Mac logic lane passes 193/193; generic iOS SDK builds pass. CoreSimulator is
 currently unavailable, so iOS interactions, physical HealthKit, App Group,
 signing, background refresh and WidgetKit rendering remain device gates. Live
-finance/backend deployment and the Obsidian Canvas implementation are still
-open. The usage registry is provider-neutral: Claude remains supported,
+finance/backend deployment and the Obsidian Canvas durability/UI/transport
+implementation are still open. The bounded Canvas/Markdown codec packet is
+committed at `f53c77c` and passes focused round-trip checks. The usage registry
+is provider-neutral: Claude remains supported,
 Gemini subscription readings are manual until an official quota endpoint is
 verified, and Gemini API usage is a separate product.
 

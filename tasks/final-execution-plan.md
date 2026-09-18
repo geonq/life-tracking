@@ -1,7 +1,7 @@
 # LifeOS final execution plan
 
 Prepared by Astra Medium from the Luna Max audit on 2026-09-18. Baseline:
-`5d1bf650803480e46925c3cfa3c870040d909a36`, clean `main`, aligned with
+`f53c77c`, clean `main`, aligned with
 `origin/main`. Release is **NO-GO**. The 258-leaf registry has 0 accepted
 leaves; it is an acceptance ledger, not a completion percentage.
 
@@ -117,7 +117,9 @@ AI remains an editable proposal and confirmed values only enter totals.
 
 ## 6. Obsidian Canvas — S/L/W/P
 
-Build four disjoint packets. **Codec/binding:** new
+Build four disjoint packets. **Codec/binding:** committed and reviewed at
+`f53c77c`; focused tests are 31/31, an independent smoke harness passed, and
+the post-commit Mac logic lane is 193/193. It adds
 `ios/Planning/{PlanningDomain,PlanningVaultBinding,PlanningCanvasCodec,
 PlanningMarkdownCodec}.swift` and codec tests. Read/write standard `.canvas`
 and Markdown while preserving node IDs, edges, coordinates, groups, colors,
@@ -190,9 +192,9 @@ expected/observed result, remediation and retest.
 
 ## Immediate next dispatch
 
-After this stability receipt, dispatch the canonical Windows candidate/preflight
-packet with exact inspected parameters. In parallel only when write scopes are
-disjoint, dispatch Canvas codec/domain work or workout source hardening. Do
-not start live finance or physical-device acceptance before the required
+After the stability and Canvas codec receipts, dispatch the canonical Windows
+candidate/preflight packet with exact inspected parameters. In parallel only
+when write scopes are disjoint, dispatch Canvas durability or workout source
+hardening. Do not start live finance or physical-device acceptance before the
 backend/device prerequisites. Finish each packet with review, commit, push,
 and handoff update.

@@ -5,7 +5,7 @@ Updated 2026-09-18 Europe/Berlin.
 ## Release state
 
 - Release: **NO-GO**.
-- `main` and `origin/main` are aligned at `5d1bf65`.
+- `main` and `origin/main` are aligned at `f53c77c`.
 - The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0
   formally accepted leaves. This is an evidence ledger, not a percentage.
 - The old `worker/t11a-shared-visual-foundation` branch is patch-equivalent to
@@ -35,6 +35,11 @@ Updated 2026-09-18 Europe/Berlin.
 - Generic iOS device SDK/build-for-testing lanes compile. CoreSimulator is
   unavailable and `simdiskimaged` is unhealthy, so iOS interactions remain
   unexecuted.
+- The Obsidian Canvas codec/binding packet is pushed at `f53c77c`. Focused
+  codec tests are **31/31**, the independent smoke harness passed, and the
+  post-commit serial Mac logic lane is **193/193** with independent xcresult
+  validation. It is value-only: durable vault storage, UI, graph projection,
+  gateway transport, and sync are still open.
 
 ## Backend state
 
@@ -55,9 +60,9 @@ Updated 2026-09-18 Europe/Berlin.
   service/ACL/Serve/health/readiness/listener readback, and rollback receipt.
 - Real Enable Banking consent/readback, live recurring reconciliation, and
   verified Robinhood/Trade Republic/net-worth reconciliation.
-- Obsidian Canvas is source-incomplete: codecs, durable vault store, conflict
-  journal, graph/spatial index, native views, gateway route, and round-trip
-  tests do not exist yet.
+- Obsidian Canvas codecs and value binding are source-complete and tested;
+  durable vault store, conflict journal, graph/spatial index, native views,
+  gateway route, and live round-trip wiring remain open.
 - Zepp-to-HealthKit workout provenance and field accuracy require a physical
   iPhone and real samples. Zepp proprietary readiness/load/PAI/Training Effect
   remains unsupported without a legitimate source.

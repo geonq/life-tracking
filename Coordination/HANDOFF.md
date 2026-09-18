@@ -9,8 +9,8 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. `main` is clean and pushed at `5d1bf65` (`test: cover
-  usage connection management flows`). Earlier source checkpoints remain
+- Release is **NO-GO**. `main` is clean and pushed at `f53c77c` (`feat: add
+  bounded Obsidian Canvas codecs`). Earlier source checkpoints remain
   `4856fae`, `1d57435`, `5aa3fb1`, `1956569`, and `273f4dd`.
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
@@ -111,7 +111,7 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## LifeOSMac stability receipt
 
-- The current post-`5d1bf65` serialized Mac logic lane completed **193/193**
+- The current post-`f53c77c` serialized Mac logic lane completed **193/193**
   with exit 0; the independent validator passed. A focused stability lane
   completed **1/1** while an isolated manual LifeOSMac build stayed alive.
   The three older `EXC_BAD_ACCESS` reports are temporary XCTest hosts; no new
@@ -140,7 +140,8 @@ tranches. Keep the release verdict honest; do not call the product done.
   claim live quota.
 - Canonical Windows install/listener/health/Serve/Enable Banking readback.
 - Finance live connector/import/recurring/net-worth work; Zepp workouts;
-  Obsidian Canvas round trip; widgets, Shortcuts, signing, physical iPhone.
+- Obsidian Canvas durable store, conflict journal, graph/spatial index, native
+  views, gateway route, widgets, Shortcuts, signing, physical iPhone.
 - Whole-app visual/runtime acceptance remains open; current UI slices are
   evidence for those slices only, not product-wide approval.
 - Canonical Windows recovery is pending explicit operator approval for the
@@ -149,9 +150,9 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## Next action
 
-Use `5d1bf65` plus the stability receipt as the source of truth. Continue with
+Use `f53c77c` plus the stability and Canvas receipts as the source of truth. Continue with
 the canonical Windows candidate/preflight and recovery packet, then live
-finance/net-worth reconciliation, the missing Obsidian Canvas implementation,
+finance/net-worth reconciliation, Canvas durability and native interaction,
 Zepp/workout evidence, widgets/Shortcuts/signing, visual acceptance, and the
 final batched security review. Do not rerun the full Mac suite without a code
 change or a relevant failure.
@@ -170,3 +171,19 @@ unverified and must be rerun before its result is used.
 No blocker on source/disposable Windows evidence. Installed-service, canonical
 deployment, simulator runtime, physical device, live providers, and final
 visual acceptance are external or environment-bound and remain unverified.
+
+## Obsidian Canvas codec receipt
+
+- `f53c77c` adds the bounded JSON Canvas 1.0/Markdown codecs, value-only vault
+  binding, source inclusion, and focused tests. Astra Medium approved the
+  actual final diff after the lossless-number, path, YAML, extension, and
+  quoted-key corrections.
+- Focused codec evidence is **31/31**; an independent smoke harness passed
+  empty/nodes-only Canvas, raw extension values, large numbers, escape-heavy
+  text, CRLF Markdown, quoted duplicate-key fallback, and exact source
+  retention. The harness was removed after the run.
+- The post-commit serial `LifeOSMacLogic` lane is **193/193** with exit 0;
+  `scripts/validate_xcresult.py` independently reports 193/193. The generic
+  iOS lane remains compile-only because CoreSimulator has no runtime.
+- This packet has no vault writes, durable store, UI, graph index, gateway
+  route, conflict journal, or sync behavior. Those remain later packets.

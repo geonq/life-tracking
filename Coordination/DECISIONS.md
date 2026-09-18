@@ -40,7 +40,9 @@ Updated 2026-09-17 Europe/Berlin.
 - LifeOS owns workout templates/history/reports; Zepp is a read-only source.
   Unsupported fields stay unavailable until evidence exists.
 - Obsidian Canvas uses Markdown/YAML links as semantic authority and Canvas
-  coordinates as presentation metadata; round-trip proof remains open.
+  coordinates as presentation metadata. The bounded value-only codecs and
+  Markdown/Canvas round-trip proof are committed at `f53c77c`; durable vault
+  authority, conflict policy, and live writes remain separate decisions.
 
 ## Security and operations
 

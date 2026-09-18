@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-18 Europe/Berlin. Release: **NO-GO**. Current pushed
-checkpoint: `5d1bf65`. Do not publish completion percentages; use the evidence
+checkpoint: `f53c77c`. Do not publish completion percentages; use the evidence
 ledger and the classifications in `tasks/final-execution-plan.md`.
 
 ## Completed checkpoints
@@ -16,6 +16,9 @@ ledger and the classifications in `tasks/final-execution-plan.md`.
 - Current full Mac logic: **193/193 passed**. Current focused LifeOSMac
   stability lane: **1/1 passed**. Manual app survived the lane; no new crash
   report was produced. See the stability receipt.
+- Obsidian Canvas value packet: bounded Canvas/Markdown codecs and binding,
+  **31/31** focused tests, independent smoke pass, and current Mac **193/193**
+  receipt at `f53c77c`. Durable store, UI, graph, transport, and sync remain.
 
 ## Ordered execution
 
@@ -46,8 +49,8 @@ ledger and the classifications in `tasks/final-execution-plan.md`.
    source-qualified HealthKit/Zepp observations. Compare real Zepp, Health,
    and LifeOS records on the physical iPhone; leave proprietary load/PAI/
    Training Effect fields unavailable unless a legitimate source exists.
-7. **Obsidian Canvas** — implement the four packets in the final plan:
-   lossless Canvas/Markdown codecs; vault binding, atomic store, mutation
+7. **Obsidian Canvas** — continue the four packets from the committed
+   lossless Canvas/Markdown codecs; implement vault binding, atomic store, mutation
    journal and conflict copies; graph projection, spatial index and native Mac/
    iPhone interaction; bounded Windows mirror/proposal transport and wiring.
    Do not write a real vault until authority and conflict policy are selected.

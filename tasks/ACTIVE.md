@@ -2,7 +2,7 @@
 
 Status: IN PROGRESS — updated 2026-09-18 Europe/Berlin.
 
-The authoritative source checkpoint is clean `main` at `5d1bf65`, aligned
+The authoritative source checkpoint is clean `main` at `f53c77c`, aligned
 with `origin/main`. Release remains **NO-GO**. The frozen registry contains
 258 leaves, 7 aliases, and 0 formally accepted leaves; this is acceptance
 evidence, not an implementation percentage.
@@ -41,6 +41,10 @@ evidence, not an implementation percentage.
   `artifacts/final/stability/2026-09-18-lifeosmac.md`.
 - Generic iOS SDK/build-for-testing compiles; CoreSimulator is unavailable and
   physical iPhone/runtime evidence remains open.
+- The bounded Obsidian Canvas/Markdown codec and value binding packet is pushed
+  at `f53c77c`; focused tests are **31/31**, the independent smoke harness
+  passed, and the post-commit Mac logic lane is **193/193**. Durable vault
+  storage, conflicts, graph/UI, gateway transport, and sync remain open.
 
 ## Remaining work
 
@@ -48,9 +52,9 @@ evidence, not an implementation percentage.
    service/ACL/Serve/health/readiness/listener verification, and rollback.
 2. Verify real Enable Banking values, consent/revoke/freshness, recurring
    reconciliation, Trade Republic import, and Robinhood/net-worth separation.
-3. Implement the missing Obsidian Canvas codec, Markdown/Canvas round trip,
-   durable vault store, journal/conflicts, graph/spatial index, native views,
-   bounded gateway route, and tests.
+3. Build on the committed Obsidian Canvas codec with durable vault storage,
+   journal/conflicts, graph/spatial index, native views, bounded gateway route,
+   and live round-trip wiring.
 4. Verify LifeOS-owned workouts and physical Zepp/HealthKit provenance;
    leave proprietary Zepp fields unavailable without evidence.
 5. Verify lock-screen and existing widgets, App Group, signing, background
