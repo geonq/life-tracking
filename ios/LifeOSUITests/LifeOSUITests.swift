@@ -520,6 +520,147 @@ final class LifeOSUITests: XCTestCase {
         capture("dark-settings")
     }
 
+    /// Exercises the real Usage source management sheet on iOS. The launch
+    /// fixture is local and network-disabled, but the sheet, Menu actions, and
+    /// persistence callbacks are the production views and controls.
+    func testUsageConnectionsRealActionsAndAccessibleLayout() throws {
+        launchUsageConnectionsFixture()
+        openUsageConnectionsSheet()
+
+        let claudeRow = usageElement("usage-connection-legacy.claude")
+        let claudeLabel = usageElement("usage-connection-label-legacy.claude")
+        let claudeAction = usageElement("usage-connection-action-legacy.claude.open_claude")
+        let claudeOptions = usageElement("usage-connection-options-legacy.claude")
+        scrollUsageSourcesUntilVisible(claudeOptions)
+        XCTAssertTrue(claudeRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(claudeAction.waitForExistence(timeout: 5))
+        assertUsageConnectionLayout(
+            row: claudeRow,
+            label: claudeLabel,
+            primaryAction: claudeAction,
+            options: claudeOptions
+        )
+
+        let geminiRow = usageElement("usage-connection-catalog.gemini_subscription")
+        let geminiLabel = usageElement("usage-connection-label-catalog.gemini_subscription")
+        let geminiAction = usageElement("usage-connection-action-catalog.gemini_subscription.add_manual_reading")
+        let geminiOptions = usageElement("usage-connection-options-catalog.gemini_subscription")
+        scrollUsageSourcesUntilVisible(geminiOptions)
+        XCTAssertTrue(geminiRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(geminiAction.waitForExistence(timeout: 5))
+        assertUsageConnectionLayout(
+            row: geminiRow,
+            label: geminiLabel,
+            primaryAction: geminiAction,
+            options: geminiOptions
+        )
+
+        geminiOptions.tap()
+        let pinItem = app.buttons["Pin Google AI Pro"]
+        XCTAssertTrue(pinItem.waitForExistence(timeout: 5), "The real Usage menu must expose Pin")
+        pinItem.tap()
+        XCTAssertEqual(geminiOptions.value as? String, "Pinned")
+
+        geminiOptions.tap()
+        let hideItem = app.buttons["Hide Google AI Pro"]
+        XCTAssertTrue(hideItem.waitForExistence(timeout: 5), "The real Usage menu must expose Hide")
+        hideItem.tap()
+        app.buttons["usage-connections-done"].tap()
+        XCTAssertTrue(app.buttons["usage-manage-sources"].waitForExistence(timeout: 5))
+
+        // Reopen the same sheet to prove that both menu outcomes were saved,
+        // rather than only changing the in-memory draft.
+        openUsageConnectionsSheet()
+        let savedGeminiOptions = usageElement("usage-connection-options-catalog.gemini_subscription")
+        scrollUsageSourcesUntilVisible(savedGeminiOptions)
+        savedGeminiOptions.tap()
+        let unpinItem = app.buttons["Unpin Google AI Pro"]
+        let showItem = app.buttons["Show Google AI Pro"]
+        XCTAssertTrue(unpinItem.waitForExistence(timeout: 5), "Saved pin state must survive reopening the sheet")
+        XCTAssertTrue(showItem.waitForExistence(timeout: 5), "Saved hidden state must survive reopening the sheet")
+        // Exercise both inverse actions, then cancel. The following reopen
+        // proves cancellation discarded this draft and preserved the saved
+        // pinned/hidden state.
+        unpinItem.tap()
+        XCTAssertEqual(savedGeminiOptions.value as? String, "Not pinned", "Unpin must update the draft state before cancellation")
+        savedGeminiOptions.tap()
+        let showAfterUnpinItem = app.buttons["Show Google AI Pro"]
+        XCTAssertTrue(showAfterUnpinItem.waitForExistence(timeout: 5), "Unpinning must expose the Show action")
+        showAfterUnpinItem.tap()
+        savedGeminiOptions.tap()
+        XCTAssertTrue(app.buttons["Hide Google AI Pro"].waitForExistence(timeout: 5), "Show must update the draft state before cancellation")
+        dismissUsageMenuAndCancelSheet(app.buttons["Hide Google AI Pro"])
+
+        openUsageConnectionsSheet()
+        let cancelledGeminiOptions = usageElement("usage-connection-options-catalog.gemini_subscription")
+        scrollUsageSourcesUntilVisible(cancelledGeminiOptions)
+        cancelledGeminiOptions.tap()
+        XCTAssertTrue(app.buttons["Unpin Google AI Pro"].waitForExistence(timeout: 5), "Cancel must preserve the saved pin state")
+        let cancelledShowItem = app.buttons["Show Google AI Pro"]
+        XCTAssertTrue(cancelledShowItem.waitForExistence(timeout: 5), "Cancel must preserve the saved hidden state")
+        dismissUsageMenuAndCancelSheet(cancelledShowItem)
+
+        // Relaunching creates a fresh failing preference load. First create a
+        // stale draft, then reset and verify the reset immediately and after
+        // reopening the sheet.
+        launchUsageConnectionsFixture(accessibilitySize: true)
+        openUsageConnectionsSheet()
+        let draftGeminiOptions = usageElement("usage-connection-options-catalog.gemini_subscription")
+        scrollUsageSourcesUntilVisible(draftGeminiOptions)
+        draftGeminiOptions.tap()
+        XCTAssertTrue(app.buttons["Pin Google AI Pro"].waitForExistence(timeout: 5))
+        app.buttons["Pin Google AI Pro"].tap()
+        draftGeminiOptions.tap()
+        XCTAssertTrue(app.buttons["Hide Google AI Pro"].waitForExistence(timeout: 5))
+        app.buttons["Hide Google AI Pro"].tap()
+
+        let reset = app.buttons["usage-preferences-reset"]
+        scrollUsageSourcesUntilVisible(reset, direction: .backward)
+        XCTAssertTrue(reset.waitForExistence(timeout: 5), "The fixture must expose the recovery path")
+        reset.tap()
+        XCTAssertTrue(app.buttons["usage-connections-done"].waitForExistence(timeout: 5))
+
+        scrollUsageSourcesUntilVisible(draftGeminiOptions)
+        XCTAssertEqual(draftGeminiOptions.value as? String, "Not pinned", "Reset must replace the stale pinned draft")
+        draftGeminiOptions.tap()
+        let resetPinItem = app.buttons["Pin Google AI Pro"]
+        let resetHideItem = app.buttons["Hide Google AI Pro"]
+        XCTAssertTrue(resetPinItem.waitForExistence(timeout: 5), "Reset must restore the default unpinned state")
+        XCTAssertTrue(resetHideItem.waitForExistence(timeout: 5), "Reset must restore the default visible state")
+        // Selecting Pin only dismisses the menu; Cancel discards that local
+        // probe while the successful reset remains persisted by the store.
+        resetPinItem.tap()
+
+        let largeClaudeRow = usageElement("usage-connection-legacy.claude")
+        let largeClaudeLabel = usageElement("usage-connection-label-legacy.claude")
+        let largeClaudeAction = usageElement("usage-connection-action-legacy.claude.open_claude")
+        let largeClaudeOptions = usageElement("usage-connection-options-legacy.claude")
+        scrollUsageSourcesUntilVisible(largeClaudeOptions, direction: .backward)
+        XCTAssertTrue(largeClaudeRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(largeClaudeAction.waitForExistence(timeout: 5))
+        assertUsageConnectionLayout(
+            row: largeClaudeRow,
+            label: largeClaudeLabel,
+            primaryAction: largeClaudeAction,
+            options: largeClaudeOptions
+        )
+
+        app.buttons["usage-connections-cancel"].tap()
+        XCTAssertTrue(app.buttons["usage-manage-sources"].waitForExistence(timeout: 5))
+
+        openUsageConnectionsSheet()
+        let reopenedGeminiOptions = usageElement("usage-connection-options-catalog.gemini_subscription")
+        scrollUsageSourcesUntilVisible(reopenedGeminiOptions)
+        reopenedGeminiOptions.tap()
+        let reopenedPinItem = app.buttons["Pin Google AI Pro"]
+        let reopenedHideItem = app.buttons["Hide Google AI Pro"]
+        XCTAssertTrue(reopenedPinItem.waitForExistence(timeout: 5), "Reset default pin state must survive reopening")
+        XCTAssertTrue(reopenedHideItem.waitForExistence(timeout: 5), "Reset default visibility must survive reopening")
+        reopenedPinItem.tap()
+        app.buttons["usage-connections-cancel"].tap()
+
+    }
+
     /// The Helio Settings surface is a truth/accessibility contract, not a
     /// pixel fixture: the current build must expose the authority chain,
     /// permission state, capability inventory, and explicit battery boundary.
@@ -1577,6 +1718,126 @@ final class LifeOSUITests: XCTestCase {
         return elements.flatMap { candidate in
             [String(describing: candidate.value), candidate.label]
         }
+    }
+
+    private func launchUsageConnectionsFixture(accessibilitySize: Bool = false) {
+        app.terminate()
+        app.launchArguments = baseLaunchArguments + [
+            "-LifeOSUsageConnectionsFixture",
+            "-LifeOSForceDarkMode"
+        ]
+        if accessibilitySize {
+            app.launchArguments += [
+                "-UIPreferredContentSizeCategory",
+                "UICTContentSizeCategoryAccessibilityXXXL"
+            ]
+        }
+        app.launch()
+        dismissSystemPromptsIfPresent()
+    }
+
+    private func openUsageConnectionsSheet() {
+        if app.buttons["usage-connections-done"].waitForExistence(timeout: 1) {
+            return
+        }
+
+        let manageSources = app.buttons["usage-manage-sources"]
+        if !manageSources.waitForExistence(timeout: 1) {
+            let usageCard = app.buttons["account-usage-link"]
+            XCTAssertTrue(usageCard.waitForExistence(timeout: 5), "Usage entry point must be available in the fixture")
+            XCTAssertTrue(tap(usageCard, untilVisible: app.scrollViews["usage-screen"]))
+        }
+        XCTAssertTrue(manageSources.waitForExistence(timeout: 5), "Usage must expose source management in this fixture")
+        manageSources.tap()
+        XCTAssertTrue(app.buttons["usage-connections-done"].waitForExistence(timeout: 5), "Usage source sheet must open")
+    }
+
+    private func dismissUsageMenuAndCancelSheet(_ menuItem: XCUIElement) {
+        let cancel = app.buttons["usage-connections-cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5), "Usage source sheet must expose Cancel")
+        cancel.tap()
+        XCTAssertTrue(menuItem.waitForNonExistence(timeout: 5), "The native Usage menu must dismiss before sheet cancellation")
+        if app.buttons["usage-connections-done"].waitForExistence(timeout: 1) {
+            cancel.tap()
+        }
+        XCTAssertTrue(app.buttons["usage-connections-done"].waitForNonExistence(timeout: 5), "Cancel must dismiss the Usage source sheet")
+    }
+
+    private func usageElement(_ identifier: String) -> XCUIElement {
+        app.descendants(matching: .any)[identifier]
+    }
+
+    private enum UsageScrollDirection {
+        case forward
+        case backward
+    }
+
+    private func scrollUsageSourcesUntilVisible(
+        _ element: XCUIElement,
+        direction: UsageScrollDirection = .forward
+    ) {
+        let sourcesList = app.descendants(matching: .any)["usage-connections-list"]
+        XCTAssertTrue(sourcesList.waitForExistence(timeout: 5), "Usage source sheet must expose its own scrollable list")
+        guard sourcesList.exists else { return }
+        for attempt in 0..<8 {
+            if element.waitForExistence(timeout: attempt == 0 ? 5 : 1),
+               isVisibleOnPhone(element),
+               element.isHittable {
+                return
+            }
+            swipeUsageSources(in: sourcesList, direction: direction)
+        }
+        XCTAssertTrue(element.isHittable, "Usage source control \(element.identifier) must be visible after scrolling")
+    }
+
+    private func swipeUsageSources(in scrollView: XCUIElement, direction: UsageScrollDirection) {
+        switch direction {
+        case .forward:
+            swipeUp(in: scrollView)
+        case .backward:
+            let frame = scrollView.frame
+            let window = app.windows.firstMatch.frame
+            guard frame.width > 0, frame.height > 0, window.width > 0, window.height > 0 else { return }
+            let normalizedPoint: (CGPoint) -> CGVector = { point in
+                CGVector(
+                    dx: (point.x - window.minX) / window.width,
+                    dy: (point.y - window.minY) / window.height
+                )
+            }
+            let start = app.coordinate(withNormalizedOffset: normalizedPoint(
+                CGPoint(x: frame.midX, y: frame.minY + frame.height * 0.25)
+            ))
+            let end = app.coordinate(withNormalizedOffset: normalizedPoint(
+                CGPoint(x: frame.midX, y: frame.minY + frame.height * 0.75)
+            ))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+    }
+
+    private func assertUsageConnectionLayout(
+        row: XCUIElement,
+        label: XCUIElement,
+        primaryAction: XCUIElement,
+        options: XCUIElement
+    ) {
+        XCTAssertTrue(label.waitForExistence(timeout: 5), "Usage provider label must remain exposed")
+        let rowFrame = row.frame
+        let labelFrame = label.frame
+        let actionFrame = primaryAction.frame
+        let optionsFrame = options.frame
+        let tolerantRowFrame = rowFrame.insetBy(dx: -2, dy: -2)
+        XCTAssertGreaterThan(rowFrame.width, 0, "Usage row must have a measurable width")
+        XCTAssertGreaterThan(rowFrame.height, 0, "Usage row must have a measurable height")
+        XCTAssertGreaterThanOrEqual(actionFrame.width, 42, "Usage primary action must preserve the iOS hit target")
+        XCTAssertGreaterThanOrEqual(actionFrame.height, 42, "Usage primary action must preserve the iOS hit target")
+        XCTAssertGreaterThanOrEqual(optionsFrame.width, 42, "Usage options control must preserve the iOS hit target")
+        XCTAssertGreaterThanOrEqual(optionsFrame.height, 42, "Usage options control must preserve the iOS hit target")
+        XCTAssertTrue(tolerantRowFrame.contains(labelFrame), "Provider label must remain inside the Usage row")
+        XCTAssertTrue(tolerantRowFrame.contains(actionFrame), "Primary action must remain inside the Usage row")
+        XCTAssertTrue(tolerantRowFrame.contains(optionsFrame), "Options control must remain inside the Usage row")
+        XCTAssertFalse(labelFrame.intersects(actionFrame), "Provider label must not overlap the primary action")
+        XCTAssertFalse(labelFrame.intersects(optionsFrame), "Provider label must not overlap the options control")
+        XCTAssertFalse(actionFrame.intersects(optionsFrame), "Usage row controls must not overlap")
     }
 
     private var baseLaunchArguments: [String] {

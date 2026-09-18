@@ -49,6 +49,24 @@ public enum DemoDataProvider {
         provenance: unavailableProvenance
     )
     public static var providers: [ProviderSnapshot] { [codex, claude, glm, deepSeek, googleAIStudio] }
+
+    /// The Usage source management fixture intentionally carries one long
+    /// account label so narrow and accessibility-size UI tests exercise the
+    /// same wrapping path as a real provider account name.
+    public static var usageConnectionsProviders: [ProviderSnapshot] {
+        providers.map { snapshot in
+            guard snapshot.provider == .claude else { return snapshot }
+            return ProviderSnapshot(
+                provider: snapshot.provider,
+                accountLabel: "Claude account with a deliberately long label for layout QA",
+                windows: snapshot.windows,
+                model: snapshot.model,
+                metrics: snapshot.metrics,
+                provenance: snapshot.provenance
+            )
+        }
+    }
+
     public static func widget(now: Date = .now) -> WidgetSnapshot {
         WidgetSnapshot(
             providers: providers,

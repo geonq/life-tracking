@@ -61,6 +61,7 @@ struct LifeOSApp: App {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     private let usesVisualFixtures: Bool
+    private let usesUsageConnectionsFixture: Bool
     /// Coalescing state for the future-module widget snapshot publisher.
     /// `WidgetSnapshotPublisher` is an actor, so a plain `let` is enough to
     /// keep one durable instance alive across the several call sites below —
@@ -69,61 +70,74 @@ struct LifeOSApp: App {
     private let widgetSnapshotPublisher = WidgetSnapshotPublisher()
 
     init() {
-        let enabled = ProcessInfo.processInfo.arguments.contains("-LifeOSVisualFixtures")
-        usesVisualFixtures = enabled
+        let arguments = ProcessInfo.processInfo.arguments
+        let visualFixturesEnabled = arguments.contains("-LifeOSVisualFixtures")
+        let usageConnectionsFixtureEnabled = arguments.contains("-LifeOSUsageConnectionsFixture")
+        let fixtureMode = visualFixturesEnabled || usageConnectionsFixtureEnabled
+        usesVisualFixtures = fixtureMode
+        usesUsageConnectionsFixture = usageConnectionsFixtureEnabled
 #if os(iOS)
-        if !enabled {
+        if !fixtureMode {
             // UserNotifications keeps only a weak delegate reference.  The
             // shared installer retains the production durable delegate and
             // makes action delivery valid after background/terminated launch.
             SupplementNotificationDelegate.install()
         }
 #endif
-        let cachedUsage = enabled ? nil : SharedSnapshotStore.readLive()
-        _usageCoordinator = StateObject(
-            wrappedValue: enabled
-                ? UsageCoordinator.visualFixture()
-                : UsageCoordinator(
-                    initialProviders: cachedUsage?.providers ?? [],
-                    initialUpdatedAt: cachedUsage?.updatedAt
-                )
-        )
+        let cachedUsage = fixtureMode ? nil : SharedSnapshotStore.readLive()
+        let usageCoordinator: UsageCoordinator
+        if usageConnectionsFixtureEnabled {
+            let fixturePreferences = InMemoryUsageRegistryPreferencesStore()
+            fixturePreferences.loadError = .loadFailed
+            usageCoordinator = UsageCoordinator.visualFixture(
+                initialProviders: DemoDataProvider.usageConnectionsProviders,
+                registryPreferencesStore: fixturePreferences
+            )
+        } else if visualFixturesEnabled {
+            usageCoordinator = UsageCoordinator.visualFixture()
+        } else {
+            usageCoordinator = UsageCoordinator(
+                initialProviders: cachedUsage?.providers ?? [],
+                initialUpdatedAt: cachedUsage?.updatedAt
+            )
+        }
+        _usageCoordinator = StateObject(wrappedValue: usageCoordinator)
         _financeCoordinator = StateObject(wrappedValue: FinanceCoordinator(
-            initialState: enabled ? .demo : .unavailable
+            initialState: fixtureMode ? .demo : .unavailable
         ))
         _clipperCoordinator = StateObject(wrappedValue: ClipperCoordinator(
-            initialState: enabled ? .demo : .unavailable
+            initialState: fixtureMode ? .demo : .unavailable
         ))
         _calendarCoordinator = StateObject(
             wrappedValue: CalendarCoordinator(
-                initialSnapshot: enabled ? CalendarVisualFixtures.snapshot() : CalendarSnapshot(),
-                usesVisualFixtures: enabled,
-                defaults: enabled ? CalendarCoordinator.makeVisualFixtureDefaults() : nil
+                initialSnapshot: fixtureMode ? CalendarVisualFixtures.snapshot() : CalendarSnapshot(),
+                usesVisualFixtures: fixtureMode,
+                defaults: fixtureMode ? CalendarCoordinator.makeVisualFixtureDefaults() : nil
             )
         )
         _fitnessTrainingCoordinator = StateObject(
-            wrappedValue: enabled
+            wrappedValue: fixtureMode
                 ? FitnessTrainingCoordinator(usesVisualFixtures: true)
                 : FitnessTrainingCoordinator()
         )
-        let promptCompleted = !enabled && UserDefaults.standard.bool(forKey: Self.healthReadPromptCompletedKey)
+        let promptCompleted = !fixtureMode && UserDefaults.standard.bool(forKey: Self.healthReadPromptCompletedKey)
 #if os(iOS)
-        self.fitnessObservationSyncClient = FitnessObservationSyncPolicy.allowsNetwork(usesVisualFixtures: enabled)
+        self.fitnessObservationSyncClient = FitnessObservationSyncPolicy.allowsNetwork(usesVisualFixtures: fixtureMode)
             ? TailscaleSyncClient()
             : nil
-        let healthKitClient: HealthKitProductionClient? = enabled ? nil : HealthKitProductionClient()
+        let healthKitClient: HealthKitProductionClient? = fixtureMode ? nil : HealthKitProductionClient()
         let healthKitController = HealthKitIntegrationController(
             client: healthKitClient,
-            usesVisualFixtures: enabled,
+            usesVisualFixtures: fixtureMode,
             initialExplicitRequestCompleted: promptCompleted
         )
         _healthKitController = StateObject(wrappedValue: healthKitController)
         let healthKitFitnessRepository = HealthKitFitnessRepository(
             client: healthKitClient,
-            usesVisualFixtures: enabled
+            usesVisualFixtures: fixtureMode
         )
         _healthKitFitnessRepository = StateObject(wrappedValue: healthKitFitnessRepository)
-        _homeFitnessSnapshot = State(initialValue: enabled ? .demo : .unavailable)
+        _homeFitnessSnapshot = State(initialValue: fixtureMode ? .demo : .unavailable)
         LifeOSAutomationRefreshRegistry.shared.registerHealthRefresh { @MainActor in
             try Task.checkCancellation()
             let sequenceBefore = healthKitController.snapshot.observerCompletionSequence
@@ -158,6 +172,7 @@ struct LifeOSApp: App {
                 clipperCoordinator: clipperCoordinator,
                 fitnessTrainingCoordinator: fitnessTrainingCoordinator,
                 usesVisualFixtures: usesVisualFixtures,
+                usesUsageConnectionsFixture: usesUsageConnectionsFixture,
                 homeFitnessSnapshot: $homeFitnessSnapshot,
                 fitnessSnapshotProvider: fitnessSnapshotProvider,
                 destinationForModule: moreDestination
@@ -559,6 +574,7 @@ private struct LifeOSIOSSceneRoot: View {
     @ObservedObject private var fitnessTrainingCoordinator: FitnessTrainingCoordinator
     @Binding private var homeFitnessSnapshot: FitnessSnapshot
     private let usesVisualFixtures: Bool
+    private let usesUsageConnectionsFixture: Bool
     private let fitnessSnapshotProvider: ((Date) -> FitnessSnapshot)?
     private let destinationForModule: (LifeOSModule, LifeOSDeepLink?) -> AnyView
 
@@ -600,6 +616,7 @@ private struct LifeOSIOSSceneRoot: View {
         clipperCoordinator: ClipperCoordinator,
         fitnessTrainingCoordinator: FitnessTrainingCoordinator,
         usesVisualFixtures: Bool,
+        usesUsageConnectionsFixture: Bool,
         homeFitnessSnapshot: Binding<FitnessSnapshot>,
         fitnessSnapshotProvider: ((Date) -> FitnessSnapshot)?,
         destinationForModule: @escaping (LifeOSModule, LifeOSDeepLink?) -> AnyView
@@ -610,6 +627,7 @@ private struct LifeOSIOSSceneRoot: View {
         self.clipperCoordinator = clipperCoordinator
         self.fitnessTrainingCoordinator = fitnessTrainingCoordinator
         self.usesVisualFixtures = usesVisualFixtures
+        self.usesUsageConnectionsFixture = usesUsageConnectionsFixture
         self._homeFitnessSnapshot = homeFitnessSnapshot
         self.fitnessSnapshotProvider = fitnessSnapshotProvider
         self.destinationForModule = destinationForModule
@@ -728,8 +746,10 @@ private struct LifeOSIOSSceneRoot: View {
                         }
                     },
                     onOpenSettings: { navigate(.settings) },
-                    onManageConnections: usesVisualFixtures ? nil : { showingUsageConnections = true },
-                    presentationPacket: usesVisualFixtures ? nil : usagePacket
+                    onManageConnections: (!usesVisualFixtures || usesUsageConnectionsFixture)
+                        ? { showingUsageConnections = true }
+                        : nil,
+                    presentationPacket: (usesVisualFixtures && !usesUsageConnectionsFixture) ? nil : usagePacket
                 )
                 .transition(routeTransition)
             } else {

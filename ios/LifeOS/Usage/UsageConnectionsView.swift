@@ -4,6 +4,20 @@ import Combine
 /// Compact local display management for the provider registry. These controls
 /// change what appears in Usage; they do not disconnect a source or revoke
 /// authentication.
+enum UsageConnectionControlMetrics {
+    static let macHitSize: CGFloat = 32
+    static let iOSHitSize: CGFloat = 44
+    static let minimumActionSpacing: CGFloat = 8
+
+    static var hitSize: CGFloat {
+#if os(iOS)
+        return iOSHitSize
+#else
+        return macHitSize
+#endif
+    }
+}
+
 struct UsageConnectionsView: View {
     let presentation: UsageRegistryPresentation
     let onSave: (UsageRegistryPreferencesState) -> Bool
@@ -17,6 +31,7 @@ struct UsageConnectionsView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var orderedIDs: [UsageConnectionID]
     @State private var hiddenIDs: Set<UsageConnectionID>
     @State private var pinnedIDs: Set<UsageConnectionID>
@@ -72,7 +87,9 @@ struct UsageConnectionsView: View {
                         )
                         .foregroundStyle(LifeOSTokens.warningText)
                         Button("Retry loading preferences", action: retryPreferences)
+                            .accessibilityIdentifier("usage-preferences-retry")
                         Button("Reset saved display preferences", role: .destructive, action: resetPreferences)
+                            .accessibilityIdentifier("usage-preferences-reset")
                     } header: {
                         Text("Display settings need attention")
                     } footer: {
@@ -87,9 +104,10 @@ struct UsageConnectionsView: View {
                 } header: {
                     Text("Show in Usage")
                 } footer: {
-                    Text("Hide, pin, or reorder sources without disconnecting them. Usage values remain source backed.")
+                    Text("Manage display order and source actions without changing authentication. Usage values remain source backed.")
                 }
             }
+            .accessibilityIdentifier("usage-connections-list")
 #if os(iOS)
             .listStyle(.insetGrouped)
 #else
@@ -99,10 +117,12 @@ struct UsageConnectionsView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .accessibilityIdentifier("usage-connections-cancel")
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button("Done", action: save)
                         .fontWeight(.semibold)
+                        .accessibilityIdentifier("usage-connections-done")
                 }
 #if os(iOS)
                 ToolbarItem(placement: .automatic) {
@@ -166,24 +186,186 @@ struct UsageConnectionsView: View {
         let descriptor = presentation.descriptor(for: connection)
         let isHidden = hiddenIDs.contains(connection.connectionID)
         let isPinned = pinnedIDs.contains(connection.connectionID)
-        return HStack(spacing: LifeOSTokens.Space.sm) {
-            LifeOSIcon(.usage, context: .card)
-                .foregroundStyle(isHidden ? LifeOSTokens.tertiaryText : LifeOSTokens.accent)
-                .frame(width: 24)
+        let actions = UsageConnectionActionResolver.actions(for: connection, descriptor: descriptor)
+        return Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                connectionStackedLayout(
+                    connection,
+                    descriptor: descriptor,
+                    actions: actions,
+                    isPinned: isPinned,
+                    isHidden: isHidden
+                )
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    connectionInlineLayout(
+                        connection,
+                        descriptor: descriptor,
+                        actions: actions,
+                        isPinned: isPinned,
+                        isHidden: isHidden
+                    )
+                    connectionStackedLayout(
+                        connection,
+                        descriptor: descriptor,
+                        actions: actions,
+                        isPinned: isPinned,
+                        isHidden: isHidden
+                    )
+                }
+            }
+        }
+        .frame(minHeight: 56, alignment: .center)
+        .opacity(isHidden ? 0.58 : 1)
+        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("usage-connection-\(connection.connectionID.rawValue)")
+    }
+
+    private func connectionInlineLayout(
+        _ connection: UsageRegistryConnection,
+        descriptor: UsageProviderDescriptor?,
+        actions: [UsageConnectionAction],
+        isPinned: Bool,
+        isHidden: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
+            connectionIdentity(
+                connection,
+                descriptor: descriptor,
+                isPinned: isPinned,
+                isHidden: isHidden
+            )
+            Spacer(minLength: LifeOSTokens.Space.xs)
+            connectionControls(
+                for: connection,
+                descriptor: descriptor,
+                actions: actions,
+                isPinned: isPinned,
+                isHidden: isHidden
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func connectionStackedLayout(
+        _ connection: UsageRegistryConnection,
+        descriptor: UsageProviderDescriptor?,
+        actions: [UsageConnectionAction],
+        isPinned: Bool,
+        isHidden: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
+            connectionIdentity(
+                connection,
+                descriptor: descriptor,
+                isPinned: isPinned,
+                isHidden: isHidden
+            )
+            HStack(spacing: UsageConnectionControlMetrics.minimumActionSpacing) {
+                Spacer(minLength: 0)
+                connectionControls(
+                    for: connection,
+                    descriptor: descriptor,
+                    actions: actions,
+                    isPinned: isPinned,
+                    isHidden: isHidden
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func connectionIdentity(
+        _ connection: UsageRegistryConnection,
+        descriptor: UsageProviderDescriptor?,
+        isPinned: Bool,
+        isHidden: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
+            ZStack(alignment: .bottomTrailing) {
+                LifeOSIcon(providerIcon(for: descriptor), context: .card)
+                    .foregroundStyle(isHidden ? LifeOSTokens.tertiaryText : LifeOSTokens.accent)
+                    .frame(width: 24, height: 24)
+                if isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(LifeOSTokens.accent)
+                        .background(LifeOSTokens.surface, in: Circle().inset(by: -2))
+                        .accessibilityLabel("Pinned")
+                }
+            }
+            .frame(width: 28, height: 32, alignment: .center)
             VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                 Text(connectionTitle(connection, descriptor: descriptor))
                     .lifeOSTypography(.label, weight: .medium)
                     .foregroundStyle(LifeOSTokens.primaryText)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("usage-connection-label-\(connection.connectionID.rawValue)")
                 Text(connectionStatus(connection, descriptor: descriptor))
                     .lifeOSTypography(.metadata)
                     .foregroundStyle(statusColor(connection))
-                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: LifeOSTokens.Space.xs)
-            let actions = UsageConnectionActionResolver.actions(for: connection, descriptor: descriptor)
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func connectionControls(
+        for connection: UsageRegistryConnection,
+        descriptor: UsageProviderDescriptor?,
+        actions: [UsageConnectionAction],
+        isPinned: Bool,
+        isHidden: Bool
+    ) -> some View {
+        HStack(spacing: UsageConnectionControlMetrics.minimumActionSpacing) {
+            if let primaryAction = actions.first {
+                Button {
+                    perform(primaryAction)
+                } label: {
+                    Label {
+                        Text(primaryAction.isManualEntry ? primaryAction.title : "Open")
+                            .multilineTextAlignment(.center)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: primaryAction.isManualEntry ? "square.and.pencil" : "arrow.up.right")
+                    }
+                    .frame(
+                        minWidth: UsageConnectionControlMetrics.hitSize,
+                        minHeight: UsageConnectionControlMetrics.hitSize
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.bordered)
+#if os(macOS)
+                .controlSize(.small)
+#endif
+                .accessibilityLabel(primaryAction.title)
+                .accessibilityIdentifier("usage-connection-action-\(primaryAction.id)")
+                .help(primaryAction.detail)
+            }
+            displayMenu(
+                for: connection,
+                descriptor: descriptor,
+                actions: Array(actions.dropFirst()),
+                isPinned: isPinned,
+                isHidden: isHidden
+            )
+        }
+    }
+
+    private func displayMenu(
+        for connection: UsageRegistryConnection,
+        descriptor: UsageProviderDescriptor?,
+        actions: [UsageConnectionAction],
+        isPinned: Bool,
+        isHidden: Bool
+    ) -> some View {
+        Menu {
             if !actions.isEmpty {
-                Menu {
+                Section("Source") {
                     ForEach(actions) { action in
                         Button {
                             perform(action)
@@ -191,42 +373,50 @@ struct UsageConnectionsView: View {
                             Label(action.title, systemImage: action.isManualEntry ? "square.and.pencil" : "arrow.up.right")
                         }
                     }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .frame(width: 26, height: 26)
                 }
-                .menuStyle(.borderlessButton)
-                .foregroundStyle(LifeOSTokens.secondaryText)
-                .accessibilityLabel("Actions for \(connectionTitle(connection, descriptor: descriptor))")
+                Divider()
             }
             Button {
                 if isPinned { pinnedIDs.remove(connection.connectionID) }
                 else { pinnedIDs.insert(connection.connectionID) }
                 hasDirtyEdits = true
             } label: {
-                Image(systemName: isPinned ? "pin.fill" : "pin")
-                    .frame(width: 26, height: 26)
+                Label(
+                    isPinned ? "Unpin \(connectionTitle(connection, descriptor: descriptor))" : "Pin \(connectionTitle(connection, descriptor: descriptor))",
+                    systemImage: isPinned ? "pin.slash" : "pin"
+                )
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(isPinned ? LifeOSTokens.accent : LifeOSTokens.tertiaryText)
-            .accessibilityLabel(isPinned ? "Unpin \(connectionTitle(connection, descriptor: descriptor))" : "Pin \(connectionTitle(connection, descriptor: descriptor))")
-
             Button {
                 if isHidden { hiddenIDs.remove(connection.connectionID) }
                 else { hiddenIDs.insert(connection.connectionID) }
                 hasDirtyEdits = true
             } label: {
-                Image(systemName: isHidden ? "eye.slash" : "eye")
-                    .frame(width: 26, height: 26)
+                Label(
+                    isHidden ? "Show \(connectionTitle(connection, descriptor: descriptor))" : "Hide \(connectionTitle(connection, descriptor: descriptor))",
+                    systemImage: isHidden ? "eye" : "eye.slash"
+                )
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(isHidden ? LifeOSTokens.warningText : LifeOSTokens.tertiaryText)
-            .accessibilityLabel(isHidden ? "Show \(connectionTitle(connection, descriptor: descriptor)) in Usage" : "Hide \(connectionTitle(connection, descriptor: descriptor)) from Usage")
+        } label: {
+            Image(systemName: "ellipsis")
+                .frame(
+                    width: UsageConnectionControlMetrics.hitSize,
+                    height: UsageConnectionControlMetrics.hitSize
+                )
+                .contentShape(Rectangle())
         }
-        .padding(.vertical, 3)
-        .opacity(isHidden ? 0.58 : 1)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("usage-connection-\(connection.connectionID.rawValue)")
+        .menuStyle(.borderlessButton)
+        .foregroundStyle(LifeOSTokens.secondaryText)
+        .accessibilityLabel("More options for \(connectionTitle(connection, descriptor: descriptor))")
+        .accessibilityValue(isPinned ? "Pinned" : "Not pinned")
+        .accessibilityIdentifier("usage-connection-options-\(connection.connectionID.rawValue)")
+    }
+
+    private func providerIcon(for descriptor: UsageProviderDescriptor?) -> LifeOSIconName {
+        guard let descriptor else { return .questionmark }
+        return LifeOSIconName(
+            providerIconToken: descriptor.iconToken,
+            productKind: descriptor.productKind
+        )
     }
 
     private func connectionTitle(
@@ -268,7 +458,12 @@ struct UsageConnectionsView: View {
         default:
             switch connection.availability {
             case .available:
-                return connection.freshness == .stale ? "Observed · Stale" : "Observed source"
+                switch connection.freshness {
+                case .stale: return "Observed · Stale"
+                case .aging: return "Observed · Aging"
+                case .fresh: return "Observed · Current"
+                case .unavailable, .unknown: return "Observed source"
+                }
             case .unsupported:
                 return "Automatic usage unavailable"
             case .disabled:

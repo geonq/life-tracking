@@ -18,6 +18,14 @@ public enum LifeOSIconName: Sendable {
     case shopping
     case reports
     case fitness
+    case codex
+    case claude
+    case gemini
+    case glm
+    case deepseek
+    case googleAIStudio
+    case api
+    case questionmark
     case settings
     case more
     case close
@@ -76,6 +84,14 @@ public enum LifeOSIconName: Sendable {
         case .shopping: "bag"
         case .reports: "chart.bar.doc"
         case .fitness: "waveform.path.ecg"
+        case .codex: "cpu"
+        case .claude: "bubble.left.and.bubble.right"
+        case .gemini: "sparkles"
+        case .glm: "function"
+        case .deepseek: "scope"
+        case .googleAIStudio: "wand.and.stars"
+        case .api: "server.rack"
+        case .questionmark: "questionmark"
         case .settings: "gearshape"
         case .more: "ellipsis"
         case .close: "xmark"
@@ -137,6 +153,14 @@ public enum LifeOSIconName: Sendable {
         case .shopping: "Shopping"
         case .reports: "Reports"
         case .fitness: "Fitness"
+        case .codex: "Codex"
+        case .claude: "Claude"
+        case .gemini: "Gemini"
+        case .glm: "GLM"
+        case .deepseek: "DeepSeek"
+        case .googleAIStudio: "Google AI Studio"
+        case .api: "API source"
+        case .questionmark: "Unknown provider"
         case .settings: "Settings"
         case .more: "More"
         case .close: "Close"
@@ -172,6 +196,25 @@ public enum LifeOSIconName: Sendable {
         case .planned: "Planned"
         case .inProgress: "In progress"
         case .importDocument: "Import document"
+        }
+    }
+
+    /// Maps the closed Usage provider catalog to semantic native symbols.
+    /// SF Symbols has no provider-logo set, so these meanings stay distinct
+    /// without pretending that a generic chart glyph is a brand mark.
+    public init(
+        providerIconToken: UsageIconToken,
+        productKind: UsageProductKind = .subscription
+    ) {
+        switch providerIconToken {
+        case .codex: self = .codex
+        case .claude: self = .claude
+        case .gemini: self = .gemini
+        case .glm: self = .glm
+        case .deepseek: self = .deepseek
+        case .googleAIStudio: self = .googleAIStudio
+        case .questionmark:
+            self = productKind == .api ? .api : .questionmark
         }
     }
 }

@@ -904,6 +904,150 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         XCTAssertEqual(model.selectionOffsets[selectedPoint.id], model.selectablePoints.count - 1)
     }
 
+    func testUsageConnectionSurfaceContract() throws {
+        XCTAssertEqual(
+            LifeOSIconName(providerIconToken: .codex, productKind: .subscription).systemImageName,
+            "cpu"
+        )
+        XCTAssertEqual(
+            LifeOSIconName(providerIconToken: .claude, productKind: .subscription).systemImageName,
+            "bubble.left.and.bubble.right"
+        )
+        XCTAssertEqual(
+            LifeOSIconName(providerIconToken: .gemini, productKind: .subscription).systemImageName,
+            "sparkles"
+        )
+        XCTAssertEqual(
+            LifeOSIconName(providerIconToken: .questionmark, productKind: .api).systemImageName,
+            "server.rack"
+        )
+        XCTAssertEqual(UsageConnectionControlMetrics.macHitSize, 32)
+        XCTAssertEqual(UsageConnectionControlMetrics.iOSHitSize, 44)
+        XCTAssertEqual(UsageConnectionControlMetrics.minimumActionSpacing, 8)
+        XCTAssertEqual(UsageConnectionControlMetrics.hitSize, UsageConnectionControlMetrics.macHitSize)
+        for symbol in [
+            "cpu",
+            "bubble.left.and.bubble.right",
+            "sparkles",
+            "function",
+            "scope",
+            "wand.and.stars",
+            "server.rack",
+            "questionmark"
+        ] {
+            XCTAssertNotNil(
+                NSImage(systemSymbolName: symbol, accessibilityDescription: nil),
+                "SF Symbol must resolve on the supported macOS target: \(symbol)"
+            )
+        }
+
+        let presentation = try usageConnectionsPresentationFixture()
+        XCTAssertEqual(
+            presentation.effectivePinnedConnectionIDs,
+            [try UsageConnectionID("legacy.codex")]
+        )
+
+        let gemini = try XCTUnwrap(
+            presentation.connection(id: try UsageConnectionID("catalog.gemini_subscription"))
+        )
+        let geminiActions = UsageConnectionActionResolver.actions(
+            for: gemini,
+            descriptor: presentation.descriptor(for: gemini)
+        )
+        XCTAssertEqual(
+            geminiActions.map(\.kind),
+            [.addManualReading, .openGemini, .openGeminiHelp]
+        )
+        XCTAssertTrue(geminiActions.allSatisfy { $0.id.hasPrefix("catalog.gemini_subscription.") })
+
+        let changedPreferences = try presentation.preferences.replacing(
+            hiddenConnectionIDs: [try UsageConnectionID("legacy.claude")],
+            pinnedConnectionIDs: [],
+            pinningConfigured: true,
+            orderedConnectionIDs: [
+                try UsageConnectionID("catalog.gemini_subscription"),
+                try UsageConnectionID("legacy.claude"),
+                try UsageConnectionID("legacy.codex")
+            ]
+        )
+        XCTAssertEqual(changedPreferences.hiddenConnectionIDs, [try UsageConnectionID("legacy.claude")])
+        XCTAssertTrue(changedPreferences.pinnedConnectionIDs.isEmpty)
+        XCTAssertEqual(
+            changedPreferences.orderedConnectionIDs,
+            [
+                try UsageConnectionID("catalog.gemini_subscription"),
+                try UsageConnectionID("legacy.claude"),
+                try UsageConnectionID("legacy.codex")
+            ]
+        )
+
+        let view = UsageConnectionsView(
+            presentation: presentation,
+            onSaveManualReadings: { _ in true },
+            onDeleteManualReadings: { true }
+        )
+        render(
+            view,
+            named: "UsageConnectionsView-dark-narrow",
+            frameSize: CGSize(width: 520, height: 620),
+            colorScheme: .dark,
+            reduceMotion: true
+        )
+        render(
+            view.dynamicTypeSize(.accessibility3),
+            named: "UsageConnectionsView-dark-narrow-large-text",
+            frameSize: CGSize(width: 360, height: 760),
+            colorScheme: .dark,
+            reduceMotion: true
+        )
+    }
+
+    private func usageConnectionsPresentationFixture() throws -> UsageRegistryPresentation {
+        let now = Date(timeIntervalSinceReferenceDate: 800_300_000)
+        let codexID = try UsageConnectionID("legacy.codex")
+        let claudeID = try UsageConnectionID("legacy.claude")
+        let geminiID = try UsageConnectionID("catalog.gemini_subscription")
+        let codex = try UsageRegistryConnection(
+            connectionID: codexID,
+            providerID: UsageProviderID("codex"),
+            label: "Codex",
+            pinned: true,
+            sortOrder: 0,
+            authState: .connected,
+            availability: .available,
+            freshness: .fresh
+        )
+        let claude = try UsageRegistryConnection(
+            connectionID: claudeID,
+            providerID: UsageProviderID("claude"),
+            label: "Claude",
+            sortOrder: 1,
+            authState: .connected,
+            availability: .available,
+            freshness: .aging
+        )
+        let gemini = try UsageRegistryConnection(
+            connectionID: geminiID,
+            providerID: UsageProviderID("gemini_subscription"),
+            label: "Gemini",
+            sortOrder: 2,
+            authState: .notRequired,
+            availability: .unsupported,
+            freshness: .unknown
+        )
+        let preferences = try UsageRegistryPreferencesState(
+            pinnedConnectionIDs: [codexID],
+            pinningConfigured: true,
+            orderedConnectionIDs: [codexID, claudeID, geminiID]
+        )
+        return try UsageRegistryPresentation(
+            generatedAt: now,
+            connections: [codex, claude, gemini],
+            windowsByConnection: [:],
+            preferences: preferences
+        )
+    }
+
     func testUsageFactsCompactSnapshot() {
         guard let snapshot = DemoDataProvider.providers.first(where: { $0.provider == .codex }),
               let analytics = DemoUsageAnalytics.snapshots.first(where: { $0.provider == .codex }) else {

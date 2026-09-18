@@ -375,7 +375,9 @@ public final class UsageCoordinator: ObservableObject {
         },
         fileManager: FileManager = .default,
         snapshotPersistence: UsageWidgetSnapshotPersistence = NoopUsageWidgetSnapshotPersistence(),
-        reloadWidgets: @escaping () -> Void = {}
+        reloadWidgets: @escaping () -> Void = {},
+        initialProviders: [ProviderSnapshot] = [],
+        registryPreferencesStore: UsageRegistryPreferencesPersisting = InMemoryUsageRegistryPreferencesStore()
     ) -> UsageCoordinator {
         let directory = fileManager.temporaryDirectory
             .appendingPathComponent("LifeOS", isDirectory: true)
@@ -388,12 +390,13 @@ public final class UsageCoordinator: ObservableObject {
         return UsageCoordinator(
             fetchPayload: fetch,
             staleAfter: 15 * 60,
-            initialProviders: [],
+            initialProviders: initialProviders,
             initialUpdatedAt: nil,
             historyPersistence: historyPersistence,
             snapshotPersistence: snapshotPersistence,
             reloadWidgets: reloadWidgets,
             allowsRefresh: false,
+            registryPreferencesStore: registryPreferencesStore,
             manualReadingStore: InMemoryUsageManualReadingStore()
         )
     }
