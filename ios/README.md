@@ -40,6 +40,18 @@ xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOSMacLogic -testPlan LifeOS
   CODE_SIGNING_ALLOWED=NO test
 ```
 
+For a manual Mac visual check, stage the built app under its isolated fixture
+bundle identifier before opening it:
+
+```sh
+bash scripts/launch_macos_visual_fixture.sh \
+  /absolute/path/to/LifeOSMac.app
+```
+
+Mac UI tests intentionally call `XCUIApplication.terminate()` during relaunch
+coverage. The launcher quits only its own `com.hermes.lifeos.mac.visual-fixture`
+process, so those tests cannot close the production-bundle window being inspected.
+
 The split debug acceptance surface is seven lanes total: five hosted debug
 lanes (`LifeOSLogic`, `LifeOSUI`, `LifeOSMacLogic`, `LifeOSMacUI`, and
 `LifeOSWidgets`) plus the two Release prerelease lanes
