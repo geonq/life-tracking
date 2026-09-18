@@ -23,6 +23,7 @@ targets:
     sources:
       - LifeOS
       - Shared
+      - Planning
       - Shared/FitnessMetric.swift
     resources:
       - path: Shared/Resources/Assets.xcassets
@@ -77,6 +78,7 @@ targets:
       - LifeOSMac
       - path: Shared
         excludes: [HealthKit*.swift]
+      - Planning
       - Shared/FitnessMetric.swift
       - LifeOS/OverviewView.swift
       - LifeOS/CodexView.swift
