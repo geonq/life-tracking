@@ -1425,9 +1425,7 @@ enum TaxDocumentParser {
         var amounts: [TaxAmount] = []
         var years: [Int] = []
         let datePattern = #"\b(?:\d{1,2}[./]\d{1,2}[./]\d{4}|\d{4}-\d{2}-\d{2})\b"#
-        let moneyPattern = #"(?i)([\wÄÖÜäöüß -]{2,30}?)\s+([€$])?\s*(\d{1,3}(?:[. ]\d{3})*,\d{2}|\d+(?:[.,]\d{2})?)\s*(EUR|€|USD|\$)?(?![0-9A-Za-z.,])"#
         let dateRegex = try? NSRegularExpression(pattern: datePattern)
-        let moneyRegex = try? NSRegularExpression(pattern: moneyPattern)
 
         for (index, page) in safePages.enumerated() {
             if cancellationCheck() { break }
@@ -1456,25 +1454,13 @@ enum TaxDocumentParser {
             }
             if cancellationCheck() { break }
             if amounts.count < TaxDocumentLimits.maximumAmounts {
-                moneyRegex?.enumerateMatches(in: page, range: range) { match, _, stop in
-                    if cancellationCheck() {
-                        stop.pointee = true
-                        return
-                    }
-                    guard amounts.count < TaxDocumentLimits.maximumAmounts else {
-                        stop.pointee = true
-                        return
-                    }
-                    guard let match else { return }
-                    let hasPrefixCurrency = match.range(at: 2).location != NSNotFound
-                    let hasSuffixCurrency = match.range(at: 4).location != NSNotFound
-                    guard hasPrefixCurrency || hasSuffixCurrency else { return }
-                    let label = nsPage.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces)
-                    let raw = nsPage.substring(with: match.range(at: 3))
-                    guard let normalized = normalizeMoneyToken(raw) else { return }
-                    let evidence = TaxEvidence(page: index + 1, snippet: evidenceSnippet(in: page, around: match.range))
-                    amounts.append(TaxAmount(value: normalized, label: label, evidence: evidence))
-                    if amounts.count >= TaxDocumentLimits.maximumAmounts { stop.pointee = true }
+                if appendMoneyAmounts(
+                    from: page,
+                    pageIndex: index,
+                    amounts: &amounts,
+                    cancellationCheck: cancellationCheck
+                ) {
+                    break
                 }
             }
         }
@@ -1516,7 +1502,442 @@ enum TaxDocumentParser {
         )
     }
 
-    /// Normalizes only the bounded money grammar captured by `moneyPattern`.
+    private struct MoneyNumberScan {
+        let end: Int
+        let normalized: String?
+        let cancelled: Bool
+
+        init(end: Int, normalized: String?, cancelled: Bool = false) {
+            self.end = end
+            self.normalized = normalized
+            self.cancelled = cancelled
+        }
+    }
+
+    private struct MoneyMatchCandidate {
+        let labelRange: Range<Int>
+        let matchEnd: Int
+        let normalized: String
+    }
+
+    private struct WhitespaceScan {
+        let index: Int
+        let count: Int
+        let exceeded: Bool
+    }
+
+    private static let maximumMoneyTokenCharacters = 128
+    private static let maximumMoneyWhitespaceCharacters = 128
+
+    private static func appendMoneyAmounts(
+        from page: String,
+        pageIndex: Int,
+        amounts: inout [TaxAmount],
+        cancellationCheck: @escaping () -> Bool
+    ) -> Bool {
+        let characters = Array(page)
+        guard !characters.isEmpty else { return false }
+
+        var utf16Offsets: [Int] = []
+        utf16Offsets.reserveCapacity(characters.count + 1)
+        var utf16Offset = 0
+        for character in characters {
+            utf16Offsets.append(utf16Offset)
+            utf16Offset += String(character).utf16.count
+        }
+        utf16Offsets.append(utf16Offset)
+
+        var index = 0
+        var minimumLabelStart = 0
+        while index < characters.count {
+            if index.isMultiple(of: 64), cancellationCheck() {
+                return true
+            }
+            guard isASCIIDigit(characters[index]) || isMoneyCurrency(characters[index]) else {
+                index += 1
+                continue
+            }
+            if cancellationCheck() {
+                return true
+            }
+
+            let scan = scanMoneyCandidate(
+                in: characters,
+                start: index,
+                minimumLabelStart: minimumLabelStart,
+                cancellationCheck: cancellationCheck
+            )
+            if scan.cancelled {
+                return true
+            }
+            minimumLabelStart = max(minimumLabelStart, scan.nextIndex)
+            if let candidate = scan.candidate {
+                let label = String(characters[candidate.labelRange])
+                let range = NSRange(
+                    location: utf16Offsets[candidate.labelRange.lowerBound],
+                    length: utf16Offsets[candidate.matchEnd] - utf16Offsets[candidate.labelRange.lowerBound]
+                )
+                let evidence = TaxEvidence(
+                    page: pageIndex + 1,
+                    snippet: evidenceSnippet(in: page, around: range)
+                )
+                amounts.append(TaxAmount(value: candidate.normalized, label: label, evidence: evidence))
+                minimumLabelStart = max(minimumLabelStart, candidate.matchEnd)
+                if amounts.count >= TaxDocumentLimits.maximumAmounts {
+                    return false
+                }
+            }
+            index = max(index + 1, scan.nextIndex)
+        }
+        return false
+    }
+
+    private static func scanMoneyCandidate(
+        in characters: [Character],
+        start: Int,
+        minimumLabelStart: Int,
+        cancellationCheck: @escaping () -> Bool
+    ) -> (nextIndex: Int, candidate: MoneyMatchCandidate?, cancelled: Bool) {
+        var hasPrefixCurrency = false
+        var amountStart = start
+
+        if isMoneyCurrency(characters[start]) {
+            hasPrefixCurrency = true
+            let whitespace = skipMoneyWhitespace(in: characters, from: start + 1)
+            guard !whitespace.exceeded,
+                  whitespace.index < characters.count,
+                  isASCIIDigit(characters[whitespace.index]) else {
+                return (max(start + 1, whitespace.index), nil, false)
+            }
+            amountStart = whitespace.index
+        } else if !isASCIIDigit(characters[start]) {
+            return (start + 1, nil, false)
+        }
+
+        let number = scanMoneyNumber(
+            in: characters,
+            from: amountStart,
+            cancellationCheck: cancellationCheck
+        )
+        if number.cancelled {
+            return (number.end, nil, true)
+        }
+        guard let normalized = number.normalized else {
+            return (max(start + 1, number.end), nil, false)
+        }
+
+        let suffixWhitespace = skipMoneyWhitespace(in: characters, from: number.end)
+        var suffixEnd = number.end
+        var afterSuffix = number.end
+        var suffixLength = 0
+        if !suffixWhitespace.exceeded {
+            suffixLength = moneyCurrencyLength(in: characters, at: suffixWhitespace.index)
+        }
+        if suffixLength > 0 {
+            suffixEnd = suffixWhitespace.index + suffixLength
+            afterSuffix = suffixEnd
+        }
+
+        let hasSuffixCurrency = suffixLength > 0
+        if suffixWhitespace.exceeded, !hasPrefixCurrency {
+            return (max(start + 1, suffixWhitespace.index), nil, false)
+        }
+        guard hasPrefixCurrency || hasSuffixCurrency else {
+            return (max(start + 1, afterSuffix), nil, false)
+        }
+        if afterSuffix < characters.count, isForbiddenMoneyContinuation(characters[afterSuffix]) {
+            return (max(start + 1, afterSuffix + 1), nil, false)
+        }
+
+        let trailingWhitespace = skipMoneyWhitespace(in: characters, from: afterSuffix)
+        let nextIndex = max(start + 1, trailingWhitespace.index)
+
+        let labelBoundary = hasPrefixCurrency ? start : amountStart
+        var labelEnd = labelBoundary
+        var labelWhitespaceCount = 0
+        while labelEnd > 0, isMoneyWhitespace(characters[labelEnd - 1]) {
+            labelEnd -= 1
+            labelWhitespaceCount += 1
+            if labelWhitespaceCount > maximumMoneyWhitespaceCharacters {
+                return (nextIndex, nil, false)
+            }
+        }
+        guard labelWhitespaceCount > 0 else {
+            return (nextIndex, nil, false)
+        }
+
+        var labelStart = labelEnd
+        var labelLength = 0
+        while labelStart > minimumLabelStart,
+              labelLength < 30,
+              isLabelCharacter(characters[labelStart - 1]) {
+            labelStart -= 1
+            labelLength += 1
+        }
+        while labelStart < labelEnd, isMoneyWhitespace(characters[labelStart]) {
+            labelStart += 1
+        }
+        while labelEnd > labelStart, isMoneyWhitespace(characters[labelEnd - 1]) {
+            labelEnd -= 1
+        }
+        guard labelEnd - labelStart >= 1,
+              labelStart < labelEnd else {
+            return (nextIndex, nil, false)
+        }
+
+        return (
+            nextIndex,
+            MoneyMatchCandidate(
+                labelRange: labelStart..<labelEnd,
+                matchEnd: suffixLength > 0 ? suffixEnd : number.end,
+                normalized: normalized
+            ),
+            false
+        )
+    }
+
+    private static func scanMoneyNumber(
+        in characters: [Character],
+        from start: Int,
+        cancellationCheck: @escaping () -> Bool
+    ) -> MoneyNumberScan {
+        var integerEnd = start
+        while integerEnd < characters.count, isASCIIDigit(characters[integerEnd]) {
+            integerEnd += 1
+            if (integerEnd - start).isMultiple(of: 64), cancellationCheck() {
+                return MoneyNumberScan(end: integerEnd, normalized: nil, cancelled: true)
+            }
+        }
+        guard integerEnd > start else {
+            return MoneyNumberScan(end: start + 1, normalized: nil)
+        }
+
+        guard integerEnd < characters.count else {
+            return normalizedMoneyNumber(
+                in: characters,
+                start: start,
+                end: integerEnd,
+                cancellationCheck: cancellationCheck
+            )
+        }
+
+        switch characters[integerEnd] {
+        case ",":
+            guard hasExactlyDigits(in: characters, from: integerEnd + 1, count: 2) else {
+                return MoneyNumberScan(end: integerEnd + 1, normalized: nil)
+            }
+            return normalizedMoneyNumber(
+                in: characters,
+                start: start,
+                end: integerEnd + 3,
+                cancellationCheck: cancellationCheck
+            )
+        case ".":
+            let followingDigits = digitRunLength(in: characters, from: integerEnd + 1, maximum: 4)
+            if followingDigits == 2 {
+                return normalizedMoneyNumber(
+                    in: characters,
+                    start: start,
+                    end: integerEnd + 3,
+                    cancellationCheck: cancellationCheck
+                )
+            }
+            guard followingDigits == 3, integerEnd - start <= 3 else {
+                return MoneyNumberScan(end: integerEnd + followingDigits + 1, normalized: nil)
+            }
+            return scanGroupedMoneyNumber(
+                in: characters,
+                start: start,
+                groupStart: integerEnd,
+                firstGroupDigits: followingDigits,
+                cancellationCheck: cancellationCheck
+            )
+        case " ":
+            guard integerEnd - start <= 3 else {
+                return normalizedMoneyNumber(
+                    in: characters,
+                    start: start,
+                    end: integerEnd,
+                    cancellationCheck: cancellationCheck
+                )
+            }
+            let followingDigits = digitRunLength(in: characters, from: integerEnd + 1, maximum: 4)
+            guard followingDigits == 3 else {
+                return normalizedMoneyNumber(
+                    in: characters,
+                    start: start,
+                    end: integerEnd,
+                    cancellationCheck: cancellationCheck
+                )
+            }
+            return scanGroupedMoneyNumber(
+                in: characters,
+                start: start,
+                groupStart: integerEnd,
+                firstGroupDigits: followingDigits,
+                cancellationCheck: cancellationCheck
+            )
+        default:
+            return normalizedMoneyNumber(
+                in: characters,
+                start: start,
+                end: integerEnd,
+                cancellationCheck: cancellationCheck
+            )
+        }
+    }
+
+    private static func scanGroupedMoneyNumber(
+        in characters: [Character],
+        start: Int,
+        groupStart: Int,
+        firstGroupDigits: Int,
+        cancellationCheck: @escaping () -> Bool
+    ) -> MoneyNumberScan {
+        var cursor = groupStart + 1 + firstGroupDigits
+        var groupCount = 1
+        while cursor < characters.count, characters[cursor] == "." || characters[cursor] == " " {
+            if groupCount.isMultiple(of: 64), cancellationCheck() {
+                return MoneyNumberScan(end: cursor, normalized: nil, cancelled: true)
+            }
+            let groupDigits = digitRunLength(in: characters, from: cursor + 1, maximum: 4)
+            guard groupDigits == 3 else { break }
+            cursor += 1 + groupDigits
+            groupCount += 1
+            if cursor - start > maximumMoneyTokenCharacters {
+                let consumed = consumeMoneyToken(
+                    in: characters,
+                    from: cursor,
+                    cancellationCheck: cancellationCheck
+                )
+                return MoneyNumberScan(
+                    end: consumed.end,
+                    normalized: nil,
+                    cancelled: consumed.cancelled
+                )
+            }
+        }
+
+        guard cursor < characters.count,
+              characters[cursor] == ",",
+              hasExactlyDigits(in: characters, from: cursor + 1, count: 2) else {
+            return MoneyNumberScan(end: cursor, normalized: nil)
+        }
+        return normalizedMoneyNumber(
+            in: characters,
+            start: start,
+            end: cursor + 3,
+            cancellationCheck: cancellationCheck
+        )
+    }
+
+    private static func normalizedMoneyNumber(
+        in characters: [Character],
+        start: Int,
+        end: Int,
+        cancellationCheck: @escaping () -> Bool
+    ) -> MoneyNumberScan {
+        guard end > start else {
+            return MoneyNumberScan(end: max(start + 1, end), normalized: nil)
+        }
+        guard end - start <= maximumMoneyTokenCharacters else {
+            let consumed = consumeMoneyToken(
+                in: characters,
+                from: end,
+                cancellationCheck: cancellationCheck
+            )
+            return MoneyNumberScan(
+                end: consumed.end,
+                normalized: nil,
+                cancelled: consumed.cancelled
+            )
+        }
+        let raw = String(characters[start..<end])
+        return MoneyNumberScan(end: end, normalized: normalizeMoneyToken(raw))
+    }
+
+    private static func consumeMoneyToken(
+        in characters: [Character],
+        from start: Int,
+        cancellationCheck: @escaping () -> Bool
+    ) -> (end: Int, cancelled: Bool) {
+        var cursor = start
+        while cursor < characters.count, isMoneyTokenCharacter(characters[cursor]) {
+            cursor += 1
+            if (cursor - start).isMultiple(of: 64), cancellationCheck() {
+                return (cursor, true)
+            }
+        }
+        return (cursor, false)
+    }
+
+    private static func skipMoneyWhitespace(in characters: [Character], from start: Int) -> WhitespaceScan {
+        var index = start
+        var count = 0
+        while index < characters.count, isMoneyWhitespace(characters[index]) {
+            count += 1
+            index += 1
+            if count > maximumMoneyWhitespaceCharacters {
+                return WhitespaceScan(index: index, count: count, exceeded: true)
+            }
+        }
+        return WhitespaceScan(index: index, count: count, exceeded: false)
+    }
+
+    private static func digitRunLength(in characters: [Character], from start: Int, maximum: Int) -> Int {
+        var index = start
+        while index < characters.count, index - start < maximum, isASCIIDigit(characters[index]) {
+            index += 1
+        }
+        return index - start
+    }
+
+    private static func hasExactlyDigits(in characters: [Character], from start: Int, count: Int) -> Bool {
+        guard start >= 0, start + count <= characters.count else { return false }
+        for index in start..<(start + count) where !isASCIIDigit(characters[index]) {
+            return false
+        }
+        return start + count == characters.count || !isASCIIDigit(characters[start + count])
+    }
+
+    private static func moneyCurrencyLength(in characters: [Character], at start: Int) -> Int {
+        guard start < characters.count else { return 0 }
+        if isMoneyCurrency(characters[start]) { return 1 }
+        guard start + 3 <= characters.count else { return 0 }
+        let token = String(characters[start..<(start + 3)]).uppercased()
+        return token == "EUR" || token == "USD" ? 3 : 0
+    }
+
+    private static func isMoneyCurrency(_ character: Character) -> Bool {
+        character == "€" || character == "$"
+    }
+
+    private static func isMoneyTokenCharacter(_ character: Character) -> Bool {
+        isASCIIDigit(character) || character == "." || character == "," || character == " "
+    }
+
+    private static func isASCIIDigit(_ character: Character) -> Bool {
+        guard character.unicodeScalars.count == 1,
+              let scalar = character.unicodeScalars.first else { return false }
+        return (48...57).contains(scalar.value)
+    }
+
+    private static func isMoneyWhitespace(_ character: Character) -> Bool {
+        character.isWhitespace
+    }
+
+    private static func isLabelCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "_" || character == "-" || character == " "
+    }
+
+    private static func isForbiddenMoneyContinuation(_ character: Character) -> Bool {
+        if isASCIIDigit(character) || character == "." || character == "," { return true }
+        guard character.unicodeScalars.count == 1,
+              let scalar = character.unicodeScalars.first else { return false }
+        return (65...90).contains(scalar.value) || (97...122).contains(scalar.value)
+    }
+
+    /// Normalizes only the bounded money grammar captured by the scanner.
     /// A comma is the decimal separator for German grouped values; a single
     /// dot followed by two digits is retained as a plain decimal point. Any
     /// other punctuation layout is rejected instead of being guessed.

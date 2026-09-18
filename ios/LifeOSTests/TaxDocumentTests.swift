@@ -16,13 +16,70 @@ final class TaxDocumentTests: XCTestCase {
         let cases = [
             ("Einkommensteuer 1234.56 EUR", "1234.56"),
             ("Einkommensteuer 1.234,56 EUR", "1234.56"),
-            ("Einkommensteuer 1 234,56 EUR", "1234.56")
+            ("Einkommensteuer 1 234,56 EUR", "1234.56"),
+            ("Einkommensteuer 1 234 567,89 EUR", "1234567.89")
         ]
 
         for (text, expected) in cases {
             let result = TaxDocumentParser.parse(text: text, documentName: "Bescheid.pdf")
             XCTAssertEqual(result.amounts.first?.value, expected, text)
         }
+    }
+
+    func testMoneyParserPreservesSpaceGroupedAmountAndLabel() {
+        let result = TaxDocumentParser.parse(
+            text: "Einkommensteuer 1 234,56 EUR",
+            documentName: "Bescheid.pdf"
+        )
+
+        XCTAssertEqual(result.amounts.first?.value, "1234.56")
+        XCTAssertEqual(result.amounts.first?.label, "Einkommensteuer")
+    }
+
+    func testMoneyParserPreservesLegacyLabelBoundariesAndAdjacentText() {
+        let cases = [
+            ("Tax 10 EUR\nRefund 20 EUR", ["Tax=10", "Refund=20"]),
+            ("Tax 10 EUR paid", ["Tax=10"]),
+            ("Tax $10 next", ["Tax=10"]),
+            ("Tax- 10 EUR", ["Tax-=10"])
+        ]
+
+        for (text, expected) in cases {
+            let result = TaxDocumentParser.parse(text: text, documentName: "legacy.pdf")
+            XCTAssertEqual(result.amounts.map { "\($0.label)=\($0.value)" }, expected, text)
+        }
+
+        let sameLine = TaxDocumentParser.parse(
+            text: "Tax 10 EUR Refund 20 EUR",
+            documentName: "same-line.pdf"
+        )
+        XCTAssertEqual(sameLine.amounts.map { "\($0.label)=\($0.value)" }, ["Tax=10", "Refund=20"])
+
+        let longGap = TaxDocumentParser.parse(
+            text: "Tax $10" + String(repeating: " ", count: 129) + "paid",
+            documentName: "long-gap.pdf"
+        )
+        XCTAssertEqual(longGap.amounts.map { "\($0.label)=\($0.value)" }, ["Tax=10"])
+
+        let singleCharacterLabel = TaxDocumentParser.parse(
+            text: " A 10 EUR",
+            documentName: "single-character-label.pdf"
+        )
+        XCTAssertEqual(singleCharacterLabel.amounts.map { "\($0.label)=\($0.value)" }, ["A=10"])
+    }
+
+    func testMoneyParserDoesNotReuseRejectedNumericTextAsALabel() {
+        let lineBreak = TaxDocumentParser.parse(
+            text: "Tax 10\n200 EUR",
+            documentName: "rejected-boundary.pdf"
+        )
+        XCTAssertTrue(lineBreak.amounts.isEmpty)
+
+        let malformedGrouping = TaxDocumentParser.parse(
+            text: "Tax 1 234 56 EUR",
+            documentName: "malformed-grouping.pdf"
+        )
+        XCTAssertTrue(malformedGrouping.amounts.isEmpty)
     }
 
     func testRejectsAmbiguousGroupedOrDecimalTokenInsteadOfTruncatingIt() {
@@ -32,6 +89,95 @@ final class TaxDocumentTests: XCTestCase {
         )
 
         XCTAssertTrue(result.amounts.isEmpty)
+    }
+
+    func testMoneyParserStaysBoundedForWhitespaceAndNearMatches() {
+        for count in [128, 256, 512] {
+            let result = TaxDocumentParser.parse(
+                text: String(repeating: " ", count: count),
+                documentName: "whitespace-\(count).pdf"
+            )
+            XCTAssertTrue(result.amounts.isEmpty, "Whitespace-only page \(count) must stay unavailable")
+        }
+
+        let nearMatches = [
+            "Einkommensteuer" + String(repeating: " ", count: 128) + "EUR",
+            "Einkommensteuer 1.234",
+            "Einkommensteuer 1234,56"
+        ]
+        for text in nearMatches {
+            XCTAssertTrue(
+                TaxDocumentParser.parse(text: text, documentName: "near-match.pdf").amounts.isEmpty,
+                text
+            )
+        }
+    }
+
+    func testMoneyParserPreservesUnicodeWhitespaceAndDollarCurrency() {
+        let euro = TaxDocumentParser.parse(
+            text: "Einkommensteuer\u{00A0}1.234,56\u{00A0}EUR",
+            documentName: "unicode-space.pdf"
+        )
+        XCTAssertEqual(euro.amounts.first?.value, "1234.56")
+
+        let dollar = TaxDocumentParser.parse(
+            text: "Refund 1234.50 USD",
+            documentName: "dollar.pdf"
+        )
+        XCTAssertEqual(dollar.amounts.first?.value, "1234.50")
+    }
+
+    func testMoneyParserCancellationRunsBeforeAWhitespaceScanCanGrow() {
+        var checks = 0
+        let result = TaxDocumentParser.parse(
+            text: "Label " + String(repeating: "1", count: 20_000) + " EUR",
+            documentName: "cancelled.pdf",
+            cancellationCheck: {
+                checks += 1
+                return checks >= 7
+            }
+        )
+
+        XCTAssertTrue(result.amounts.isEmpty)
+        XCTAssertGreaterThanOrEqual(checks, 7)
+    }
+
+    func testMoneyParserCancellationPropagatesThroughOversizedTokenCleanup() {
+        var checks = 0
+        let result = TaxDocumentParser.parse(
+            text: "Label 1" + String(repeating: " 111", count: 2_000) + ",00 EUR",
+            documentName: "oversized.pdf",
+            cancellationCheck: {
+                checks += 1
+                return checks >= 7
+            }
+        )
+
+        XCTAssertTrue(result.amounts.isEmpty)
+        XCTAssertGreaterThanOrEqual(checks, 7)
+
+        var integerChecks = 0
+        let oversizedInteger = TaxDocumentParser.parse(
+            text: "Label " + String(repeating: "1", count: 200) + String(repeating: " 111", count: 2_000) + " EUR",
+            documentName: "oversized-integer.pdf",
+            cancellationCheck: {
+                integerChecks += 1
+                return integerChecks >= 10
+            }
+        )
+
+        XCTAssertTrue(oversizedInteger.amounts.isEmpty)
+        XCTAssertGreaterThanOrEqual(integerChecks, 10)
+    }
+
+    func testMoneyParserHandlesRepeatedGroupedNearMatchWithinBoundedTime() {
+        let text = "Label " + String(repeating: "111 ", count: 10_000) + "EUR"
+        let started = DispatchTime.now().uptimeNanoseconds
+        let result = TaxDocumentParser.parse(text: text, documentName: "near-match.pdf")
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
+
+        XCTAssertTrue(result.amounts.isEmpty)
+        XCTAssertLessThan(elapsed, 2.0)
     }
 
     func testEvidencePreservesPageAndSnippet() {
