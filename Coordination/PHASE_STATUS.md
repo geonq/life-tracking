@@ -5,7 +5,7 @@ Updated 2026-09-18 Europe/Berlin.
 ## Release state
 
 - Release: **NO-GO**.
-- `main` and `origin/main` are aligned at `d2ece98`.
+- `main` and `origin/main` are aligned at `f62ef9e`.
 - The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0
   formally accepted leaves. This is an evidence ledger, not a percentage.
 - The old `worker/t11a-shared-visual-foundation` branch is patch-equivalent to
@@ -48,6 +48,10 @@ Updated 2026-09-18 Europe/Berlin.
   post-commit serial Mac logic lane is **193/193** with independent xcresult
   validation. It is value-only: durable vault storage, UI, graph projection,
   gateway transport, and sync are still open.
+- The tax parser security tranche is pushed at `f62ef9e`. Its deterministic
+  scanner preserves legacy/grouped/currency formats, rejects malformed
+  boundaries, and propagates cancellation through oversized cleanup. Actual
+  source probes and the generic iOS SDK build-for-testing pass.
 
 ## Backend state
 

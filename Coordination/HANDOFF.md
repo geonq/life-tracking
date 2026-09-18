@@ -9,9 +9,9 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. `main` is clean and pushed at `d2ece98` (`fix:
-  refine Mac Home dashboard composition`), on top of `f53c77c` (`feat: add
-  bounded Obsidian Canvas codecs`). Earlier source checkpoints remain
+- Release is **NO-GO**. `main` is clean and pushed at `f62ef9e` (`fix: bound
+  tax money parsing`), on top of the accepted Mac Home repair `d2ece98` and
+  the Canvas codec packet `f53c77c`. Earlier source checkpoints remain
   `4856fae`, `1d57435`, `5aa3fb1`, `1956569`, and `273f4dd`.
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
@@ -109,6 +109,9 @@ tranches. Keep the release verdict honest; do not call the product done.
   wealth, metric, and row provenance timestamps. Controller evidence is
   macOS focused finance **25/25 passed** and iOS device SDK
   `build-for-testing` succeeded. Simulator execution remains unavailable.
+- Tax parser security scanner is pushed at `f62ef9e` after Astra approval;
+  actual-source probes and serial iOS SDK build-for-testing pass, including
+  grouped/legacy labels, malformed boundaries, and oversized cancellation.
 
 ## LifeOSMac stability receipt
 
@@ -160,13 +163,11 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## Next action
 
-Use `f53c77c` plus the stability and Canvas receipts as the source of truth. Continue with
-the canonical Windows candidate/preflight and recovery packet, then live
-finance/net-worth reconciliation, Canvas durability and native interaction,
-Zepp/workout evidence, widgets/Shortcuts/signing, visual acceptance, and the
-final batched security review. Do not rerun the full Mac suite without a code
-change or a relevant failure.
-Keep each packet reviewed and reflected in these short handoff files.
+Use `f62ef9e` plus the stability and Canvas receipts as the source of truth.
+Continue with the cross-process usage-history lock, canonical Windows
+recovery, live finance/net-worth, Canvas, fitness, widgets/Shortcuts/signing,
+visual acceptance, and final security packets. Do not rerun the full Mac suite
+without a code change or relevant failure.
 
 ## Validation discipline
 

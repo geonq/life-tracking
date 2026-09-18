@@ -2,7 +2,7 @@
 
 Status: IN PROGRESS — updated 2026-09-18 Europe/Berlin.
 
-The authoritative source checkpoint is clean `main` at `d2ece98`, aligned
+The authoritative source checkpoint is clean `main` at `f62ef9e`, aligned
 with `origin/main`. Release remains **NO-GO**. The frozen registry contains
 258 leaves, 7 aliases, and 0 formally accepted leaves; this is acceptance
 evidence, not an implementation percentage.
@@ -51,10 +51,14 @@ evidence, not an implementation percentage.
   at `f53c77c`; focused tests are **31/31**, the independent smoke harness
   passed, and the post-commit Mac logic lane is **193/193**. Durable vault
   storage, conflicts, graph/UI, gateway transport, and sync remain open.
+- The tax parser security tranche is pushed at `f62ef9e` after Astra approval;
+  actual-source probes and the generic iOS SDK build-for-testing cover grouped
+  and legacy formats, malformed boundaries, and oversized cancellation.
 
 ## Remaining work
 
-1. Finish canonical Windows candidate/preflight, supervised recovery/install,
+1. Finish cross-process usage-history locking, then canonical Windows
+   candidate/preflight and supervised recovery/install,
    service/ACL/Serve/health/readiness/listener verification, and rollback.
 2. Verify real Enable Banking values, consent/revoke/freshness, recurring
    reconciliation, Trade Republic import, and Robinhood/net-worth separation.
