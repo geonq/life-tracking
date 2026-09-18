@@ -5,7 +5,9 @@ The existence of an ``.xcresult`` directory only proves that xcodebuild wrote
 an artifact.  It does not prove that the intended test bundle materialised or
 that any tests ran.  This validator consumes Apple's public
 ``xcresulttool get test-results summary`` JSON and enforces the lane's minimum
-expected count before CI can treat the lane as green.
+expected count before CI can treat the lane as green. When Xcode cannot
+materialize that summary, it uses a strict legacy-object fallback that refuses
+ambiguous or incomplete action records.
 """
 
 from __future__ import annotations
@@ -116,20 +118,137 @@ def _legacy_values(value: Any) -> list[Any]:
     return []
 
 
+_LEGACY_TEST_COMMANDS = {"test", "tests"}
+_LEGACY_NON_TEST_COMMANDS = {
+    "analyze",
+    "archive",
+    "build",
+    "clean",
+    "install",
+    "profile",
+    "run",
+}
+_LEGACY_TEST_RESULT_NAMES = {"test", "tests", "testing"}
+_LEGACY_NON_TEST_RESULT_NAMES = {
+    "analyze",
+    "archive",
+    "build",
+    "clean",
+    "install",
+    "profile",
+    "run",
+}
+
+
+def _legacy_text_field(
+    payload: Mapping[str, Any], key: str, *, context: str
+) -> str | None:
+    if key not in payload:
+        return None
+    value = _legacy_value(payload[key])
+    if not isinstance(value, str):
+        if key == "status":
+            _fail(
+                "xcresult legacy action status must be a string; "
+                f"got {type(value).__name__}"
+            )
+        _fail(
+            f"xcresult legacy {context} field {key!r} must be a string; "
+            f"got {type(value).__name__}"
+        )
+    if not value.strip():
+        _fail(f"xcresult legacy {context} field {key!r} is empty")
+    return value.strip()
+
+
+def _legacy_action_kind(action: Mapping[str, Any], index: int) -> str:
+    """Classify one legacy action without trusting payload presence alone.
+
+    Apple emits ``schemeCommandName=Test`` and ``testPlanName`` on real test
+    actions; the action result carries typed ``resultName`` and ``status``.
+    Older result roots may omit that metadata, so a valid ``testsRef`` or
+    ``metrics.testsCount`` remains sufficient for the single-action path. A
+    status by itself is deliberately ambiguous because build actions also
+    have statuses. Any other action must be explicitly recognizable as
+    non-test or the validator fails closed.
+    """
+
+    command = _legacy_text_field(action, "schemeCommandName", context="action")
+    title = _legacy_text_field(action, "title", context="action")
+    test_plan = _legacy_text_field(action, "testPlanName", context="action")
+    action_result = action.get("actionResult")
+    if not isinstance(action_result, Mapping):
+        command_name = command.casefold() if command else None
+        if command_name in _LEGACY_NON_TEST_COMMANDS:
+            return "non-test"
+        _fail(
+            f"xcresult legacy action[{index}] is missing actionResult; "
+            "relevance cannot be established"
+        )
+
+    # Validate typed status whenever it is present, even when another field
+    # later classifies this as a non-test action. Status alone is not a test
+    # discriminator, but malformed status data must never be ignored.
+    _legacy_text_field(action_result, "status", context="action")
+    result_name = _legacy_text_field(action_result, "resultName", context="action result")
+    command_name = command.casefold() if command else None
+    result_name_normalized = result_name.casefold() if result_name else None
+
+    test_signals: list[str] = []
+    non_test_signals: list[str] = []
+    if command_name in _LEGACY_TEST_COMMANDS:
+        test_signals.append("schemeCommandName")
+    elif command_name in _LEGACY_NON_TEST_COMMANDS:
+        non_test_signals.append("schemeCommandName")
+    if test_plan is not None:
+        test_signals.append("testPlanName")
+    if title is not None and title.casefold().startswith("testing "):
+        test_signals.append("title")
+    if result_name_normalized in _LEGACY_TEST_RESULT_NAMES:
+        test_signals.append("resultName")
+    elif result_name_normalized in _LEGACY_NON_TEST_RESULT_NAMES:
+        non_test_signals.append("resultName")
+
+    metrics = action_result.get("metrics")
+    has_test_evidence = "testsRef" in action_result or (
+        isinstance(metrics, Mapping) and "testsCount" in metrics
+    )
+    if has_test_evidence:
+        test_signals.append("test result payload")
+
+    if test_signals and non_test_signals:
+        _fail(
+            f"xcresult legacy action[{index}] has conflicting test and non-test metadata"
+        )
+    if test_signals:
+        return "test"
+    if non_test_signals:
+        return "non-test"
+    _fail(
+        f"xcresult legacy action[{index}] relevance cannot be established from metadata"
+    )
+
+
 def _legacy_test_action(root: Mapping[str, Any]) -> Mapping[str, Any]:
-    actions = _legacy_values(root.get("actions"))
+    if "actions" not in root:
+        _fail("xcresult legacy result contains no actions collection")
+    actions_value = root["actions"]
+    actions = _legacy_values(actions_value)
+    if not actions and not (
+        isinstance(actions_value, Mapping) and isinstance(actions_value.get("_values"), list)
+    ) and not isinstance(actions_value, list):
+        _fail("xcresult legacy actions collection is malformed")
     test_actions: list[Mapping[str, Any]] = []
-    for action in actions:
+    for index, action in enumerate(actions):
         if not isinstance(action, Mapping):
+            _fail(f"xcresult legacy action[{index}] is malformed")
+        kind = _legacy_action_kind(action, index)
+        if kind == "non-test":
             continue
         action_result = action.get("actionResult")
         if not isinstance(action_result, Mapping):
-            continue
-        metrics = action_result.get("metrics")
-        if "testsRef" in action_result or (
-            isinstance(metrics, Mapping) and "testsCount" in metrics
-        ):
-            test_actions.append(action_result)
+            _fail(f"xcresult legacy action[{index}] is missing actionResult")
+        test_actions.append(action_result)
     if len(test_actions) > 1:
         _fail(
             "xcresult legacy result contains multiple test actions; "
