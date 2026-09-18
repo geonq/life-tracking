@@ -51,6 +51,8 @@ bash scripts/launch_macos_visual_fixture.sh \
 Mac UI tests intentionally call `XCUIApplication.terminate()` during relaunch
 coverage. The launcher quits only its own `com.hermes.lifeos.mac.visual-fixture`
 process, so those tests cannot close the production-bundle window being inspected.
+The `mac-ui` validation lane also refuses to start while the production bundle
+is already running.
 
 The split debug acceptance surface is seven lanes total: five hosted debug
 lanes (`LifeOSLogic`, `LifeOSUI`, `LifeOSMacLogic`, `LifeOSMacUI`, and

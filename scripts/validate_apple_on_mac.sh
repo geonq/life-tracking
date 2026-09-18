@@ -162,6 +162,18 @@ run_ios_lane() {
 run_mac_lane() {
   local lane_id="$1"
   local scheme test_plan configuration test_target minimum_tests artifact_name
+  if [[ "$lane_id" == "mac-ui" ]]; then
+    local production_app_running
+    production_app_running="$(/usr/bin/osascript -e 'tell application id "com.hermes.lifeos.mac" to running' 2>/dev/null || true)"
+    if [[ "$production_app_running" == "true" ]]; then
+      cat >&2 <<'EOF'
+mac-ui refused to start while the production LifeOSMac bundle is running.
+Launch the manual build with scripts/launch_macos_visual_fixture.sh so UI-test
+terminate/relaunch coverage cannot close the visual-check window.
+EOF
+      return 2
+    fi
+  fi
   "$ROOT/scripts/maintain_macos_storage.sh" --check
   scheme="$(manifest_value "$lane_id" scheme)"
   test_plan="$(manifest_value "$lane_id" test_plan)"
