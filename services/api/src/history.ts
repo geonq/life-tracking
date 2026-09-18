@@ -15,6 +15,11 @@ import {
   atomicWriteFile,
   captureFilePathIdentityChain,
 } from './atomic-file.js';
+import {
+  HistoryWriteLockError,
+  type HistoryWriteLockOptions,
+  withHistoryWriteLock,
+} from './history-lock.js';
 
 /** Keep malformed or unexpectedly large history files from causing an unbounded allocation. */
 export const MAX_HISTORY_BYTES = 1 * 1024 * 1024;
@@ -153,6 +158,8 @@ export class UsageHistory {
     private readonly maxAgeMs = 30 * 24 * 60 * 60_000,
     /** Injected for deterministic retention tests; production defaults to the system clock. */
     private readonly now: () => number = () => Date.now(),
+    /** Internal lock seams used by focused process/concurrency tests. */
+    private readonly writeLockOptions?: HistoryWriteLockOptions,
   ) {
     if (!Number.isSafeInteger(maxSamples) || maxSamples < 0 || maxSamples > MAX_HISTORY_SAMPLES) {
       throw new RangeError('invalid_history_sample_limit');
@@ -182,6 +189,8 @@ export class UsageHistory {
     }
     if (!safe.length) return { kind: 'accepted', revision: 0 };
     return this.enqueue(async () => {
+      try {
+        return await withHistoryWriteLock(this.file, async () => {
       const state = await this.readState();
       const fingerprint = idempotencyFingerprint(safe);
       const previous = idempotencyKey === undefined
@@ -264,6 +273,11 @@ export class UsageHistory {
 
       await this.persist(nextRaw, nextMetadata, bodyChanged);
       return { kind: bodyChanged ? 'accepted' : 'stale', revision };
+        }, this.writeLockOptions);
+      } catch (error) {
+        if (error instanceof HistoryWriteLockError) throw new UsageHistoryError('storage_unavailable');
+        throw error;
+      }
     });
   }
 
