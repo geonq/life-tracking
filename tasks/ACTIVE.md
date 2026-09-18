@@ -1,98 +1,46 @@
 # Active LifeOS execution
 
-Status: IN PROGRESS — updated 2026-09-18 Europe/Berlin.
+Status: IN PROGRESS — updated 2026-09-19 Europe/Berlin.
 
-The authoritative source checkpoint is clean `main` at `4db1eaa`, aligned
-with `origin/main`. Release remains **NO-GO**. The frozen registry contains
-258 leaves, 7 aliases, and 0 formally accepted leaves; this is acceptance
-evidence, not an implementation percentage.
+main is clean at 8370744 before the accepted Planning Storage Packet A checkpoint. Release remains NO-GO. The 258-leaf registry is acceptance evidence, not an implementation percentage.
 
 ## Product authority
 
-- Native SwiftUI/WidgetKit on Mac and iPhone is the product.
-- Windows over Tailscale is the private structured-data/document boundary.
-- Use truthful live data. Production never silently falls back to fixtures.
-- Calendar, Reminders, Obsidian, HealthKit/Zepp, finance and tax retain their
-  domain authority; do not create competing mutable stores.
-- No generic advisor or conversational AI. Calorie-photo estimation is the
-  only in-app AI flow.
-- Use SF Pro/system typography, semantic icon abstraction, the brand palette,
-  green estimates, orange calories, compact hierarchy, Notion-style calendar
-  scrolling/pinch, and interruptible motion with Reduce Motion final states.
+- Native SwiftUI/WidgetKit on Mac and iPhone is the product; Windows over Tailscale is the private structured-data/document boundary.
+- Use truthful live data. Calendar, Reminders, Obsidian, HealthKit/Zepp, finance and tax retain their domain authority; do not add a competing universal store.
+- No generic advisor or conversational AI. Calorie-photo estimation is the only in-app AI flow.
+- Use SF Pro/system typography, semantic icons, brand palette, green estimates, orange calories, compact hierarchy, Notion-style calendar scrolling/pinch, interruptible motion and Reduce Motion final states.
 
-## Current evidence
+## Current accepted packet
 
-- Finance packets cover institution detection/import, mapping/reimport,
-  recurring Manage Payment controls, investment/Robinhood validation, and
-  bounded live-readback parsing. They are source-reviewed and locally tested;
-  live provider acceptance is still open.
-- Usage packets cover provider-neutral registry management, Claude retention,
-  manual Gemini subscription readings and compact hierarchy. Gemini API and
-  Gemini subscription are separate products; automatic subscription quota is
-  unsupported without an official endpoint.
-- Windows disposable recovery/source suites and the storage guard pass. The
-  canonical host currently has Tailscale and BitLocker healthy but LifeOSAPI
-  stopped, LifeOSGateway absent, no LifeOS listener, and only the legacy sync
-  task Ready.
-- The current serial Mac logic lane is **193/193 passed**. A focused stability
-  lane is **1/1 passed** while an isolated manual LifeOSMac build stayed open.
-  The three old `EXC_BAD_ACCESS` reports belong to temporary XCTest hosts; a
-  separate `SIGABRT` came only from an invalid direct-Mach-O launch. The normal
-  LaunchServices fixture produced no new crash. Manual visual checks now launch through
-  `scripts/launch_macos_visual_fixture.sh` under a dedicated bundle ID, so
-  UI-test relaunch cleanup cannot close the inspected app. Receipt:
-  `artifacts/final/stability/2026-09-18-lifeosmac.md`.
-- Generic iOS SDK/build-for-testing compiles; CoreSimulator is unavailable and
-  physical iPhone/runtime evidence remains open.
-- Mac Home composition is pushed at `d2ece98`: the reviewed populated and
-  unavailable dark snapshot matrix passes at 800x600, 1200x800, and 1512x982;
-  geometry checks pass **2/2** and six kept captures were manually approved.
-- The bounded Obsidian Canvas/Markdown codec and value binding packet is pushed
-  at `f53c77c`; focused tests are **31/31**, the independent smoke harness
-  passed, and the post-commit Mac logic lane is **193/193**. Durable vault
-  storage, conflicts, graph/UI, gateway transport, and sync remain open.
-- The tax parser security tranche is pushed at `f62ef9e` after Astra approval;
-  actual-source probes and the generic iOS SDK build-for-testing cover grouped
-  and legacy formats, malformed boundaries, and oversized cancellation.
-- Cross-process UsageHistory locking is pushed at `dfeab04` after Astra
-  acceptance; 55 focused/160 full API tests, typecheck, build and diff checks
-  pass, with child contention, deadlines, release races and orphan behavior.
-- Canonical Windows preflight is STOP/NO-GO; the sanitized receipt is
-  `artifacts/final/windows/preflight-4db1eaa-20260918.md`. SSH/local gates pass;
-  strict journal/progress, ACL/reparse, writer provenance and candidate source
-  identity remain open.
+- Planning Storage Packet A is Astra Medium ACCEPTED. It adds strict additive-key decoding, pre-allocation payload bounds, NUL-safe explicit-length SQLite text binding and adversarial durability tests.
+- Evidence receipt: artifacts/final/planning-core/packet-a-repair-20260919.md.
+- Controller evidence: storage guard PASS with 40.6 GiB free; Mac build-for-testing PASS; focused Mac durability 19/19; generic iOS device SDK build PASS. Simulator/physical device remain open.
+- Packet is not committed yet; commit and push are the next action.
+
+## Existing evidence
+
+- Finance packets cover institution detection/import, mapping/reimport, recurring Manage Payment controls, investment/Robinhood validation and bounded live readback. Live provider acceptance remains open.
+- Usage packets cover provider-neutral registry, Claude retention, manual Gemini subscription readings and compact hierarchy; automatic subscription quota is unsupported without an official endpoint.
+- Windows disposable source suites and storage guard pass. Canonical host currently has Tailscale/BitLocker healthy, LifeOSAPI stopped, LifeOSGateway absent, no LifeOS listener and only the legacy sync task Ready.
+- Mac Home d2ece98 passed geometry 2/2 and dark snapshot acceptance 1/1; stability receipt records focused 1/1 with an isolated manual fixture alive.
+- Obsidian Canvas/Markdown codec/value binding f53c77c passed focused 31/31 and smoke checks; durable store, conflict journal, graph/UI, gateway and sync remain open.
+- Tax parser f62ef9e and UsageHistory locking dfeab04 are pushed and Astra-accepted. Core Mac logic receipt is 193/193; generic iOS compile passes while CoreSimulator is unavailable.
+- Canonical Windows preflight is STOP/NO-GO: artifacts/final/windows/preflight-4db1eaa-20260918.md.
 
 ## Remaining work
 
-1. Complete the strict disposable Windows diagnostic, then the canonical
-   candidate/preflight and supervised recovery/install,
-   service/ACL/Serve/health/readiness/listener verification, and rollback.
-2. Verify real Enable Banking values, consent/revoke/freshness, recurring
-   reconciliation, Trade Republic import, and Robinhood/net-worth separation.
-3. Build on the committed Obsidian Canvas codec with durable vault storage,
-   journal/conflicts, graph/spatial index, native views, bounded gateway route,
-   and live round-trip wiring.
-4. Verify LifeOS-owned workouts and physical Zepp/HealthKit provenance;
-   leave proprietary Zepp fields unavailable without evidence.
-5. Verify lock-screen and existing widgets, App Group, signing, background
-   refresh, and honest Morning Sync/USB Refresh Shortcuts on the iPhone.
-6. Perform route-level visual/motion review and the final Astra security
-   review, then close all release-blocking findings.
+1. Commit/push Packet A, then implement durable Obsidian vault storage, publication journal, conflict copies/idempotency, graph/spatial index, native views, bounded gateway route and live round trip.
+2. Finish Windows candidate verification and supervised recovery/install, then verify service identity/ACLs, Serve, health/readiness, listener, restart and rollback.
+3. Verify live Enable Banking, recurring reconciliation, Trade Republic import, Robinhood/net-worth separation and the accelerated Windows outage.
+4. Implement/verify LifeOS-owned workouts and physical Zepp/HealthKit provenance; leave proprietary Zepp fields unavailable without evidence.
+5. Verify existing and lock-screen widgets, App Group, signing, background refresh, native Shortcuts and physical iPhone behavior.
+6. Perform route-level visual/motion acceptance and final batched Astra security review, then close every release-blocking finding.
 
 ## Worker contract
 
-Luna Max receives one exact disjoint file set at the current SHA. Astra Medium
-reviews the actual diff and evidence after each meaningful batch. Every worker
-returns changed paths, tests/exit codes, evidence paths, complexity, and open
-uncertainty. Unexpected scope, a data-authority conflict, a destructive
-migration, or a reproducible crash stops the tranche.
+Luna Max receives one exact disjoint file set at the current SHA. Astra Medium reviews the actual diff and evidence after each meaningful batch. Workers report changed paths, tests/exit codes, evidence, complexity and uncertainty. Unexpected scope, destructive migration, security-boundary change or reproducible crash stops the tranche.
 
-Every accepted tranche is committed and pushed to `main`, checked for local /
-remote SHA parity, and reflected in `Coordination/HANDOFF.md`,
-`Coordination/PHASE_STATUS.md`, and this file. Apple lanes use one serial
-`xcodebuild` process with the storage guard; quiet compilation continues until
-the explicit result. Completed disposable processes and caches are cleaned
-through targeted, owned paths only.
+Every accepted tranche is committed and pushed to main, checked for local/remote SHA parity, and reflected in HANDOFF, PHASE_STATUS and this file. Apple lanes use one serial xcodebuild process with the storage guard; quiet compilation continues until an explicit result. Clean only targeted disposable processes/caches.
 
-See `tasks/final-execution-plan.md` for exact file ownership, dependencies,
-tests, evidence and stop conditions.
+See tasks/final-execution-plan.md for ownership, dependencies, tests and stop conditions.

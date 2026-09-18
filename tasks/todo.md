@@ -1,7 +1,8 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-18 Europe/Berlin. Release: **NO-GO**. Current pushed
-checkpoint: `f53c77c`. Do not publish completion percentages; use the evidence
+Updated 2026-09-19 Europe/Berlin. Release: **NO-GO**. Current pushed
+checkpoint before Packet A: `8370744`; Packet A is Astra-accepted and pending
+checkpoint. Do not publish completion percentages; use the evidence
 ledger and the classifications in `tasks/final-execution-plan.md`.
 
 ## Completed checkpoints
@@ -19,6 +20,9 @@ ledger and the classifications in `tasks/final-execution-plan.md`.
 - Obsidian Canvas value packet: bounded Canvas/Markdown codecs and binding,
   **31/31** focused tests, independent smoke pass, and current Mac **193/193**
   receipt at `f53c77c`. Durable store, UI, graph, transport, and sync remain.
+- Planning Storage Packet A: additive-key validation, pre-allocation payload
+  bounds, NUL-safe SQLite text binding, and adversarial durability coverage.
+  Astra accepted; receipt: `artifacts/final/planning-core/packet-a-repair-20260919.md`.
 
 ## Ordered execution
 

@@ -1,12 +1,10 @@
 # LifeOS final execution plan
-
 Prepared by Astra Medium from the Luna Max audit on 2026-09-18. Baseline:
-`4db1eaa`, clean `main`, aligned with
-`origin/main`. Release is **NO-GO**. The 258-leaf registry has 0 accepted
+`8370744`, clean `main`, aligned with
+`origin/main` before the accepted Packet A checkpoint. Release is **NO-GO**. The 258-leaf registry has 0 accepted
 leaves; it is an acceptance ledger, not a completion percentage.
 
 ## Rules for every tranche
-
 1. One Luna Max implementation worker at a time. Astra Medium reviews the
    actual diff and evidence in batches. Close each worker after its report.
 2. Dispatch from the current SHA with exact file paths, symbols, invariants,
@@ -25,7 +23,6 @@ leaves; it is an acceptance ledger, not a completion percentage.
    validation. A quiet compile is not a hang; an interruption is unverified.
 
 ## 1. Stability and truth ledger — L/S (Mac Home, tax parser, usage lock accepted)
-
 The three historical `EXC_BAD_ACCESS` reports are real crashes in temporary
 XCTest hosts. The stability receipt shows a separate manual LifeOSMac build
 survived a focused serial 1/1 test and no new crash report appeared. Do not
@@ -133,7 +130,12 @@ the standard format.
 Use expected content versions, same-directory atomic replacement, recoverable
 journal entries and conflict copies. Preferred topology is a selected
 non-Uni iCloud vault under `LifeOS/`; do not select a vault by guessing and do
-not silently overwrite Obsidian edits.
+not silently overwrite Obsidian edits. Packet A’s mutation journal/domain
+core is implemented and Astra-accepted; its receipt is
+`artifacts/final/planning-core/packet-a-repair-20260919.md`. The next packet
+must add publication outcome state, durable keepBoth/conflict idempotency,
+bounded recovery progress, terminal payload reclamation, and vault
+coordination/bookmark/symlink closure.
 
 **Interaction:** new `PlanningGraphProjection.swift`, `PlanningSpatialIndex.swift`,
 `ios/LifeOS/Modules/Planning/{PlanningCanvasView,PlanningNodeInspector}.swift`
@@ -192,8 +194,7 @@ expected/observed result, remediation and retest.
 
 ## Immediate next dispatch
 
-The next dispatch is the strict disposable Windows diagnostic packet, followed
-by canonical candidate/preflight. In parallel only with disjoint scopes,
-dispatch Canvas durability or workout source hardening. Do not start live
-finance or physical-device acceptance before backend/device prerequisites.
-Finish each packet with Astra review, commit, push, and handoff update.
+Checkpoint Packet A, then dispatch the next Canvas durability packet from the
+new SHA. Astra must specify exact files, symbols, invariants, failure states
+and evidence before Luna edits. Keep Windows/workouts/live finance disjoint;
+every packet ends with review, commit, push and handoff update.
