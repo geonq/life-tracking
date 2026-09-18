@@ -152,7 +152,8 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         let expectedContentWidths: [(outer: CGFloat, content: CGFloat, columns: Int)] = [
             (800, 752, 2),
             (900, 852, 2),
-            (1_200, 1_040, 2)
+            (1_200, 1_152, 2),
+            (1_512, 1_200, 2)
         ]
 
         for expected in expectedContentWidths {
@@ -162,11 +163,13 @@ final class LifeOSMacSnapshotTests: XCTestCase {
             )
             XCTAssertEqual(contentWidth, expected.content, accuracy: 0.001)
             XCTAssertEqual(OverviewLayoutContract.columnCount(for: contentWidth), expected.columns)
-            XCTAssertLessThanOrEqual(
-                OverviewLayoutContract.minimumRequiredWidth(for: contentWidth),
-                contentWidth,
-                "Two-column Home layout must fit inside the measured content width at \(expected.outer) pt."
-            )
+            if expected.columns == 2 {
+                XCTAssertLessThanOrEqual(
+                    OverviewLayoutContract.minimumRequiredWidth(for: contentWidth),
+                    contentWidth,
+                    "Two-column Home layout must fit inside the measured content width at \(expected.outer) pt."
+                )
+            }
         }
 
         // The breakpoint is measured after the parent has supplied its actual
@@ -174,7 +177,80 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         // coupling the test to a particular sidebar implementation.
         XCTAssertEqual(OverviewLayoutContract.columnCount(for: 719.99), 1)
         XCTAssertEqual(OverviewLayoutContract.columnCount(for: 720), 2)
-        XCTAssertEqual(OverviewLayoutContract.maxContentWidth, 1_040)
+        XCTAssertEqual(OverviewLayoutContract.maxContentWidth, 1_200)
+        XCTAssertEqual(OverviewLayoutContract.columnSpacing, 16)
+        XCTAssertEqual(OverviewLayoutContract.usageSummaryWidth, 240)
+        XCTAssertEqual(OverviewLayoutContract.usageSummaryChartGap, 24)
+        XCTAssertEqual(OverviewLayoutContract.usageChartMinimumHeight, 80)
+        XCTAssertEqual(OverviewLayoutContract.usageChartMaximumHeight, 96)
+    }
+
+    func testHomeFullShellGeometryContract() {
+        let dividerWidth: CGFloat = 1
+        let cases: [(window: CGFloat, sidebar: CGFloat, columns: Int)] = [
+            (800, 52, 1),
+            (900, 208, 1),
+            (1_200, 208, 2),
+            (1_512, 208, 3),
+            (1_800, 208, 3)
+        ]
+
+        for expected in cases {
+            let detailWidth = expected.window - expected.sidebar - dividerWidth
+            XCTAssertGreaterThan(detailWidth, 0)
+            let detailMetrics = LifeOSResponsiveMetrics(width: detailWidth)
+            let contentWidth = OverviewLayoutContract.measuredContentWidth(
+                availableWidth: detailMetrics.contentWidth
+            )
+            let expectedContentWidth = min(
+                detailMetrics.contentWidth,
+                OverviewLayoutContract.maxContentWidth
+            )
+            XCTAssertEqual(contentWidth, expectedContentWidth, accuracy: 0.001)
+            XCTAssertLessThanOrEqual(
+                contentWidth,
+                detailMetrics.contentWidth,
+                "Home content must fit inside the shell-derived detail width at \(Int(expected.window))pt."
+            )
+            XCTAssertEqual(
+                OverviewLayoutContract.supportingColumnCount(
+                    for: contentWidth,
+                    itemCount: 3
+                ),
+                expected.columns,
+                "Home supporting grid column count at \(Int(expected.window))pt"
+            )
+
+            let leadingOrigin = detailMetrics.contentOriginX(for: contentWidth)
+            let centeredOrigin = detailMetrics.contentOriginX(
+                for: contentWidth,
+                alignment: .centered
+            )
+            XCTAssertEqual(
+                centeredOrigin - leadingOrigin,
+                max(0, (detailMetrics.contentWidth - contentWidth) / 2),
+                accuracy: 0.001,
+                "Centered Home placement must use the shell-derived free detail space"
+            )
+
+            let contentOriginInWindow = expected.sidebar + dividerWidth + centeredOrigin
+            XCTAssertGreaterThanOrEqual(
+                contentOriginInWindow,
+                expected.sidebar + dividerWidth,
+                "Centered Home content must begin inside the detail pane"
+            )
+            XCTAssertLessThanOrEqual(
+                contentOriginInWindow + contentWidth,
+                expected.window,
+                "Centered Home content must remain inside the full shell"
+            )
+            XCTAssertEqual(
+                detailWidth,
+                expected.window - expected.sidebar - dividerWidth,
+                accuracy: 0.001,
+                "Detail width must be derived from the window, sidebar, and one-pixel divider"
+            )
+        }
     }
 
     /// RF-20: the Finance card's Wealth row shows the real observed wealth
@@ -206,15 +282,55 @@ final class LifeOSMacSnapshotTests: XCTestCase {
             ("fitness", rootSurface(module: .fitness)),
             ("settings", rootSurface(module: .settings))
         ]
-        for width in [900.0, 1_200.0, 1_512.0, 1_800.0] {
+        let reviewViewports: [(width: CGFloat, height: CGFloat)] = [
+            (800, 600),
+            (900, frame.height),
+            (1_200, 800),
+            (1_512, 982),
+            (1_800, frame.height)
+        ]
+        for viewport in reviewViewports {
             for (name, surface) in surfaces {
                 render(
                     surface,
-                    named: "responsive-\(name)-\(Int(width))",
-                    frameSize: CGSize(width: width, height: frame.height),
+                    named: "responsive-\(name)-\(Int(viewport.width))x\(Int(viewport.height))",
+                    frameSize: CGSize(width: viewport.width, height: viewport.height),
                     colorScheme: .light
                 )
             }
+        }
+    }
+
+    /// These dark Home captures are retained as manual visual-review
+    /// attachments. `render` verifies that the requested viewport was used and
+    /// produced a nonempty image; pixel quality and hierarchy still require
+    /// inspection of the kept attachments.
+    func testHomeDarkAcceptanceSnapshotsIncludingUnavailable() {
+        let viewports: [(width: CGFloat, height: CGFloat)] = [
+            (800, 600),
+            (1_200, 800),
+            (1_512, 982)
+        ]
+
+        for viewport in viewports {
+            render(
+                rootSurface(module: .home),
+                named: "Home-shell-dark-\(Int(viewport.width))x\(Int(viewport.height))",
+                frameSize: CGSize(width: viewport.width, height: viewport.height),
+                colorScheme: .dark,
+                reduceMotion: true
+            )
+            render(
+                OverviewView(
+                    snapshot: .unavailable(),
+                    usageSnapshots: [],
+                    openDestination: { _ in }
+                ),
+                named: "Home-unavailable-dark-\(Int(viewport.width))x\(Int(viewport.height))",
+                frameSize: CGSize(width: viewport.width, height: viewport.height),
+                colorScheme: .dark,
+                reduceMotion: true
+            )
         }
     }
 
@@ -1280,6 +1396,19 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         window.contentView = hostingView
         window.layoutIfNeeded()
         hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(
+            hostingView.bounds.width,
+            renderSize.width,
+            accuracy: 0.5,
+            "Rendered viewport width must match the requested Home review width for \(name)"
+        )
+        XCTAssertEqual(
+            hostingView.bounds.height,
+            renderSize.height,
+            accuracy: 0.5,
+            "Rendered viewport height must match the requested Home review height for \(name)"
+        )
 
         // Allow SwiftUI tasks and chart entrance animations to settle before
         // capturing; callers can use a short deterministic interval to inspect entrance state.

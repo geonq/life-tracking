@@ -1,5 +1,13 @@
 import SwiftUI
 
+/// Alignment for a readable child inside the available detail-pane width.
+/// Existing containers remain leading-aligned; centered placement is opt-in
+/// for pages whose desktop composition has a wider, bounded canvas.
+public enum LifeOSResponsiveContentAlignment: Equatable, Sendable {
+    case leading
+    case centered
+}
+
 /// Width-derived values shared by primary LifeOS surfaces. The values are
 /// pure so column and viewport decisions can be unit-tested without
 /// instantiating a view.
@@ -101,6 +109,20 @@ public struct LifeOSResponsiveMetrics: Equatable, Sendable {
 
     /// Pure metrics for the frame emitted by the responsive containers.
     public var contentOriginX: CGFloat { sidebarWidth + horizontalGutter }
+
+    public func contentOriginX(
+        for childWidth: CGFloat,
+        gutter: CGFloat? = nil,
+        alignment: LifeOSResponsiveContentAlignment = .leading
+    ) -> CGFloat {
+        let safeGutter = resolvedGutter(gutter ?? horizontalGutter)
+        let availableAfterGutters = contentWidth(for: safeGutter)
+        let safeChildWidth = min(max(0, childWidth), availableAfterGutters)
+        let centeringSpace = max(0, availableAfterGutters - safeChildWidth)
+        let alignmentOffset = alignment == .centered ? centeringSpace / 2 : 0
+        return sidebarWidth + safeGutter + alignmentOffset
+    }
+
     public var renderedContentWidth: CGFloat { maxContentWidth }
     public var renderedContentMaxX: CGFloat {
         min(width, contentOriginX + renderedContentWidth)
@@ -169,6 +191,7 @@ private struct LifeOSResponsiveContentLayout: Layout {
     let bottomPadding: CGFloat
     let maxReadableWidth: CGFloat?
     let sidebarWidth: CGFloat
+    let alignment: LifeOSResponsiveContentAlignment
 
     private func values(for width: CGFloat) -> (metrics: LifeOSResponsiveMetrics, gutter: CGFloat, childWidth: CGFloat) {
         let metrics = LifeOSResponsiveMetrics(width: width, sidebarWidth: sidebarWidth)
@@ -231,7 +254,12 @@ private struct LifeOSResponsiveContentLayout: Layout {
         let layoutValues = values(for: bounds.width)
         subview.place(
             at: CGPoint(
-                x: bounds.minX + layoutValues.metrics.sidebarWidth + layoutValues.gutter,
+                x: bounds.minX
+                    + layoutValues.metrics.contentOriginX(
+                        for: layoutValues.childWidth,
+                        gutter: layoutValues.gutter,
+                        alignment: alignment
+                    ),
                 y: bounds.minY + max(0, topPadding)
             ),
             anchor: .topLeading,
@@ -252,6 +280,7 @@ public struct LifeOSResponsiveContentContainer<Content: View>: View {
     private let bottomPadding: CGFloat
     private let maxReadableWidth: CGFloat?
     private let sidebarWidth: CGFloat
+    private let alignment: LifeOSResponsiveContentAlignment
     private let content: Content
 
     public init(
@@ -260,6 +289,7 @@ public struct LifeOSResponsiveContentContainer<Content: View>: View {
         bottomPadding: CGFloat = 0,
         maxReadableWidth: CGFloat? = LifeOSTokens.contentMaxWidth,
         sidebarWidth: CGFloat = 0,
+        alignment: LifeOSResponsiveContentAlignment = .leading,
         @ViewBuilder content: () -> Content
     ) {
         self.horizontalPadding = horizontalPadding
@@ -267,6 +297,7 @@ public struct LifeOSResponsiveContentContainer<Content: View>: View {
         self.bottomPadding = bottomPadding
         self.maxReadableWidth = maxReadableWidth
         self.sidebarWidth = sidebarWidth
+        self.alignment = alignment
         self.content = content()
     }
 
@@ -277,7 +308,8 @@ public struct LifeOSResponsiveContentContainer<Content: View>: View {
                 topPadding: topPadding,
                 bottomPadding: bottomPadding,
                 maxReadableWidth: maxReadableWidth,
-                sidebarWidth: sidebarWidth
+                sidebarWidth: sidebarWidth,
+                alignment: alignment
             )
         ) {
             LifeOSResponsiveContentPayload(content: content)

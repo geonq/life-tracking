@@ -16,8 +16,10 @@ struct OverviewView: View {
     private let openDestination: ((LifeOSDeepLink) -> Void)?
     private let openHomeDestination: ((LifeOSHomeDestination) -> Void)?
     private let isExternallyRouted: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding private var showingUsage: Bool
     @State private var selectedDetail: OverviewDetail?
+    @State private var financeHovering = false
 
     enum OverviewDetail: Hashable {
         case clipper
@@ -91,7 +93,8 @@ struct OverviewView: View {
                 horizontalPadding: responsiveHorizontalInset,
                 topPadding: headerTopSpacing,
                 bottomPadding: contentBottomPadding,
-                maxReadableWidth: OverviewLayoutContract.maxContentWidth
+                maxReadableWidth: OverviewLayoutContract.maxContentWidth,
+                alignment: homeContentAlignment
             ) {
                 VStack(alignment: .leading, spacing: LifeOSTokens.sectionGap) {
                     header
@@ -130,6 +133,14 @@ struct OverviewView: View {
 #endif
     }
 
+    private var homeContentAlignment: LifeOSResponsiveContentAlignment {
+#if os(macOS)
+        .centered
+#else
+        .leading
+#endif
+    }
+
     /// Usage is the lead signal. The other three surfaces form a responsive
     /// bento row on regular widths and a readable single column on iPhone.
     @ViewBuilder
@@ -152,6 +163,7 @@ struct OverviewView: View {
 
             if let usage = visibleSections.first(where: { $0.kind == .llm }) {
                 sectionRow(usage, featured: true)
+                    .padding(.bottom, LifeOSTokens.Space.md)
             }
 
             supportingDashboard(sections: supportingSections)
@@ -160,7 +172,7 @@ struct OverviewView: View {
     }
 
     private func supportingDashboard(sections: [OverviewSection]) -> some View {
-        OverviewSupportingLayout {
+        OverviewSupportingLayout(stretchesRows: true) {
             ForEach(sections) { section in
                 sectionRow(section)
             }
@@ -211,7 +223,7 @@ struct OverviewView: View {
     /// remain navigable, but they never present an unavailable operation as a
     /// button of their own.
     private var noSourceDashboard: some View {
-        OverviewSupportingLayout {
+        OverviewSupportingLayout(stretchesRows: false) {
             noSourceStatusBlock
             noSourceModuleList
         }
@@ -278,6 +290,7 @@ struct OverviewView: View {
 
                 if let settingsAction {
                     LifeOSButton("Open Settings", variant: .tertiary, action: settingsAction)
+                        .fixedSize(horizontal: true, vertical: false)
                         .accessibilityIdentifier("overview-no-source-settings")
                 }
             }
@@ -635,10 +648,11 @@ struct OverviewView: View {
     @ViewBuilder
     private func financeSectionRow(_ section: OverviewSection) -> some View {
         if let openDestination {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 0) {
                 Button { openDestination(.finance) } label: {
                     OverviewMetricCard(
                         section: section,
+                        showsSurface: false,
                         usageSnapshots: usageSnapshots,
                         fitnessSnapshot: fitnessSnapshot,
                         financeSummary: financeSummary,
@@ -649,8 +663,27 @@ struct OverviewView: View {
                 .accessibilityIdentifier("overview-finance-link")
                 .accessibilityHint("Opens Finance")
 
+                Divider()
+                    .overlay(LifeOSTokens.hairlineBorder)
+                    .padding(.horizontal, LifeOSTokens.Space.md)
                 financeWealthLink
+                    .padding(.horizontal, LifeOSTokens.Space.xs)
+                    .padding(.bottom, LifeOSTokens.Space.xs)
             }
+            .frame(maxHeight: .infinity, alignment: .top)
+            .flatCard(cornerRadius: LifeOSTokens.Radius.widget)
+            // Keep the existing Mac hover contract on the combined surface.
+            .overlay(
+                RoundedRectangle(cornerRadius: LifeOSTokens.Radius.widget, style: .continuous)
+                    .stroke(
+                        financeHovering ? LifeOSTokens.strongBorder : Color.clear,
+                        lineWidth: 1
+                    )
+            )
+            .animation(reduceMotion ? nil : LifeOSMotion.hover, value: financeHovering)
+#if os(macOS)
+            .onHover { financeHovering = $0 }
+#endif
         } else {
             OverviewMetricCard(
                 section: section,
@@ -705,12 +738,19 @@ struct OverviewView: View {
 /// already-guttered width from `LifeOSResponsiveContentContainer`, so a
 /// sidebar or split-detail proposal naturally participates in the decision.
 enum OverviewLayoutContract {
-    static let maxContentWidth: CGFloat = 1040
+    static let maxContentWidth: CGFloat = 1200
     static let twoColumnBreakpoint: CGFloat = 720
     static let columnMinimumWidth: CGFloat = 300
     static let threeColumnBreakpoint: CGFloat = 960
     static let threeColumnMinimumWidth: CGFloat = 300
-    static let columnSpacing: CGFloat = LifeOSTokens.overviewCardGap + 4
+    static let columnSpacing: CGFloat = LifeOSTokens.Space.md
+
+    static let usageWideBreakpoint: CGFloat = 720
+    static let usageSummaryWidth: CGFloat = 240
+    static let usageSummaryChartGap: CGFloat = 24
+    static let usageChartMinimumHeight: CGFloat = 80
+    static let usageChartIdealHeight: CGFloat = 88
+    static let usageChartMaximumHeight: CGFloat = 96
 
     static func measuredContentWidth(availableWidth: CGFloat) -> CGFloat {
         guard availableWidth.isFinite else { return 0 }
@@ -751,6 +791,12 @@ enum OverviewLayoutContract {
 /// pass as placement instead of relying on a stale size-class value or a
 /// second data-driven view tree.
 private struct OverviewSupportingLayout: Layout {
+    private let stretchesRows: Bool
+
+    init(stretchesRows: Bool = true) {
+        self.stretchesRows = stretchesRows
+    }
+
     private func width(for proposal: ProposedViewSize, subviews: Subviews) -> CGFloat {
         if let proposedWidth = proposal.width, proposedWidth.isFinite {
             return OverviewLayoutContract.measuredContentWidth(availableWidth: proposedWidth)
@@ -814,14 +860,14 @@ private struct OverviewSupportingLayout: Layout {
         for index in subviews.indices {
             let column = index % count
             let row = index / count
-            let size = sizes[index]
+            let height = stretchesRows ? rowHeights[row] : sizes[index].height
             subviews[index].place(
                 at: CGPoint(
                     x: bounds.minX + CGFloat(column) * (columnWidth + spacing),
                     y: rowOrigins[row]
                 ),
                 anchor: .topLeading,
-                proposal: .init(width: columnWidth, height: size.height)
+                proposal: .init(width: columnWidth, height: height)
             )
         }
     }
@@ -950,6 +996,7 @@ enum OverviewCurrencyFormatter {
 private struct OverviewMetricCard: View {
     let section: OverviewSection
     let featured: Bool
+    let showsSurface: Bool
     let usageSnapshots: [ProviderSnapshot]
     let usageAnalytics: [UsageAnalyticsSnapshot]
     let clipperState: ClipperLoadState
@@ -961,7 +1008,7 @@ private struct OverviewMetricCard: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
-    init(section: OverviewSection, featured: Bool = false, usageSnapshots: [ProviderSnapshot] = [],
+    init(section: OverviewSection, featured: Bool = false, showsSurface: Bool = true, usageSnapshots: [ProviderSnapshot] = [],
          usageAnalytics: [UsageAnalyticsSnapshot] = [],
          clipperState: ClipperLoadState = .unavailable, clipperSnapshot: ClipperSnapshot? = nil,
          fitnessSnapshot: FitnessSnapshot = .unavailable, financeSummary: FinanceSummary? = nil,
@@ -969,6 +1016,7 @@ private struct OverviewMetricCard: View {
          usageHasPartialCoverage: Bool = false) {
         self.section = section
         self.featured = featured
+        self.showsSurface = showsSurface
         self.usageSnapshots = usageSnapshots
         self.usageAnalytics = usageAnalytics
         self.clipperState = clipperState
@@ -1081,7 +1129,8 @@ private struct OverviewMetricCard: View {
         }
     }
 
-    var body: some View {
+    @ViewBuilder
+    private var cardContent: some View {
         VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
             HStack(alignment: .center, spacing: LifeOSTokens.Space.sm) {
                 LifeOSIcon(sectionIcon, context: .card)
@@ -1090,7 +1139,7 @@ private struct OverviewMetricCard: View {
 
                 VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                     Text(title)
-                        .lifeOSTypography(.label, weight: .semibold)
+                        .lifeOSTypography(.cardTitle, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.primaryText)
                 }
                 Spacer(minLength: LifeOSTokens.Space.sm)
@@ -1120,12 +1169,27 @@ private struct OverviewMetricCard: View {
             }
         }
         .padding(.horizontal, LifeOSTokens.Space.md)
-        .padding(.vertical, featured ? LifeOSTokens.Space.md : LifeOSTokens.Space.sm)
+        .padding(.vertical, LifeOSTokens.Space.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .flatCard(cornerRadius: LifeOSTokens.Radius.widget, featured: featured)
-        // §5.1 hover (macOS): border brightens to strongBorder; no offset lift.
-        .overlay(cardShape.stroke(hovering ? LifeOSTokens.strongBorder : Color.clear, lineWidth: 1))
-        .animation(reduceMotion ? nil : LifeOSMotion.hover, value: hovering)
+    }
+
+    @ViewBuilder
+    var body: some View {
+        Group {
+            if showsSurface {
+                cardContent
+                    // The row layout proposes an equal height to each card.
+                    // Expand the content before applying the surface so the
+                    // visible fill and border occupy that measured height.
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .flatCard(cornerRadius: LifeOSTokens.Radius.widget, featured: featured)
+                    // §5.1 hover (macOS): border brightens to strongBorder; no offset lift.
+                    .overlay(cardShape.stroke(hovering ? LifeOSTokens.strongBorder : Color.clear, lineWidth: 1))
+                    .animation(reduceMotion ? nil : LifeOSMotion.hover, value: hovering)
+            } else {
+                cardContent
+            }
+        }
 #if os(macOS)
         .onHover { hovering = $0 }
 #endif
@@ -1148,11 +1212,59 @@ private struct OverviewMetricCard: View {
 
     @ViewBuilder
     private var usageBody: some View {
+        if usageTrendPoints.count >= 2 {
+            ViewThatFits(in: .horizontal) {
+                usageWideBody
+                usageStackedBody
+            }
+        } else {
+            usageSummaryColumn
+        }
+    }
+
+    private var usageWideBody: some View {
+        HStack(alignment: .center, spacing: OverviewLayoutContract.usageSummaryChartGap) {
+            usageSummaryColumn
+                .frame(width: OverviewLayoutContract.usageSummaryWidth, alignment: .leading)
+
+            OverviewSparkline(points: usageTrendPoints, tint: LifeOSTokens.Module.usage)
+                .frame(maxWidth: .infinity)
+                .frame(
+                    minHeight: OverviewLayoutContract.usageChartMinimumHeight,
+                    idealHeight: OverviewLayoutContract.usageChartIdealHeight,
+                    maxHeight: OverviewLayoutContract.usageChartMaximumHeight
+                )
+                // This chart is a summary inside a tappable card. Its detail
+                // view owns chart scrubbing; the card retains the tap target.
+                .allowsHitTesting(false)
+        }
+        .frame(
+            minWidth: OverviewLayoutContract.usageWideBreakpoint,
+            maxWidth: .infinity,
+            alignment: .leading
+        )
+    }
+
+    private var usageStackedBody: some View {
         VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
+            usageSummaryColumn
+            OverviewSparkline(points: usageTrendPoints, tint: LifeOSTokens.Module.usage)
+                .frame(maxWidth: .infinity)
+                .frame(
+                    minHeight: OverviewLayoutContract.usageChartMinimumHeight,
+                    idealHeight: OverviewLayoutContract.usageChartIdealHeight,
+                    maxHeight: OverviewLayoutContract.usageChartMaximumHeight
+                )
+                .allowsHitTesting(false)
+        }
+    }
+
+    private var usageSummaryColumn: some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
             HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xs) {
                 if let remaining = leadUsageSnapshot?.smallestObservedWindow?.usedPercent.map({ 1 - $0 }) {
                     Text("\(Int((remaining * 100).rounded()))")
-                        .lifeOSTypography(.metric)
+                        .lifeOSTypography(.metricCompact)
                         .foregroundStyle(.primary)
                     Text("% remaining")
                         .lifeOSTypography(.metadata, weight: .medium)
@@ -1162,22 +1274,13 @@ private struct OverviewMetricCard: View {
                         .lifeOSTypography(.metricCompact)
                         .foregroundStyle(.primary)
                 }
-                Spacer(minLength: LifeOSTokens.Space.sm)
-                Text(leadUsageSnapshot.map { "\($0.provider.displayName) · \($0.smallestObservedWindow?.label ?? "Window")" } ?? "No connected provider")
-                    .lifeOSTypography(.metadata, weight: .medium)
-                    .foregroundStyle(LifeOSTokens.secondaryText)
-                    .multilineTextAlignment(.trailing)
-                    .lineLimit(2)
             }
 
-            if usageTrendPoints.count >= 2 {
-                OverviewSparkline(points: usageTrendPoints, tint: LifeOSTokens.Module.usage)
-                    .frame(height: 36)
-                    // This chart is a summary inside a tappable card. Its
-                    // detail view owns chart scrubbing; letting this overlay
-                    // hit-test would swallow the card's navigation tap.
-                    .allowsHitTesting(false)
-            }
+            Text(leadUsageSnapshot.map { "\($0.provider.displayName) · \($0.smallestObservedWindow?.label ?? "Window")" } ?? "No connected provider")
+                .lifeOSTypography(.metadata, weight: .medium)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
 
             Text(usageSummaryMetadata)
                 .lifeOSTypography(.metadata)
@@ -1185,6 +1288,7 @@ private struct OverviewMetricCard: View {
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var usageSummaryMetadata: String {
@@ -1230,8 +1334,8 @@ private struct OverviewMetricCard: View {
                     Text(fitnessSnapshot.source.freshness)
                     .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.secondaryText)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else if section.provenance.quality == .demo {
                     overviewFallbackMetrics
                 } else {
@@ -1252,8 +1356,8 @@ private struct OverviewMetricCard: View {
                     Text(financeState == .stale ? "Stale source · refresh required" : "Observed finance summary")
                     .lifeOSTypography(.metadata)
                         .foregroundStyle(financeState == .stale ? LifeOSTokens.warning : LifeOSTokens.secondaryText)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.72)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else if section.provenance.quality == .demo {
                     overviewFallbackMetrics
                 } else {
@@ -1273,7 +1377,7 @@ private struct OverviewMetricCard: View {
                 ValueMetric(value: clipperHomeMetricValue(containing: "Subscribers"), label: "Subscribers")
                 ValueMetric(value: clipperHomeMetricValue(containing: "Revenue"), label: "Revenue")
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minWidth: 360, maxWidth: .infinity, alignment: .leading)
 
             LazyVGrid(
                 columns: [
@@ -1591,7 +1695,7 @@ private struct ValueMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
             Text(value ?? "—")
-                .lifeOSTypography(.button, weight: .semibold)
+                .lifeOSTypography(.cardTitle, weight: .semibold)
                 .monospacedDigit()
                 .foregroundStyle(.primary)
                 .lineLimit(1)
