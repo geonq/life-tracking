@@ -1,7 +1,7 @@
 # LifeOS final execution plan
 
 Prepared by Astra Medium from the Luna Max audit on 2026-09-18. Baseline:
-`f62ef9e`, clean `main`, aligned with
+`dfeab04`, clean `main`, aligned with
 `origin/main`. Release is **NO-GO**. The 258-leaf registry has 0 accepted
 leaves; it is an acceptance ledger, not a completion percentage.
 
@@ -24,7 +24,7 @@ leaves; it is an acceptance ledger, not a completion percentage.
    result/DerivedData path, the storage guard, and independent xcresult
    validation. A quiet compile is not a hang; an interruption is unverified.
 
-## 1. Stability and truth ledger — L/S (Mac Home and tax parser accepted)
+## 1. Stability and truth ledger — L/S (Mac Home, tax parser, usage lock accepted)
 
 The three historical `EXC_BAD_ACCESS` reports are real crashes in temporary
 XCTest hosts. The stability receipt shows a separate manual LifeOSMac build
@@ -192,9 +192,8 @@ expected/observed result, remediation and retest.
 
 ## Immediate next dispatch
 
-The next dispatch is the cross-process usage-history lock packet, followed by
-the canonical Windows candidate/preflight packet with exact inspected
-parameters. In parallel only with disjoint scopes, dispatch Canvas durability
-or workout source hardening. Do not start live finance or physical-device
-acceptance before backend/device prerequisites. Finish each packet with Astra
-review, commit, push, and handoff update.
+The next dispatch is the canonical Windows candidate/preflight packet with
+exact inspected parameters. In parallel only with disjoint scopes, dispatch
+Canvas durability or workout source hardening. Do not start live finance or
+physical-device acceptance before backend/device prerequisites. Finish each
+packet with Astra review, commit, push, and handoff update.

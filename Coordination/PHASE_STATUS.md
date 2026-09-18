@@ -5,7 +5,7 @@ Updated 2026-09-18 Europe/Berlin.
 ## Release state
 
 - Release: **NO-GO**.
-- `main` and `origin/main` are aligned at `f62ef9e`.
+- `main` and `origin/main` are aligned at `dfeab04`.
 - The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0
   formally accepted leaves. This is an evidence ledger, not a percentage.
 - The old `worker/t11a-shared-visual-foundation` branch is patch-equivalent to
@@ -52,6 +52,10 @@ Updated 2026-09-18 Europe/Berlin.
   scanner preserves legacy/grouped/currency formats, rejects malformed
   boundaries, and propagates cancellation through oversized cleanup. Actual
   source probes and the generic iOS SDK build-for-testing pass.
+- Cross-process UsageHistory locking is pushed at `dfeab04` after Astra
+  acceptance: 55 focused/160 full API tests, typecheck/build/diff checks pass;
+  child contention, deadline, release, symlink, invalid-parent and orphan
+  behavior are covered. Windows runtime/ACL validation remains open.
 
 ## Backend state
 
@@ -81,7 +85,7 @@ Updated 2026-09-18 Europe/Berlin.
 - Widgets, lock-screen rendering, App Group, personal signing renewal, native
   Shortcuts, background refresh, and physical iPhone behavior.
 - Whole-app visual/motion acceptance and final batched security review,
-  including tax regex/privacy, cross-process usage writes, and deployed
+  including tax regex/privacy, the accepted usage-lock receipt, and deployed
   identity-bound transport.
 - Automatic Gemini subscription quota/authentication remains unsupported until
   an official endpoint is verified. Gemini API usage remains a separate

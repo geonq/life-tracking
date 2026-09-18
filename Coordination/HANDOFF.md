@@ -9,10 +9,10 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. `main` is clean and pushed at `f62ef9e` (`fix: bound
-  tax money parsing`), on top of the accepted Mac Home repair `d2ece98` and
-  the Canvas codec packet `f53c77c`. Earlier source checkpoints remain
-  `4856fae`, `1d57435`, `5aa3fb1`, `1956569`, and `273f4dd`.
+- Release is **NO-GO**. `main` is clean and pushed at `dfeab04` (`fix: serialize
+  usage history across processes`), on top of Mac Home `d2ece98`, Canvas
+  `f53c77c`; earlier checkpoints: `4856fae`, `1d57435`, `5aa3fb1`, `1956569`,
+  `273f4dd`.
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
@@ -112,6 +112,10 @@ tranches. Keep the release verdict honest; do not call the product done.
 - Tax parser security scanner is pushed at `f62ef9e` after Astra approval;
   actual-source probes and serial iOS SDK build-for-testing pass, including
   grouped/legacy labels, malformed boundaries, and oversized cancellation.
+- Cross-process UsageHistory locking is pushed at `dfeab04`; Astra accepted
+  after two reviews: 55 focused/160 full API tests and typecheck/build/diff
+  pass; transaction serialization, monotonic deadlines, authenticated release
+  and fail-closed orphan locks are covered.
 
 ## LifeOSMac stability receipt
 
@@ -134,23 +138,20 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## Storage policy
 
-- `scripts/maintain_macos_storage.sh` is report/dry-run by default; deletion
-  requires `--apply`, uses scoped generated paths, skips booted simulators,
-  refuses active or uncheckable `xcodebuild`, and fails build lanes below a
-  15 GiB floor.
-- Apple validation/prerelease lanes call the guard before every lane and use
-  serialized `xcodebuild -jobs 1`. No scheduler was added.
-- The guard is the required preflight for future Apple lanes. Generated
-  DerivedData and validation artifacts have owned paths; source, personal
-  data, final evidence, and the kept simulator are outside cleanup scope.
+- `scripts/maintain_macos_storage.sh` is report/dry-run by default; `--apply`
+  deletion is scoped, skips booted simulators, refuses active/uncheckable
+  `xcodebuild`, and fails build lanes below a 15 GiB floor.
+- Apple lanes call the guard before every lane, use serialized
+  `xcodebuild -jobs 1`, and have no scheduler.
+- Guard is required before Apple lanes; generated DerivedData/evidence have
+  owned paths, while source, personal data and the kept simulator are outside.
 
 ## Open gates
 
 - Live-bank recurring reconciliation, Robinhood/net-worth verification, and
   live provider readback.
-- Automatic Gemini authentication/quota transport and Google AI Pro
-  subscription readback; the native manual boundary is complete but does not
-  claim live quota.
+- Automatic Gemini authentication/quota transport and Google AI Pro subscription
+  readback remain open; the native manual boundary does not claim live quota.
 - Canonical Windows install/listener/health/Serve/Enable Banking readback.
 - Finance live connector/import/recurring/net-worth work; Zepp workouts;
 - Obsidian Canvas durable store, conflict journal, graph/spatial index, native
@@ -163,11 +164,10 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## Next action
 
-Use `f62ef9e` plus the stability and Canvas receipts as the source of truth.
-Continue with the cross-process usage-history lock, canonical Windows
-recovery, live finance/net-worth, Canvas, fitness, widgets/Shortcuts/signing,
-visual acceptance, and final security packets. Do not rerun the full Mac suite
-without a code change or relevant failure.
+Use `dfeab04` plus the stability, Canvas, tax, and usage-lock receipts. Continue
+with canonical Windows recovery, live finance/net-worth, Canvas, fitness,
+widgets/Shortcuts/signing, visual acceptance, and final security; do not rerun
+the full Mac suite without a code change or relevant failure.
 
 ## Validation discipline
 
