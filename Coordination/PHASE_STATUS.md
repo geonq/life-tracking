@@ -3,15 +3,18 @@
 Updated 2026-09-18 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Last pushed source/current checkpoint: `1956569` (`Add validated live finance
-  readback`) on `main`; the provider-neutral native usage registry remains at
-  `273f4dd`.
+- Current checkpoints are `1d57435` (`Add manual Gemini usage tracking`) and
+  `5aa3fb1` (`Guard repo build cache cleanup`); they are ready to push with
+  this documentation update. Earlier finance and registry checkpoints are
+  `1956569` and `273f4dd`.
 - Windows disposable static, legacy Serve, native progress, native snapshot,
   and complete behavior suites pass. Behavior has one installed-service skip;
   canonical deployment remains unverified.
 - Local source harness is 75 passed/2 skipped. Native C# compile has 0 errors.
-- Storage guard/tests pass; the latest controller preflight reports 25.5 GiB
-  free. CoreSimulatorService is unavailable and no simulator is booted.
+- Storage guard `bash -n` and **10/10** tests pass. It now owns direct-child
+  `lifeos-derived-*` caches and fail-closed process probes. Seven old caches
+  totaling about 14 GiB were removed; the post-cleanup check reports 33 GiB
+  free. CoreSimulatorService is unavailable; the kept iPhone 17 entry remains.
 - Apple lanes check storage before every lane and serialize xcodebuild.
 - Finance institution detection/importer is pushed and Astra Medium reviewed
   **MERGE**. Native Mac logic is 55/55; generic iOS test build succeeds;
@@ -48,6 +51,13 @@ Updated 2026-09-18 Europe/Berlin.
   cents, bank-cash separation, source/row timestamp aging, and
   consent/failure/cancellation precedence. Simulator execution remains
   environment-blocked.
+- The manual Google AI Pro/Gemini subscription watcher packet is committed at
+  `1d57435`: bounded validated readings, used/remaining conversion, advancing
+  freshness, fixed reviewed connection actions, rollback-safe UserDefaults,
+  and persistence-before-publication. Focused Mac tests are **22/22**; the
+  serialized full Mac suite is **192/192**; generic iOS device SDK build
+  succeeds; Astra Medium re-review returned **MERGE**. Simulator/UI runtime
+  remains unavailable.
 - Existing reviewed slices cover calendar security, Usage/Finance/Fitness,
   shell/navigation, tax accessibility, installer boundary, and API security.
 - Open: live recurring reconciliation, Robinhood/net-worth, canonical Windows
@@ -58,9 +68,10 @@ Updated 2026-09-18 Europe/Berlin.
 - Astra Medium reviewed the corrected Windows/storage candidate **MERGE** with
   no blocking source findings. Canonical and concurrent-race evidence remain
   unverified.
-- Next: implement the reviewed Gemini manual-reading/connection-actions packet,
-  then continue live recurring reconciliation and verified Robinhood/net-worth
-  work. Every Apple lane must retain the storage preflight.
+- Next: continue live recurring reconciliation and verified Robinhood/net-worth
+  work, then Zepp/workouts, Obsidian Canvas, widgets/Shortcuts/signing, visual
+  acceptance, and final security. Every Apple lane must retain the storage
+  preflight and use the repo-cache cleanup option when needed.
 
 Keep the product boundary: truthful live data, SF Pro, compact Linear/Vercel
 quality, no generic AI, and calorie-photo AI only.

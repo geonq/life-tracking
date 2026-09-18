@@ -4,15 +4,15 @@ Updated 2026-09-18 Europe/Berlin.
 
 ## Active task
 
-Continue after the validated native AI usage watcher registry tranche.
+Continue after the validated Gemini manual-usage and storage-guard tranches.
 Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. `main` and `origin/main` are at the latest pushed
-  checkpoint `1956569` (`Add validated live finance readback`). The native
-  usage registry remains pushed at `273f4dd`; the finance checkpoint adds the
-  bounded live readback path and source-aware freshness reconciliation.
+- Release is **NO-GO**. Current checkpoints are `1d57435` (`Add manual Gemini
+  usage tracking`) and `5aa3fb1` (`Guard repo build cache cleanup`); they are
+  ready to push with this handoff. Earlier finance and registry checkpoints
+  remain `1956569` and `273f4dd`.
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
@@ -34,10 +34,12 @@ Keep the release verdict honest; do not call the product done.
   partial 1177 recovery, and zero/one/multiple preserved-path diagnostics.
 - Local deployment source harness: 75 passed, 2 environment skips. Native C#
   extraction/build: 0 errors, 31 nullable/platform warnings.
-- Storage tests: 7 passed, 2 subtests. `bash -n` passes. The latest controller
-  preflight reports 25.5 GiB free, 11 GiB Developer root, and 710 MiB global
-  DerivedData. CoreSimulatorService is unavailable, so no simulator is kept
-  booted.
+- Storage guard `bash -n` and **10/10** tests pass. It reports and explicitly
+  cleans only direct-child `lifeos-derived-*` caches, with trailing-slash,
+  nested, symlink, and process-probe coverage. Seven old repo caches totaling
+  about 14 GiB were removed; the post-cleanup check reports 33 GiB free,
+  11 GiB Developer root, and 710 MiB global DerivedData. CoreSimulatorService
+  is unavailable; the kept iPhone 17 entry remains.
 - Finance detector/importer: focused Astra Medium review **MERGE**; optimized
   DEBUG harnesses cover recovery, EOF, escaped quotes, Unicode whitespace,
   and 256/1024/3000-row scan bounds. Mac logic lane: 55/55 tests passed. The
@@ -73,6 +75,14 @@ Keep the release verdict honest; do not call the product done.
   passed** in the elevated lane; Mac compile passed; iPhone device SDK build
   passed. The iOS simulator build is environment-blocked because no runtime
   is available and `simdiskimaged` is unhealthy.
+- The manual Google AI Pro/Gemini subscription packet is committed at
+  `1d57435`. It adds strict bounded manual readings, canonical used/remaining
+  conversion, advancing freshness, provider-neutral reviewed actions, fixed
+  HTTPS destinations, rollback-safe persistence, and coordinator
+  persistence-before-publication. Focused macOS tests are **22/22**, the full
+  serialized Mac logic suite is **192/192**, and the generic iOS device SDK
+  build reports `BUILD SUCCEEDED`. Astra Medium re-review is **MERGE**;
+  simulator/UI runtime remains unverified.
 - Validated live finance readback is pushed at `1956569` and reviewed by Astra
   Medium **MERGE**. The packet canonicalizes recognized bank aliases before
   grouping, uses bounded content-type-checked readback parsing, keeps exact
@@ -99,8 +109,8 @@ Keep the release verdict honest; do not call the product done.
 - Live-bank recurring reconciliation, Robinhood/net-worth verification, and
   live provider readback.
 - Automatic Gemini authentication/quota transport and Google AI Pro
-  subscription readback; the native boundary rows intentionally do not claim
-  live quota.
+  subscription readback; the native manual boundary is complete but does not
+  claim live quota.
 - Canonical Windows install/listener/health/Serve/Enable Banking readback.
 - Finance live connector/import/recurring/net-worth work; Zepp workouts;
   Obsidian Canvas round trip; widgets, Shortcuts, signing, physical iPhone.
@@ -109,10 +119,10 @@ Keep the release verdict honest; do not call the product done.
 
 ## Next action
 
-Use this pushed checkpoint as the source of truth. Dispatch the next bounded
-Gemini manual-reading/connection-actions packet, then continue live recurring
-reconciliation and the verified Robinhood/net-worth path. Keep each packet
-reviewed and reflected in these short handoff files.
+Use the `1d57435` and `5aa3fb1` checkpoints as the source of truth. Continue
+live recurring reconciliation and the verified Robinhood/net-worth path, then
+the remaining Zepp, Obsidian, widget, signing, visual, and security gates.
+Keep each packet reviewed and reflected in these short handoff files.
 
 ## Blockers
 

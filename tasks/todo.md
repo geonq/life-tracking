@@ -1,9 +1,9 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-18 Europe/Berlin. Release: **NO-GO**. Last pushed source/current
-checkpoint is `1956569` (`Add validated live finance readback`). The native AI
-usage watcher registry remains pushed at `273f4dd`; this checkpoint adds the
-validated, bounded finance readback path and source-aware freshness handling.
+Updated 2026-09-18 Europe/Berlin. Release: **NO-GO**. Current checkpoints are
+`1d57435` (manual Gemini usage tracking) and `5aa3fb1` (repo build-cache
+cleanup); earlier finance readback and usage registry checkpoints are
+`1956569` and `273f4dd`.
 Do not use unverified percentage estimates for completion. Acceptance is
 tracked by registry gates and their required live, runtime, device, visual,
 security, and operator evidence.
@@ -43,16 +43,32 @@ security, and operator evidence.
    separate while feeding verified net worth, with NextSemis as an optional
    final gate. GitHub issue #2 is closed as the notification thread; its
    product scope remains in the plan.
-6. Close the remaining native usage watcher gates. The pushed registry at
-   `273f4dd` retains Claude support; Gemini subscription/Google AI Pro and
-   Gemini API remain manual/unsupported boundary rows with no fabricated quota
-   or observations; legacy GLM/DeepSeek/Google AI Studio observations remain
-   visible as `legacyValidated` nonofficial data. Automatic Gemini auth/quota
-   transport and subscription readback remain open.
+6. Close the remaining native usage watcher gates. The registry at `273f4dd`
+   retains Claude support, and the manual Gemini subscription packet is
+   committed at `1d57435`: bounded readings, reviewed fixed destinations,
+   advancing freshness, rollback-safe storage, and explicit non-live evidence.
+   Gemini API remains a separate product; automatic Gemini auth/quota
+   transport and subscription readback remain open. Legacy GLM/DeepSeek/
+   Google AI Studio observations remain visible as `legacyValidated`
+   nonofficial data.
 7. Run the batched Astra security/product review and close every acceptance
    registry row before changing the release verdict.
 
 ## Verified checkpoint
+
+`1d57435` is the validated manual Google AI Pro/Gemini subscription checkpoint.
+It has Astra Medium **MERGE** review, focused Mac tests **22/22**, full
+serialized Mac logic **192/192**, and a generic iOS device SDK
+`BUILD SUCCEEDED`. It keeps Claude, separates Gemini API from subscription
+usage, uses strict bounded manual readings, advances freshness without
+network fabrication, and persists before publishing visible state. Simulator
+and UI runtime acceptance remain blocked by CoreSimulatorService.
+
+`5aa3fb1` is the storage checkpoint. The guard now reports and explicitly
+cleans direct-child `lifeos-derived-*` caches with an idle-process gate,
+trailing-slash normalization, nested/symlink exclusion, and fail-closed probe
+tests. `bash -n` and **10/10** storage tests pass; seven old caches totaling
+about 14 GiB were removed and the post-cleanup check reports 33 GiB free.
 
 `1956569` is the current pushed finance live-readback checkpoint after the
 Windows publication/storage checkpoint. It is Astra Medium **MERGE** and the
@@ -136,7 +152,8 @@ subscription readback remain open.
 
 No scheduler or automatic deletion of source/personal/final evidence was
 added. Future Apple work must use the guard and owned per-lane DerivedData;
-parallel native builds remain disallowed on this Mac.
+parallel native builds remain disallowed on this Mac. Repo-level lane caches
+must be cleaned only through the explicit reviewed option.
 
 The frozen registry is structurally valid but has 0 accepted leaves; do not use
 the earlier 60% estimate as release progress. Acceptance must be earned with
