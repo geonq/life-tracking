@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-19 Europe/Berlin. Release: **NO-GO**. Current pushed
-checkpoint before Packet A: `8370744`; Packet A is Astra-accepted and pending
+checkpoint: `e9a2a2c`; Packet A is Astra-accepted and included.
 checkpoint. Do not publish completion percentages; use the evidence
 ledger and the classifications in `tasks/final-execution-plan.md`.
 

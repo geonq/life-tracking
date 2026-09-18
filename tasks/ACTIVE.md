@@ -2,7 +2,7 @@
 
 Status: IN PROGRESS — updated 2026-09-19 Europe/Berlin.
 
-main is clean at 8370744 before the accepted Planning Storage Packet A checkpoint. Release remains NO-GO. The 258-leaf registry is acceptance evidence, not an implementation percentage.
+main and origin/main are clean and aligned at e9a2a2c, including the accepted Planning Storage Packet A checkpoint. Release remains NO-GO. The 258-leaf registry is acceptance evidence, not an implementation percentage.
 
 ## Product authority
 
@@ -16,7 +16,7 @@ main is clean at 8370744 before the accepted Planning Storage Packet A checkpoin
 - Planning Storage Packet A is Astra Medium ACCEPTED. It adds strict additive-key decoding, pre-allocation payload bounds, NUL-safe explicit-length SQLite text binding and adversarial durability tests.
 - Evidence receipt: artifacts/final/planning-core/packet-a-repair-20260919.md.
 - Controller evidence: storage guard PASS with 40.6 GiB free; Mac build-for-testing PASS; focused Mac durability 19/19; generic iOS device SDK build PASS. Simulator/physical device remain open.
-- Packet is not committed yet; commit and push are the next action.
+- Packet is committed and pushed at e9a2a2c; the next action is the next durability dispatch.
 
 ## Existing evidence
 

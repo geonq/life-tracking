@@ -8,7 +8,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 ## Current truth
 
-- main was clean and pushed at 8370744 before the current packet. Planning Storage Packet A is now Astra-accepted and is pending this checkpoint commit.
+- main is clean and pushed at e9a2a2c. Planning Storage Packet A is Astra-accepted and included in that checkpoint.
 - Windows disposable staging is separate from canonical install/recovery. Canonical LifeOSAPI is stopped, LifeOSGateway is absent, no LifeOS listener is bound, the legacy sync task is Ready, Tailscale is running, and BitLocker is on C:/D:.
 - No generic advisor, conversational AI, or demo fallback is allowed. Calorie-photo tracking is the only in-app AI flow. Usage keeps Claude and provider-neutral/manual Gemini boundary rows without fabricated quota.
 - Native SwiftUI/WidgetKit, SF Pro/system typography, brand palette, compact hierarchy, truthful unavailable states, green estimates, and interruptible motion remain product authority.
@@ -26,7 +26,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 ## Open gates
 
-- Commit/push Packet A, then durable vault store/publication journal/conflict idempotency, graph/spatial index, native views, gateway route, and Mac→Obsidian→iPhone round trip.
+- Dispatch the next durable vault store/publication journal/conflict idempotency packet, then graph/spatial index, native views, gateway route, and Mac→Obsidian→iPhone round trip.
 - Canonical Windows candidate verification, supervised recovery/install, service/ACL/Serve/health/readiness/listener checks, and rollback receipt.
 - Live Enable Banking consent/readback, recurring reconciliation, Trade Republic import, Robinhood/net-worth separation, and offline outage behavior.
 - LifeOS-owned workouts plus physical Zepp/HealthKit provenance; proprietary Zepp readiness/load/PAI/Training Effect stays unavailable without evidence.
@@ -36,7 +36,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 ## Next action
 
-Checkpoint Packet A with its receipt and coordination updates. Then have Astra Medium produce the next exact durability dispatch; Luna Max implements one disjoint packet; Astra reviews the actual diff and evidence before every commit/push.
+Have Astra Medium produce the next exact durability dispatch; Luna Max implements one disjoint packet; Astra reviews the actual diff and evidence before every commit/push.
 
 ## Validation discipline
 

@@ -1,7 +1,7 @@
 # LifeOS final execution plan
 Prepared by Astra Medium from the Luna Max audit on 2026-09-18. Baseline:
-`8370744`, clean `main`, aligned with
-`origin/main` before the accepted Packet A checkpoint. Release is **NO-GO**. The 258-leaf registry has 0 accepted
+`e9a2a2c`, clean `main`, aligned with
+`origin/main` after the accepted Packet A checkpoint. Release is **NO-GO**. The 258-leaf registry has 0 accepted
 leaves; it is an acceptance ledger, not a completion percentage.
 
 ## Rules for every tranche
@@ -194,7 +194,6 @@ expected/observed result, remediation and retest.
 
 ## Immediate next dispatch
 
-Checkpoint Packet A, then dispatch the next Canvas durability packet from the
-new SHA. Astra must specify exact files, symbols, invariants, failure states
+Dispatch the next Canvas durability packet from e9a2a2c. Astra must specify exact files, symbols, invariants, failure states
 and evidence before Luna edits. Keep Windows/workouts/live finance disjoint;
 every packet ends with review, commit, push and handoff update.

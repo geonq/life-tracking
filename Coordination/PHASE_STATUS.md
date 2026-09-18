@@ -5,7 +5,7 @@ Updated 2026-09-19 Europe/Berlin.
 ## Release state
 
 - Release: NO-GO.
-- main and origin/main are aligned at 8370744 before the accepted Packet A checkpoint.
+- main and origin/main are aligned at e9a2a2c, including the accepted Packet A checkpoint.
 - The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0 formally accepted leaves; it is an evidence ledger, not a percentage.
 - The old worker/t11a-shared-visual-foundation branch remains patch-equivalent to main.
 
@@ -35,7 +35,7 @@ Updated 2026-09-19 Europe/Berlin.
 
 ## Open gates
 
-- Commit/push Packet A; then durable Obsidian vault store, publication/conflict journal and idempotency, graph/spatial index, native Mac/iPhone views, bounded gateway route and live round trip.
+- Durable Obsidian vault store, publication/conflict journal and idempotency, graph/spatial index, native Mac/iPhone views, bounded gateway route and live round trip.
 - Canonical Windows candidate verification, supervised recovery/install, service/ACL/Serve/health/readiness/listener checks and rollback.
 - Real Enable Banking consent/readback, recurring reconciliation, Trade Republic import, Robinhood/net-worth reconciliation and offline outage behavior.
 - LifeOS-owned workouts and physical Zepp/HealthKit comparison; proprietary Zepp readiness/load/PAI/Training Effect remain unsupported without evidence.
