@@ -36,7 +36,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 ## Next action
 
-Have Astra Medium produce the next exact durability dispatch; Luna Max implements one disjoint packet; Astra reviews the actual diff and evidence before every commit/push.
+Use artifacts/final/planning-core/packet-b-design-20260919.md for the next exact durability dispatch; Luna Max implements one disjoint packet; Astra reviews the actual diff and evidence before every commit/push.
 
 ## Validation discipline
 

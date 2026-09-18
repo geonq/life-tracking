@@ -15,6 +15,7 @@ Updated 2026-09-19 Europe/Berlin.
 - Source behavior: additive optional-key decoding with required/type/semantic validation; payload SQLite type/count/ceiling/length checks before Data allocation/hash; all persisted text rejects embedded NULs and binds explicit UTF-8 lengths.
 - Evidence: storage guard PASS with 40.6 GiB free; serial Mac build-for-testing PASS; focused elevated Mac durability 19/19; generic iOS device SDK build-for-testing PASS. CoreSimulator and physical iPhone runtime remain unavailable.
 - Receipt: artifacts/final/planning-core/packet-a-repair-20260919.md.
+- Packet B design is READY FOR LUNA at artifacts/final/planning-core/packet-b-design-20260919.md; it excludes filesystem writes, bookmarks, UI, gateway and entitlements.
 
 ## Verified source and local evidence
 

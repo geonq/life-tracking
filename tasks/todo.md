@@ -57,7 +57,9 @@ ledger and the classifications in `tasks/final-execution-plan.md`.
    lossless Canvas/Markdown codecs; implement vault binding, atomic store, mutation
    journal and conflict copies; graph projection, spatial index and native Mac/
    iPhone interaction; bounded Windows mirror/proposal transport and wiring.
-   Do not write a real vault until authority and conflict policy are selected.
+   Packet B publication design is recorded at
+   `artifacts/final/planning-core/packet-b-design-20260919.md`. Do not write a
+   real vault until authority and conflict policy are selected.
 8. **Widgets, Shortcuts, signing** — verify the existing widget catalog plus
    the requested lock-screen widget against dark/tinted/transparent grey
    wallpaper states. Provide honest Morning Sync and USB Refresh Shortcuts;

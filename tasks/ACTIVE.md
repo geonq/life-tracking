@@ -17,6 +17,7 @@ main and origin/main are clean and aligned at e9a2a2c, including the accepted Pl
 - Evidence receipt: artifacts/final/planning-core/packet-a-repair-20260919.md.
 - Controller evidence: storage guard PASS with 40.6 GiB free; Mac build-for-testing PASS; focused Mac durability 19/19; generic iOS device SDK build PASS. Simulator/physical device remain open.
 - Packet is committed and pushed at e9a2a2c; the next action is the next durability dispatch.
+- Packet B design is recorded at artifacts/final/planning-core/packet-b-design-20260919.md and is READY FOR LUNA.
 
 ## Existing evidence
 

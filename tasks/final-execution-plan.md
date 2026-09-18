@@ -194,6 +194,6 @@ expected/observed result, remediation and retest.
 
 ## Immediate next dispatch
 
-Dispatch the next Canvas durability packet from e9a2a2c. Astra must specify exact files, symbols, invariants, failure states
+Dispatch Packet B from e9a2a2c using artifacts/final/planning-core/packet-b-design-20260919.md. Astra must specify exact files, symbols, invariants, failure states
 and evidence before Luna edits. Keep Windows/workouts/live finance disjoint;
 every packet ends with review, commit, push and handoff update.
