@@ -75,6 +75,17 @@ run_lane() {
 
   if [[ "$platform" == "ios" ]]; then
     destination="id=$IOS_UDID"
+  else
+    local production_app_running
+    production_app_running="$(/usr/bin/osascript -e 'tell application id "com.hermes.lifeos.mac" to running' 2>/dev/null || true)"
+    if [[ "$production_app_running" == "true" ]]; then
+      cat >&2 <<'EOF'
+Mac prerelease refused to start while the production LifeOSMac bundle is running.
+Launch manual visual checks through scripts/launch_macos_visual_fixture.sh so
+the prerelease UI relaunch coverage cannot close the inspected window.
+EOF
+      return 2
+    fi
   fi
   rm -rf "$result_path" "$derived_data_path"
   mkdir -p "$derived_data_path"
