@@ -2,7 +2,7 @@
 
 Status: IN PROGRESS — updated 2026-09-18 Europe/Berlin.
 
-The authoritative source checkpoint is clean `main` at `dfeab04`, aligned
+The authoritative source checkpoint is clean `main` at `4db1eaa`, aligned
 with `origin/main`. Release remains **NO-GO**. The frozen registry contains
 258 leaves, 7 aliases, and 0 formally accepted leaves; this is acceptance
 evidence, not an implementation percentage.
@@ -57,11 +57,15 @@ evidence, not an implementation percentage.
 - Cross-process UsageHistory locking is pushed at `dfeab04` after Astra
   acceptance; 55 focused/160 full API tests, typecheck, build and diff checks
   pass, with child contention, deadlines, release races and orphan behavior.
+- Canonical Windows preflight is STOP/NO-GO; the sanitized receipt is
+  `artifacts/final/windows/preflight-4db1eaa-20260918.md`. SSH/local gates pass;
+  strict journal/progress, ACL/reparse, writer provenance and candidate source
+  identity remain open.
 
 ## Remaining work
 
-1. Proceed with the canonical Windows candidate/preflight and supervised
-   recovery/install,
+1. Complete the strict disposable Windows diagnostic, then the canonical
+   candidate/preflight and supervised recovery/install,
    service/ACL/Serve/health/readiness/listener verification, and rollback.
 2. Verify real Enable Banking values, consent/revoke/freshness, recurring
    reconciliation, Trade Republic import, and Robinhood/net-worth separation.

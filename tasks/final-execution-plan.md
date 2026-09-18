@@ -1,7 +1,7 @@
 # LifeOS final execution plan
 
 Prepared by Astra Medium from the Luna Max audit on 2026-09-18. Baseline:
-`dfeab04`, clean `main`, aligned with
+`4db1eaa`, clean `main`, aligned with
 `origin/main`. Release is **NO-GO**. The 258-leaf registry has 0 accepted
 leaves; it is an acceptance ledger, not a completion percentage.
 
@@ -192,8 +192,8 @@ expected/observed result, remediation and retest.
 
 ## Immediate next dispatch
 
-The next dispatch is the canonical Windows candidate/preflight packet with
-exact inspected parameters. In parallel only with disjoint scopes, dispatch
-Canvas durability or workout source hardening. Do not start live finance or
-physical-device acceptance before backend/device prerequisites. Finish each
-packet with Astra review, commit, push, and handoff update.
+The next dispatch is the strict disposable Windows diagnostic packet, followed
+by canonical candidate/preflight. In parallel only with disjoint scopes,
+dispatch Canvas durability or workout source hardening. Do not start live
+finance or physical-device acceptance before backend/device prerequisites.
+Finish each packet with Astra review, commit, push, and handoff update.

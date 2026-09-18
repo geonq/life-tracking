@@ -9,19 +9,15 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. `main` is clean and pushed at `dfeab04` (`fix: serialize
-  usage history across processes`), on top of Mac Home `d2ece98`, Canvas
-  `f53c77c`; earlier checkpoints: `4856fae`, `1d57435`, `5aa3fb1`, `1956569`,
-  `273f4dd`.
+- Release is **NO-GO**. `main` is clean and pushed at `4db1eaa` (coordination
+  checkpoint after `dfeab04`), on top of Mac Home `d2ece98` and Canvas `f53c77c`;
+  earlier checkpoints: `4856fae`, `1d57435`, `5aa3fb1`, `1956569`, `273f4dd`.
 - Windows verification uses disposable staging at
-  `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
-  recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
-- Fresh canonical SSH readback confirms Tailscale is running, `LifeOSAPI` is
-  stopped, `LifeOSGateway` is absent, no LifeOS listener is bound, and the
-  legacy `LifeOSSyncServer` task is only Ready. BitLocker is on for C: and D:.
-  The marker remains `active`; its bound journal is `artifacts-complete` with
-  31,401 units and no recovery process is running. Canonical recovery is not
-  complete and remains separate from disposable evidence.
+  `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical install/recovery remain
+  untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
+- Canonical SSH readback: Tailscale running, `LifeOSAPI` stopped, `LifeOSGateway`
+  absent, no listener, legacy task Ready, BitLocker on C:/D:. Marker is active
+  with an `artifacts-complete` journal and 31,401 units; recovery is separate.
 - No generic advisor, conversational AI, or demo fallback is allowed. Calorie
   photo tracking is the only in-app AI feature. The Usage module retains the
   Claude watcher and now has a provider-neutral native registry over the
@@ -116,6 +112,9 @@ tranches. Keep the release verdict honest; do not call the product done.
   after two reviews: 55 focused/160 full API tests and typecheck/build/diff
   pass; transaction serialization, monotonic deadlines, authenticated release
   and fail-closed orphan locks are covered.
+- Canonical Windows read-only preflight is **STOP/NO-GO**; receipt:
+  `artifacts/final/windows/preflight-4db1eaa-20260918.md`. SSH/local gates pass;
+  journal/progress, ACL/reparse, writer provenance and candidate identity remain open.
 
 ## LifeOSMac stability receipt
 
@@ -150,24 +149,25 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 - Live-bank recurring reconciliation, Robinhood/net-worth verification, and
   live provider readback.
-- Automatic Gemini authentication/quota transport and Google AI Pro subscription
-  readback remain open; the native manual boundary does not claim live quota.
-- Canonical Windows install/listener/health/Serve/Enable Banking readback.
+- Automatic Gemini authentication/quota transport and Google AI Pro readback
+  remain open; the native manual boundary does not claim live quota.
+- Canonical Windows preflight/recovery/install/listener/health/Serve/Enable
+  Banking readback; the current diagnostic receipt is STOP/NO-GO.
 - Finance live connector/import/recurring/net-worth work; Zepp workouts;
 - Obsidian Canvas durable store, conflict journal, graph/spatial index, native
   views, gateway route, widgets, Shortcuts, signing, physical iPhone.
 - Whole-app visual/runtime acceptance remains open; current UI slices are
   evidence for those slices only, not product-wide approval.
-- Canonical Windows recovery is pending explicit operator approval for the
-  transaction-bound rollback command; automatic review blocked that mutating
-  action until approval is present.
+- Canonical Windows recovery is pending operator approval for the
+  transaction-bound rollback; automatic review blocked the mutating action.
 
 ## Next action
 
-Use `dfeab04` plus the stability, Canvas, tax, and usage-lock receipts. Continue
-with canonical Windows recovery, live finance/net-worth, Canvas, fitness,
-widgets/Shortcuts/signing, visual acceptance, and final security; do not rerun
-the full Mac suite without a code change or relevant failure.
+Use `4db1eaa` plus the stability, Canvas, tax, usage-lock, and Windows preflight
+receipts. Continue the strict disposable diagnostic, then canonical recovery,
+live finance/net-worth, Canvas, fitness, widgets/Shortcuts/signing, visual
+acceptance and final security; do not rerun the full Mac suite without a code
+change or relevant failure.
 
 ## Validation discipline
 

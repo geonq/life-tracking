@@ -5,7 +5,7 @@ Updated 2026-09-18 Europe/Berlin.
 ## Release state
 
 - Release: **NO-GO**.
-- `main` and `origin/main` are aligned at `dfeab04`.
+- `main` and `origin/main` are aligned at `4db1eaa`.
 - The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0
   formally accepted leaves. This is an evidence ledger, not a percentage.
 - The old `worker/t11a-shared-visual-foundation` branch is patch-equivalent to
@@ -56,6 +56,10 @@ Updated 2026-09-18 Europe/Berlin.
   acceptance: 55 focused/160 full API tests, typecheck/build/diff checks pass;
   child contention, deadline, release, symlink, invalid-parent and orphan
   behavior are covered. Windows runtime/ACL validation remains open.
+- The canonical Windows preflight is **STOP/NO-GO**. Sanitized receipt:
+  `artifacts/final/windows/preflight-4db1eaa-20260918.md`. Remote SSH and
+  local build gates passed; journal/progress, ACL/reparse, writer provenance
+  and source-bound candidate identity remain unverified.
 
 ## Backend state
 
