@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.validate_xcresult import XCResultInvariantError, validate_summary
+from scripts.validate_xcresult import (
+    XCResultInvariantError,
+    legacy_summary_from_payload,
+    validate_summary,
+)
 
 
 class XCResultInvariantTests(unittest.TestCase):
@@ -52,6 +56,88 @@ class XCResultInvariantTests(unittest.TestCase):
             with self.subTest(field=field):
                 with self.assertRaisesRegex(XCResultInvariantError, "negative"):
                     validate_summary(self.summary(**{field: -1}), 386)
+
+
+class LegacySummaryTests(unittest.TestCase):
+    @staticmethod
+    def root(*, status="succeeded", tests_count=None, tests_ref=True):
+        action_result = {
+            "status": status,
+            "metrics": {"testsCount": {"_value": str(tests_count)}} if tests_count is not None else {},
+        }
+        if tests_ref:
+            action_result["testsRef"] = {"id": {"_value": "tests-ref"}}
+        return {"actions": {"_values": [{"actionResult": action_result}]}}
+
+    @staticmethod
+    def make_tests_payload(*statuses):
+        return {
+            "summaries": {
+                "_values": [
+                    {
+                        "tests": {
+                            "_values": [
+                                {
+                                    "subtests": {
+                                        "_values": [
+                                            {"testStatus": {"_value": status}} for status in statuses
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+
+    def summary(self, *statuses):
+        return legacy_summary_from_payload(
+            self.root(tests_count=len(statuses)),
+            self.make_tests_payload(*statuses),
+        )
+
+    def test_success_is_the_only_passed_status(self) -> None:
+        self.assertEqual(
+            self.summary("Success", "Success"),
+            {
+                "result": "Passed",
+                "totalTestCount": 2,
+                "passedTests": 2,
+                "failedTests": 0,
+                "skippedTests": 0,
+                "expectedFailures": 0,
+            },
+        )
+
+    def test_failure_is_classified(self) -> None:
+        summary = self.summary("Success", "Failure")
+        self.assertEqual(summary["passedTests"], 1)
+        self.assertEqual(summary["failedTests"], 1)
+
+    def test_skipped_is_classified(self) -> None:
+        self.assertEqual(self.summary("Skipped")["skippedTests"], 1)
+
+    def test_expected_failure_spellings_are_classified(self) -> None:
+        summary = self.summary("Expected Failure", "ExpectedFailure")
+        self.assertEqual(summary["expectedFailures"], 2)
+
+    def test_unknown_status_is_rejected(self) -> None:
+        with self.assertRaisesRegex(XCResultInvariantError, "unknown"):
+            self.summary("Success", "Flaky")
+
+    def test_missing_test_action_is_rejected(self) -> None:
+        with self.assertRaisesRegex(XCResultInvariantError, "no test action"):
+            legacy_summary_from_payload(
+                {"actions": {"_values": []}}, self.make_tests_payload("Success")
+            )
+
+    def test_missing_tests_reference_is_rejected(self) -> None:
+        with self.assertRaisesRegex(XCResultInvariantError, "missing testsRef"):
+            legacy_summary_from_payload(
+                self.root(tests_count=1, tests_ref=False),
+                self.make_tests_payload("Success"),
+            )
 
 
 if __name__ == "__main__":

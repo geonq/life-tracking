@@ -93,6 +93,182 @@ def read_summary(summary_file: Path) -> Mapping[str, Any]:
     return payload
 
 
+def _legacy_value(value: Any) -> Any:
+    if isinstance(value, Mapping) and "_value" in value:
+        return value["_value"]
+    return value
+
+
+def _legacy_values(value: Any) -> list[Any]:
+    if isinstance(value, Mapping):
+        values = value.get("_values")
+        if isinstance(values, list):
+            return values
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _legacy_test_action(root: Mapping[str, Any]) -> Mapping[str, Any]:
+    actions = _legacy_values(root.get("actions"))
+    for action in actions:
+        if not isinstance(action, Mapping):
+            continue
+        action_result = action.get("actionResult")
+        if not isinstance(action_result, Mapping):
+            continue
+        metrics = action_result.get("metrics")
+        if "testsRef" in action_result or (
+            isinstance(metrics, Mapping) and "testsCount" in metrics
+        ):
+            return action_result
+    _fail("xcresult legacy result contains no test action")
+
+
+def _legacy_reference_id(reference: Any) -> str:
+    if not isinstance(reference, Mapping):
+        _fail("xcresult legacy test action is missing testsRef")
+    reference_id = _legacy_value(reference.get("id"))
+    if not isinstance(reference_id, str) or not reference_id.strip():
+        _fail("xcresult legacy testsRef is missing an id")
+    return reference_id
+
+
+def _legacy_integer(payload: Mapping[str, Any], key: str) -> int:
+    value = _legacy_value(payload.get(key))
+    if isinstance(value, bool):
+        _fail(f"xcresult legacy field {key!r} is not an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    _fail(f"xcresult legacy field {key!r} is not an integer")
+
+
+def _legacy_test_status_counts(tests_payload: Mapping[str, Any]) -> dict[str, int]:
+    counts = {
+        "passedTests": 0,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "expectedFailures": 0,
+    }
+    status_names = {
+        "Success": "passedTests",
+        "Failure": "failedTests",
+        "Skipped": "skippedTests",
+        "Expected Failure": "expectedFailures",
+        "ExpectedFailure": "expectedFailures",
+    }
+    found = 0
+
+    def visit(value: Any) -> None:
+        nonlocal found
+        if isinstance(value, Mapping):
+            if "testStatus" in value:
+                status = _legacy_value(value["testStatus"])
+                counter = status_names.get(status)
+                if counter is None:
+                    _fail(f"xcresult legacy test status {status!r} is unknown")
+                counts[counter] += 1
+                found += 1
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(tests_payload)
+    if found == 0:
+        _fail("xcresult legacy tests object contains no testStatus values")
+    return counts
+
+
+def legacy_summary_from_payload(
+    root: Mapping[str, Any], tests_payload: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """Build a modern-shaped summary from a resolved legacy testsRef object."""
+
+    action_result = _legacy_test_action(root)
+    _legacy_reference_id(action_result.get("testsRef"))
+    status = _legacy_value(action_result.get("status"))
+    result_by_status = {
+        "succeeded": "Passed",
+        "failed": "Failed",
+        "skipped": "Skipped",
+        "canceled": "Canceled",
+        "cancelled": "Canceled",
+    }
+    result = result_by_status.get(status)
+    if result is None:
+        _fail(f"xcresult legacy action status {status!r} is unknown")
+
+    counts = _legacy_test_status_counts(tests_payload)
+    total = sum(counts.values())
+    metrics = action_result.get("metrics")
+    if not isinstance(metrics, Mapping):
+        _fail("xcresult legacy test action is missing metrics.testsCount")
+    declared_total = _legacy_integer(metrics, "testsCount")
+    if declared_total < 0:
+        _fail("xcresult legacy metrics.testsCount is negative")
+    if declared_total != total:
+        _fail(
+            "xcresult legacy test count mismatch: "
+            f"metrics.testsCount={declared_total}, testStatus values={total}"
+        )
+
+    return {
+        "result": result,
+        "totalTestCount": total,
+        **counts,
+    }
+
+
+def _legacy_object(result_path: Path, object_id: str | None = None) -> Mapping[str, Any]:
+    command = [
+        "xcrun",
+        "xcresulttool",
+        "get",
+        "object",
+        "--legacy",
+        "--format",
+        "json",
+        "--path",
+        str(result_path),
+    ]
+    if object_id is not None:
+        command.extend(["--id", object_id])
+    label = "legacy tests object" if object_id is not None else "legacy root"
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        output = getattr(error, "stdout", "") or ""
+        _fail(f"xcresulttool {label} failed: {output.strip()}")
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        _fail(f"xcresulttool {label} is not valid JSON: {error}")
+    if not isinstance(payload, Mapping):
+        _fail(f"xcresulttool {label} root must be a JSON object")
+    return payload
+
+
+def _legacy_xcresult_summary(result_path: Path) -> Mapping[str, Any]:
+    root = _legacy_object(result_path)
+    action_result = _legacy_test_action(root)
+    tests_ref_id = _legacy_reference_id(action_result.get("testsRef"))
+    tests_payload = _legacy_object(result_path, tests_ref_id)
+    return legacy_summary_from_payload(root, tests_payload)
+
+
 def xcresult_summary(result_path: Path) -> Mapping[str, Any]:
     if not result_path.is_dir():
         _fail(f"xcresult result bundle is missing: {result_path}")
@@ -116,13 +292,25 @@ def xcresult_summary(result_path: Path) -> Mapping[str, Any]:
         )
     except (OSError, subprocess.CalledProcessError) as error:
         output = getattr(error, "stdout", "") or ""
-        _fail(f"xcresulttool summary failed: {output.strip()}")
+        modern_error = f"xcresulttool summary failed: {output.strip()}"
+        try:
+            return _legacy_xcresult_summary(result_path)
+        except XCResultInvariantError as legacy_error:
+            _fail(f"{modern_error}; legacy fallback failed: {legacy_error}")
     try:
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
-        _fail(f"xcresulttool summary is not valid JSON: {error}")
+        modern_error = f"xcresulttool summary is not valid JSON: {error}"
+        try:
+            return _legacy_xcresult_summary(result_path)
+        except XCResultInvariantError as legacy_error:
+            _fail(f"{modern_error}; legacy fallback failed: {legacy_error}")
     if not isinstance(payload, Mapping):
-        _fail("xcresulttool summary root must be a JSON object")
+        modern_error = "xcresulttool summary root must be a JSON object"
+        try:
+            return _legacy_xcresult_summary(result_path)
+        except XCResultInvariantError as legacy_error:
+            _fail(f"{modern_error}; legacy fallback failed: {legacy_error}")
     return payload
 
 
