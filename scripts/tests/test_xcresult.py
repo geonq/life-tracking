@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from scripts.validate_xcresult import (
     XCResultInvariantError,
     legacy_summary_from_payload,
+    xcresult_summary,
     validate_summary,
 )
 
@@ -138,6 +144,184 @@ class LegacySummaryTests(unittest.TestCase):
                 self.root(tests_count=1, tests_ref=False),
                 self.make_tests_payload("Success"),
             )
+
+    def test_missing_metrics_are_rejected(self) -> None:
+        with self.assertRaisesRegex(XCResultInvariantError, "testsCount"):
+            legacy_summary_from_payload(
+                self.root(tests_count=None), self.make_tests_payload("Success")
+            )
+
+    def test_empty_result_is_rejected(self) -> None:
+        with self.assertRaisesRegex(XCResultInvariantError, "no testStatus"):
+            self.summary()
+
+    def test_count_mismatch_is_rejected(self) -> None:
+        with self.assertRaisesRegex(XCResultInvariantError, "count mismatch"):
+            legacy_summary_from_payload(
+                self.root(tests_count=2), self.make_tests_payload("Success")
+            )
+
+    def test_non_string_action_status_is_rejected_without_type_error(self) -> None:
+        with self.assertRaisesRegex(XCResultInvariantError, "action status must be a string"):
+            legacy_summary_from_payload(
+                self.root(status={"unexpected": "mapping"}, tests_count=1),
+                self.make_tests_payload("Success"),
+            )
+
+    def test_non_string_test_status_is_rejected_without_type_error(self) -> None:
+        payload = self.make_tests_payload("Success")
+        payload["summaries"]["_values"][0]["tests"]["_values"][0]["subtests"]["_values"][0][
+            "testStatus"
+        ] = {"_value": {"unexpected": "mapping"}}
+        with self.assertRaisesRegex(XCResultInvariantError, "test status must be a string"):
+            legacy_summary_from_payload(self.root(tests_count=1), payload)
+
+    def test_multiple_test_actions_fail_closed(self) -> None:
+        first = self.root(status="succeeded", tests_count=1)["actions"]["_values"][0]
+        second = self.root(status="failed", tests_count=1)["actions"]["_values"][0]
+        root = {"actions": {"_values": [first, second]}}
+        with self.assertRaisesRegex(XCResultInvariantError, "multiple test actions"):
+            legacy_summary_from_payload(root, self.make_tests_payload("Success"))
+
+    def test_non_success_action_statuses_are_preserved_for_strict_validation(self) -> None:
+        for action_status, expected_result in (
+            ("failed", "Failed"),
+            ("skipped", "Skipped"),
+            ("canceled", "Canceled"),
+            ("cancelled", "Canceled"),
+        ):
+            with self.subTest(action_status=action_status):
+                summary = legacy_summary_from_payload(
+                    self.root(status=action_status, tests_count=1),
+                    self.make_tests_payload("Success"),
+                )
+                self.assertEqual(summary["result"], expected_result)
+                with self.assertRaisesRegex(XCResultInvariantError, "only Passed"):
+                    validate_summary(summary, 1)
+
+
+class XCResultSummaryCommandTests(unittest.TestCase):
+    @staticmethod
+    def modern_summary() -> str:
+        return json.dumps(
+            {
+                "result": "Passed",
+                "totalTestCount": 1,
+                "passedTests": 1,
+                "failedTests": 0,
+                "skippedTests": 0,
+                "expectedFailures": 0,
+            }
+        )
+
+    @staticmethod
+    def legacy_root(*, status="succeeded", tests_count=1, extra_action=None) -> str:
+        action_result = {
+            "status": status,
+            "metrics": {"testsCount": {"_value": str(tests_count)}}
+            if tests_count is not None
+            else {},
+            "testsRef": {"id": {"_value": "tests-ref"}},
+        }
+        actions = [{"actionResult": action_result}]
+        if extra_action is not None:
+            actions.append({"actionResult": extra_action})
+        return json.dumps({"actions": {"_values": actions}})
+
+    @staticmethod
+    def legacy_tests() -> str:
+        return json.dumps(
+            {
+                "summaries": {
+                    "_values": [
+                        {
+                            "tests": {
+                                "_values": [
+                                    {
+                                        "subtests": {
+                                            "_values": [
+                                                {"testStatus": {"_value": "Success"}}
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        )
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.result_path = Path(self.tempdir.name) / "result.xcresult"
+        self.result_path.mkdir()
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def test_modern_success_does_not_invoke_fallback(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, stdout=self.modern_summary())
+        with patch("scripts.validate_xcresult.subprocess.run", return_value=completed) as run:
+            self.assertEqual(xcresult_summary(self.result_path)["result"], "Passed")
+        run.assert_called_once()
+        self.assertNotIn("--legacy", run.call_args.args[0])
+
+    def test_modern_failure_invokes_legacy_root_then_tests_reference(self) -> None:
+        failure = subprocess.CalledProcessError(1, ["xcrun"], output="unsupported")
+        root = subprocess.CompletedProcess([], 0, stdout=self.legacy_root())
+        tests = subprocess.CompletedProcess([], 0, stdout=self.legacy_tests())
+        with patch(
+            "scripts.validate_xcresult.subprocess.run",
+            side_effect=[failure, root, tests],
+        ) as run:
+            self.assertEqual(xcresult_summary(self.result_path)["result"], "Passed")
+        self.assertEqual(run.call_count, 3)
+        modern_command = run.call_args_list[0].args[0]
+        root_command = run.call_args_list[1].args[0]
+        tests_command = run.call_args_list[2].args[0]
+        self.assertNotIn("--legacy", modern_command)
+        self.assertIn("--legacy", root_command)
+        self.assertNotIn("--id", root_command)
+        self.assertEqual(tests_command[-2:], ["--id", "tests-ref"])
+
+    def test_later_failed_action_is_rejected_by_legacy_fallback(self) -> None:
+        failure = subprocess.CalledProcessError(1, ["xcrun"], output="unsupported")
+        later_failed_action = {
+            "status": "failed",
+            "metrics": {"testsCount": {"_value": "1"}},
+            "testsRef": {"id": {"_value": "later-tests-ref"}},
+        }
+        root = subprocess.CompletedProcess(
+            [], 0, stdout=self.legacy_root(extra_action=later_failed_action)
+        )
+        with patch(
+            "scripts.validate_xcresult.subprocess.run",
+            side_effect=[failure, root],
+        ) as run:
+            with self.assertRaisesRegex(XCResultInvariantError, "multiple test actions"):
+                xcresult_summary(self.result_path)
+        self.assertEqual(run.call_count, 2)
+
+    def test_subprocess_failure_with_empty_stdout_remains_structured(self) -> None:
+        modern_failure = subprocess.CalledProcessError(1, ["xcrun", "summary"])
+        legacy_failure = subprocess.CalledProcessError(1, ["xcrun", "root"])
+        with patch(
+            "scripts.validate_xcresult.subprocess.run",
+            side_effect=[modern_failure, legacy_failure],
+        ):
+            with self.assertRaisesRegex(XCResultInvariantError, "returned non-zero exit status"):
+                xcresult_summary(self.result_path)
+
+    def test_json_failure_remains_structured(self) -> None:
+        modern_failure = subprocess.CompletedProcess([], 0, stdout="not-json")
+        legacy_failure = subprocess.CompletedProcess([], 0, stdout="also-not-json")
+        with patch(
+            "scripts.validate_xcresult.subprocess.run",
+            side_effect=[modern_failure, legacy_failure],
+        ):
+            with self.assertRaisesRegex(XCResultInvariantError, "not valid JSON"):
+                xcresult_summary(self.result_path)
 
 
 if __name__ == "__main__":

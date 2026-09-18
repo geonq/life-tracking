@@ -26,6 +26,13 @@ def _fail(message: str) -> None:
     raise XCResultInvariantError(message)
 
 
+def _subprocess_error_detail(error: BaseException) -> str:
+    output = getattr(error, "stdout", "")
+    if isinstance(output, str) and output.strip():
+        return output.strip()
+    return str(error)
+
+
 def _integer(payload: Mapping[str, Any], key: str) -> int:
     value = payload.get(key)
     if isinstance(value, bool) or not isinstance(value, int):
@@ -111,6 +118,7 @@ def _legacy_values(value: Any) -> list[Any]:
 
 def _legacy_test_action(root: Mapping[str, Any]) -> Mapping[str, Any]:
     actions = _legacy_values(root.get("actions"))
+    test_actions: list[Mapping[str, Any]] = []
     for action in actions:
         if not isinstance(action, Mapping):
             continue
@@ -121,7 +129,14 @@ def _legacy_test_action(root: Mapping[str, Any]) -> Mapping[str, Any]:
         if "testsRef" in action_result or (
             isinstance(metrics, Mapping) and "testsCount" in metrics
         ):
-            return action_result
+            test_actions.append(action_result)
+    if len(test_actions) > 1:
+        _fail(
+            "xcresult legacy result contains multiple test actions; "
+            "refusing to choose one"
+        )
+    if test_actions:
+        return test_actions[0]
     _fail("xcresult legacy result contains no test action")
 
 
@@ -169,6 +184,11 @@ def _legacy_test_status_counts(tests_payload: Mapping[str, Any]) -> dict[str, in
         if isinstance(value, Mapping):
             if "testStatus" in value:
                 status = _legacy_value(value["testStatus"])
+                if not isinstance(status, str):
+                    _fail(
+                        "xcresult legacy test status must be a string; "
+                        f"got {type(status).__name__}"
+                    )
                 counter = status_names.get(status)
                 if counter is None:
                     _fail(f"xcresult legacy test status {status!r} is unknown")
@@ -194,6 +214,11 @@ def legacy_summary_from_payload(
     action_result = _legacy_test_action(root)
     _legacy_reference_id(action_result.get("testsRef"))
     status = _legacy_value(action_result.get("status"))
+    if not isinstance(status, str):
+        _fail(
+            "xcresult legacy action status must be a string; "
+            f"got {type(status).__name__}"
+        )
     result_by_status = {
         "succeeded": "Passed",
         "failed": "Failed",
@@ -250,11 +275,10 @@ def _legacy_object(result_path: Path, object_id: str | None = None) -> Mapping[s
             stderr=subprocess.STDOUT,
         )
     except (OSError, subprocess.CalledProcessError) as error:
-        output = getattr(error, "stdout", "") or ""
-        _fail(f"xcresulttool {label} failed: {output.strip()}")
+        _fail(f"xcresulttool {label} failed: {_subprocess_error_detail(error)}")
     try:
         payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, TypeError) as error:
         _fail(f"xcresulttool {label} is not valid JSON: {error}")
     if not isinstance(payload, Mapping):
         _fail(f"xcresulttool {label} root must be a JSON object")
@@ -291,15 +315,14 @@ def xcresult_summary(result_path: Path) -> Mapping[str, Any]:
             stderr=subprocess.STDOUT,
         )
     except (OSError, subprocess.CalledProcessError) as error:
-        output = getattr(error, "stdout", "") or ""
-        modern_error = f"xcresulttool summary failed: {output.strip()}"
+        modern_error = f"xcresulttool summary failed: {_subprocess_error_detail(error)}"
         try:
             return _legacy_xcresult_summary(result_path)
         except XCResultInvariantError as legacy_error:
             _fail(f"{modern_error}; legacy fallback failed: {legacy_error}")
     try:
         payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, TypeError) as error:
         modern_error = f"xcresulttool summary is not valid JSON: {error}"
         try:
             return _legacy_xcresult_summary(result_path)
