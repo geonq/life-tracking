@@ -59,3 +59,16 @@ Updated 2026-09-17 Europe/Berlin.
 - Luna Max handles bounded implementation with exact file scope; Astra Medium
   reviews batches. Close workers/processes after use. Commit and push verified
   slices. Never promote source/disposable evidence to release acceptance.
+
+## Current stability decision (2026-09-18)
+
+- Treat `EXC_BAD_ACCESS` in a temporary `LifeOSMac` XCTest host as a real
+  crash finding until reproduced and explained. The existing three reports
+  are retained as historical evidence; a manual build survived a focused
+  serial test and no new crash was produced. No speculative lifecycle change
+  is allowed without a new stack-backed reproduction.
+- Apple lanes run one process at a time with `-jobs 1` and
+  `-parallel-testing-enabled NO`; a quiet compile is allowed to continue.
+  Every result bundle is independently validated before it is used as
+  evidence. Manual app processes and disposable test hosts use separate build
+  paths.

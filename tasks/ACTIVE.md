@@ -1,199 +1,77 @@
-# Active LifeOS full-design execution
+# Active LifeOS execution
 
-Status: IN PROGRESS
-Updated: 2026-09-17
-Mode: prospective implementation of the complete LifeOS design plan; one verified, publishable tranche at a time.
+Status: IN PROGRESS — updated 2026-09-18 Europe/Berlin.
 
-## Goal and measurement
+The authoritative source checkpoint is clean `main` at `5d1bf65`, aligned
+with `origin/main`. Release remains **NO-GO**. The frozen registry contains
+258 leaves, 7 aliases, and 0 formally accepted leaves; this is acceptance
+evidence, not an implementation percentage.
 
-Ship the complete personal LifeOS product for daily use on this Mac and
-iPhone, with the Windows host providing private backend and storage.
-Measure two tracks independently: **~70–75% implementation** and
-**~35–45% release readiness**. The frozen registry, tranche reviews, and test
-counts are evidence inputs, never a substitute for either estimate. Existing
-capabilities such as Enable Banking are not reopened as new features: verify
-current deployment and native readback, then close the gate. Every update must
-name the concrete gate moved, the evidence produced, and the next dependency.
+## Product authority
 
-## Authority order
-1. Current user instructions and corrections.
-2. User-supplied `Instructions.md` and authenticated Figma file `14OEzVG2UEO2J3Dnd717ig` (`MacHomeDesignByMe` and named reference frames).
-3. Canonical `Coordination/DECISIONS.md`.
-4. `/Users/georgdomke/Arbeit/VS Code/LifeOS Design` documentation.
-5. Existing behavior only where higher authority is silent.
+- Native SwiftUI/WidgetKit on Mac and iPhone is the product.
+- Windows over Tailscale is the private structured-data/document boundary.
+- Use truthful live data. Production never silently falls back to fixtures.
+- Calendar, Reminders, Obsidian, HealthKit/Zepp, finance and tax retain their
+  domain authority; do not create competing mutable stores.
+- No generic advisor or conversational AI. Calorie-photo estimation is the
+  only in-app AI flow.
+- Use SF Pro/system typography, semantic icon abstraction, the brand palette,
+  green estimates, orange calories, compact hierarchy, Notion-style calendar
+  scrolling/pinch, and interruptible motion with Reduce Motion final states.
 
-## Product boundary
-- Native SwiftUI/WidgetKit for iPhone and macOS is the product.
-- Windows PC/Tailscale is the private structured-data and document-service boundary.
-- Apple Reminders owns actionable task state; Calendar owns time commitments; Obsidian owns durable knowledge/plans; HealthKit transports health samples with Helio Strap/Zepp provenance; the private LifeOS ledger owns financial/tax evidence.
-- No production fixture fallback. Missing live values remain unavailable.
-## Implemented source and scoped evidence
-- Figma-led four-row Overview and Usage detail surfaces.
-- Native Calendar week/month/three-day layouts, event editor/status/icons, holidays, and widgets.
-- Calendar Tailscale sync/client foundation while preserving peer sync.
-- Tax document local feature foundation.
-- Provenance-aware read-only Usage ingestion/API/native UI.
-- Fail-closed Finance summary and disabled connector contracts; institution-aware import provenance/recovery is pushed at `c871339`.
-- Current application source checkpoint is `c871339`; local `main` matches `origin/main`. PR #1 is merged and GitHub issues #2, #3, and #4 are closed; verify issue/PR state before the next push.
-  The verified Windows candidate is `6baa1f3`; current read-only observation
-  has BitLocker protection, stopped `LifeOSAPI`, absent `LifeOSGateway`, and an
-  active marker without current stage/recovery/progress at the default backup
-  root. The older 31,401-unit receipt is historical and not current.
-  Backend boundary security is Astra scoped GREEN at `87e7db6`. Calendar
-  security and merge hardening is committed at `8942b8e`, with 107/107 focused
-  iPhone tests and a passing macOS build. Usage hierarchy is committed at
-  `33c74c9`, with 3/3 focused macOS visual tests and seven inspected captures.
-  Fitness Recovery hero repair is committed at `03a78a1`, with 1/1 focused
-  macOS snapshot and 1/1 iPhone 17 layout policy test passing.
-  Finance responsive hierarchy is committed at `fd8ccfb`, with 16/16 scoped
-  Mac snapshots, responsive captures at 900/1200/1512/1800, focused iPhone 17
-  contracts, and an Astra Medium GREEN review. Import provenance/recovery is at
-  `c871339`, with 55/55 Mac logic tests and a successful generic iOS test build
-  after Astra Medium **MERGE** review.
-  Shared visual foundation is committed at `5b90539`, with the current compact
-  SF Pro/neutral token contract, flat card treatment, composed secondary-control
-  contrast checks, settled chart/ring geometry, a successful serialized Mac
-  build, and an Astra Medium GREEN review. This does not certify whole-app
-  visual or device acceptance.
-  Shell refinement is committed at `39f2c21`, with an exact serialized Mac
-  build, opened Home/Usage/Calendar captures, and an Astra Medium GREEN review.
-  iOS simulator/generic lanes are blocked at asset compilation by the missing
-  iphonesimulator runtime; collapsed/compact reversal and iPhone tab rendering
-  remain runtime checks.
-  Usage/Home/Clipper refinement is committed at `e8bbefa`, with compact
-  truthful empty states, connector-specific recovery labels, measured chart
-  breakpoints, a successful serialized Mac build, and an Astra Medium GREEN
-  review. The focused XCTest command compiled but the sandbox blocked its
-  `testmanagerd` connection before assertions.
-  Dashboard hierarchy/source refinement is committed at `0d094ee`, with
-  compact system typography, semantic icons, neutral navigation selection,
-  opacity-only route motion, 5/5 dashboard tests, a production build, and an
-  Astra Medium GREEN review. Browser runtime capture is unavailable here.
-  T12a calendar zoom normalization is committed at `80d4f5d`, and `b425ca9`
-  adds the reviewed T12b timeline viewport/midnight pass plus T13a bounded
-  widget snapshot reads/writes and valid oversized-payload regressions.
-  `fc1b3c1` adds the Astra-reviewed T12c Mac header pinch, guarded settle,
-  cancellation, and matched-geometry ownership pass. The serialized Mac
-  build-for-testing passed. The iOS lane reaches changed Swift compilation but
-  stops at actool because no iphonesimulator runtime is available. D4–D5,
-  simulator execution, physical gestures, and widgets remain open. D1 at
-  `16e0855` bounds local store reads before decode and is Astra-reviewed
-  MERGE; D2a/D2b at `f0d59a5` add normalized revision ceilings and synced
-  one-item undo compensation, with an Astra Medium **MERGE**. D3 is accepted
-  at `b6bc465` with an Astra Medium **MERGE**, Mac build-for-testing success,
-  and a standalone Berlin DST/month-end behavior probe.
-  Bounded recovery diagnostics are committed at `14a3b7f`; strict progress
-  validation is committed at `4e14e38`; strict journal observation is committed
-  at `9e43dd7`; bounded phase telemetry is committed at `0a8d5b6`. The current
-  historical telemetry coordination receipt is `056c1b4`, not the source
-  checkpoint. Native Windows PowerShell 5.1 static,
-  behavior, failure-parity, and legacy Serve suites passed with exit 0 for the
-  latest slice, and Astra Medium reviewed all four slices GREEN; the canonical
-  transaction remains untouched. The public CalendarStore merge boundary is
-  hardened at `e07a0a4`, with an Astra Medium **GREEN** review; focused iPhone
-  17 receipt is 96/96 with 0 failures.
-- macOS storage guard: report/dry-run, scoped `--apply`, fail-closed probe,
-  per-lane checks, 7/7 tests plus 2 probe subtests.
-## Current dispatch
+## Current evidence
 
-- A1.2 checkpoint `29bbbde` contains the retained artifact capability,
-  immutable phase tokens, strict bounded progress payload parser,
-  authority-owned lease/cursor state, restart mirror reconciliation, exact
-  commit boundaries, and pre-publication replay-limit fencing. Astra Medium
-  reviewed the exact candidate **MERGE**; fresh Windows PowerShell 5.1 native
-  and static suites pass. A1.3 is accepted at `f6a848a` after Astra Medium
-  **MERGE**, 73 local source checks with three environment skips, and passing
-  disposable Windows static, behavior, legacy Serve, and native suites. Canonical
-  recovery evidence remains open.
-- A prior narrow Mac shell candidate was compiled and tested, then rejected by
-  Astra Medium for missing actual shell evidence and collapsed-header geometry
-  risk; its patch is preserved in `/private/tmp/lifeos-mac-shell-candidate-red.patch`.
-  The causal replacement is the reviewed and pushed `39f2c21` shell refinement.
-- Claude's supplied security findings are reconciled in
-  `artifacts/final/T0/security-findings.md`. The parent-led matrix records
-  source-fixed, partial, open, and unverified states; the production
-  dependency audit is clean, while dev/hosted proof is separate. It does not
-  authorize canonical Windows mutation or claim a final penetration test. Do not start
-  another broad audit; source fixes must use a completed, bounded owner packet.
-- T0 requirements mapping is generated from the validated frozen registry.
-  T10a capability preflight completed as **SOURCE GAP** and is retained at
-  `artifacts/final/T0/t10a-capability-preflight.md`; three T1a recovery review
-  attempts produced no usable report and made no mutation. T12c is now source
-  reviewed and pushed; the bounded T12d D1 store-bound repair is now pushed at
-  `16e0855`; D2 revision/undo reconciliation is pushed at `f0d59a5`, and D3
-  is pushed at `b6bc465`. A1.1 terminal-stage repair is pushed at `0f8fd8e`;
-  A1.2 complete authority checkpoint `29bbbde` is pushed and reviewed **MERGE**
-  with fresh native/static Windows evidence. A1.3 is pushed at `f6a848a` and
-  reviewed **MERGE** with all four disposable Windows suites passing. Next is
-  canonical recovery evidence, then D4/D5; A1.4 truthfulness is `9539841`.
-  The calendar reconciliation receipt is at
-  `artifacts/final/T0/calendar-security-reconciliation.md`.
-## Execution phases
+- Finance packets cover institution detection/import, mapping/reimport,
+  recurring Manage Payment controls, investment/Robinhood validation, and
+  bounded live-readback parsing. They are source-reviewed and locally tested;
+  live provider acceptance is still open.
+- Usage packets cover provider-neutral registry management, Claude retention,
+  manual Gemini subscription readings and compact hierarchy. Gemini API and
+  Gemini subscription are separate products; automatic subscription quota is
+  unsupported without an official endpoint.
+- Windows disposable recovery/source suites and the storage guard pass. The
+  canonical host currently has Tailscale and BitLocker healthy but LifeOSAPI
+  stopped, LifeOSGateway absent, no LifeOS listener, and only the legacy sync
+  task Ready.
+- The current serial Mac logic lane is **193/193 passed**. A focused stability
+  lane is **1/1 passed** while an isolated manual LifeOSMac build stayed open.
+  The three old `EXC_BAD_ACCESS` reports belong to temporary XCTest hosts;
+  no new crash report appeared. Receipt:
+  `artifacts/final/stability/2026-09-18-lifeosmac.md`.
+- Generic iOS SDK/build-for-testing compiles; CoreSimulator is unavailable and
+  physical iPhone/runtime evidence remains open.
 
-### Phase 1 — Finance native surface and truthful connection readiness [IN PROGRESS]
-- [ ] RED/GREEN tests for unavailable/observed presentation, connector policy labels, and fixture isolation.
-- [ ] Native Finance Overview using the six existing independent metrics.
-- [ ] Accounts/Connections readiness for Enable Banking/Sparkasse and the
-  Trade Republic import path; PayPal is removed from the active product scope.
-  No fake balances or fake connection health.
-- [ ] iPhone navigation and macOS desktop-first sidebar integration.
-- [ ] Deterministic, globally labeled visual fixtures for light/dark QA only.
-- [ ] Fresh iPhone/macOS build, tests, screenshots, visual critique, independent review, scoped commit/push, remote parity.
+## Remaining work
 
-### Phase 2 — Finance ledger core
-- [ ] Shared Account, Transaction, Category, Rule, ImportBatch, and SyncHistory models with provenance and audit links.
-- [ ] Manual Cash/Custom balance adjustments as auditable transactions.
-- [ ] Unified transaction review/search/filter/inspector UI.
-- [ ] CSV/PDF import adapters after representative samples; classify known institutions from headers/format fingerprints, preserve originals, and require explicit mapping for unknown formats.
-- [ ] Budgets, cash flow, income/expenses, recurring/subscriptions/bills/goals; detect recurring candidates and provide a provenance-backed Manage Payment override for weekly/monthly/yearly cadence.
-- [ ] Net worth/reports only from verified source records; keep Robinhood investments visibly separate from bank transactions while including verified holdings/cash, with NextSemis as an optional final integration gate.
+1. Finish canonical Windows candidate/preflight, supervised recovery/install,
+   service/ACL/Serve/health/readiness/listener verification, and rollback.
+2. Verify real Enable Banking values, consent/revoke/freshness, recurring
+   reconciliation, Trade Republic import, and Robinhood/net-worth separation.
+3. Implement the missing Obsidian Canvas codec, Markdown/Canvas round trip,
+   durable vault store, journal/conflicts, graph/spatial index, native views,
+   bounded gateway route, and tests.
+4. Verify LifeOS-owned workouts and physical Zepp/HealthKit provenance;
+   leave proprietary Zepp fields unavailable without evidence.
+5. Verify lock-screen and existing widgets, App Group, signing, background
+   refresh, and honest Morning Sync/USB Refresh Shortcuts on the iPhone.
+6. Perform route-level visual/motion review and the final Astra security
+   review, then close all release-blocking findings.
 
-### Phase 3 — Tax and Documents completion
-- [ ] Shared document metadata/merge strategy including `updatedAt` and conflict semantics.
-- [ ] Windows-hosted encrypted archive path over Tailscale; checksum and transfer receipt.
-- [ ] OCR extraction with editable fields and original-file retention.
-- [ ] Transaction matching and Missing Documents.
-- [ ] iPhone hold-to-confirm staging deletion only after verified archive receipt; never imply deletion of Files/iCloud originals.
-- [ ] Refined macOS Tax three-pane UI grounded in researched tax-app references.
+## Worker contract
 
-### Phase 4 — Business
-- [ ] Shared business ledger over Finance transactions; Revolut Business readiness without duplicating records.
-- [ ] Revenue/expenses/profit, customers/suppliers, invoices, VAT, uploads,
-  reports, and deterministic insights. Calorie-photo estimation is the only
-  permitted in-app AI flow.
-- [ ] No Clipper workflow duplication; Clipper remains an external read-only source.
+Luna Max receives one exact disjoint file set at the current SHA. Astra Medium
+reviews the actual diff and evidence after each meaningful batch. Every worker
+returns changed paths, tests/exit codes, evidence paths, complexity, and open
+uncertainty. Unexpected scope, a data-authority conflict, a destructive
+migration, or a reproducible crash stops the tranche.
 
-### Phase 5 — Investments
-- [ ] Trade Republic import-only path unless an official/regulated connector becomes available; support Robinhood investment imports with the same provenance and net-worth reconciliation rules.
-- [ ] Holdings, lots, dividends, interest, performance, allocation, capital gains, reports.
-- [ ] Original document provenance and safe tax linkage.
+Every accepted tranche is committed and pushed to `main`, checked for local /
+remote SHA parity, and reflected in `Coordination/HANDOFF.md`,
+`Coordination/PHASE_STATUS.md`, and this file. Apple lanes use one serial
+`xcodebuild` process with the storage guard; quiet compilation continues until
+the explicit result. Completed disposable processes and caches are cleaned
+through targeted, owned paths only.
 
-### Phase 6 — Tasks, Grocery, Shopping
-- [ ] Tasks are an Apple Reminders-backed lens, not a competing mutable task store.
-- [ ] Grocery/Shopping retain their distinct lightweight interaction models, ownership and clearing semantics.
-- [ ] Calendar overlays derive from authoritative sources without duplicating mutable records.
-
-### Phase 7 — Home, navigation, reports, settings, and cross-module polish
-- [ ] Full desktop three-pane shell, contextual inspector, breadcrumbs, command palette, keyboard paths.
-- [ ] Only functional modules appear as active destinations; unavailable integrations are honest and non-interactive where appropriate.
-- [ ] Home widgets/deep links, notifications, quick actions, cross-module report output.
-- [ ] Settings for approved integrations, storage, backup, security, import/export, appearance and widgets.
-- [ ] Product-wide typography/token/accessibility/Reduce Motion sweep and fresh visual comparison to Figma.
-
-### Phase 8 — Fitness [EXTERNAL SAMPLE BOUNDARY]
-- [ ] Complete all BF/HK/NU/SU/retention and native workout contracts; real source-dependent fields require physical provenance, and unavailable data does not reduce functional scope.
-- [ ] Preserve HealthKit source/device metadata; Helio Strap is sensor authority.
-- [ ] Zepp-only metrics remain unavailable without an authorized official interface.
-
-### Phase 9 — Real connector activation and hardware acceptance [OPERATOR/AUTHORIZATION BOUNDARY]
-- [ ] Sparkasse regulated Open Banking provider/coverage/consent.
-- [ ] Trade Republic remains import-only unless official access exists; no production `pytr`.
-- [ ] Physical-device signing/provisioning, actual account data, folder conventions,
-  and hardware-specific visual acceptance. Source-present signing and Shortcut
-  intents, executed Shortcut behavior, and signed-device renewal are separate
-  evidence states. The personal installer source is now present and
-  Astra scoped GREEN with 13/13 tests; physical signing/provisioning/install
-  evidence is still required.
-
-## Tranche completion witness
-A tranche is complete only when exact current source has passing focused/full tests, fresh iPhone and macOS screenshots are inspected, production paths fail closed, an independent review is reconciled, approved files are committed/pushed, the working branch matches its remote and its PR head, and canonical status is clean. Whole-product completion additionally requires every requested phase, including external/device evidence, and the user's final visual/product review.
+See `tasks/final-execution-plan.md` for exact file ownership, dependencies,
+tests, evidence and stop conditions.

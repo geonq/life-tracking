@@ -1,200 +1,198 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-17; source checkpoint `c871339`; local `main`
-matches `origin/main` with zero divergence. D2a/D2b/D3/A1.1 are Astra Medium
-**MERGE**. Approved documentation-only plan; Windows facts are read-only; release is NO-GO.
-Progress is **70–75% implemented** / **35–45% release-ready**, kept separate.
-## 1. Current truth and explicit gates
-- **NO-GO.** The current checkpoint is `c871339`, including the reviewed
-  dashboard refinement at `0d094ee`, calendar zoom safety, the T12b calendar
-  viewport/midnight correction, T13a bounded widget snapshot I/O, visual
-  foundation at `5b90539`, the clean production dependency audit, and the Astra-reviewed finance importer provenance/recovery slice.
-  GitHub CLI reports PR #1 MERGED into `main` and no open PR; no source
-  acceptance or release readiness is implied. A serialized Mac Usage build succeeded; the
-  focused XCTest command compiled but the sandbox blocked `testmanagerd` before
-  assertions.
-  A serialized Mac shell build passed; iOS lanes stop at asset
-  compilation because no `iphonesimulator` runtime is installed. Last recorded
-  read-only Windows observation shows BitLocker protected C:/D:, stopped
-  `LifeOSAPI`, absent `LifeOSGateway`, no LifeOS process, and an active recovery
-  marker. No final runtime or registry acceptance is implied.
-- HANDOFF records FROZEN registry validation: 258 scored leaves, seven aliases, zero accepted, failing --score. Historical scoped GREEN is neither whole-product acceptance nor an effort percentage.
-- Recorded receipts: Usage visuals3/3; Finance16/16 plus phone contracts; Fitness Recovery1/1 Mac and1/1 phone; Calendar107/107 simulator plus Mac build; installer13/13; backend148/148. Mac snapshots executed51/51 before archive failure; this is not a passing final archive. Tax has scoped AX/picker proof, not a successful whole Mac UI suite.
-- Windows recorded state: C: and D: fully encrypted/protection ON; **BitLocker is healthy**. No recovery/install process; API stopped; gateway absent; marker active with a manifest but no current stage, `recovery.json`, or `recovery.progress.jsonl` at the default backup root. The older 31,401-unit receipt is not current. Candidate `6baa1f3` and disposable diagnostics through `0a8d5b6` do not certify canonical recovery/install.
-- Rejected recovery optimization and Mac shell candidate remain excluded. Two security workers closed without reports. D3 and A1.1 have final Astra Medium **MERGE** reviews; complete A1.2 at `29bbbde` is also **MERGE** with fresh Windows PowerShell 5.1 native/static passes covering authority-owned lease/cursor, restart reconciliation, exact commit boundaries, and replay-limit fencing. A1.3 at `f6a848a` is **MERGE** after 73 local source checks and passing disposable static, behavior, legacy Serve, and native suites. Canonical recovery and D4/D5 remain open. Live banking, physical signing/widgets, whole-app visuals/runtime, Zepp fidelity, Canvas and final operational security remain unverified.
-- Review inputs: Coordination/HANDOFF.md, Coordination/DECISIONS.md, Coordination/PHASE_STATUS.md, tasks/ACTIVE.md, this file, tasks/design.md, docs/LIFEOS_ACCEPTANCE_REGISTRY.md and relevant referenced source filenames only. The Canvas scope formerly notified through issue #2 is retained locally; the GitHub notification thread is closed.
-- Current user instructions/DECISIONS govern authority/security; compatible tasks/design.md governs visuals. Both current documents already specify Calendar40/64/120. Keep SF Pro, green estimates, orange calories and native Home NavigationStack.
-- Shared visual foundation `5b90539` is Astra Medium GREEN after an exact
-  serialized Mac build. It establishes the compact token/card baseline,
-  composed secondary-control contrast checks, and settled chart/ring geometry;
-  route-by-route visual and interaction evidence remains required. The iOS
-  lane is currently blocked at asset compilation by the missing simulator
-  runtime.
-- Shell refinement `39f2c21` is Astra Medium GREEN after an exact serialized
-  Mac build and opened Home/Usage/Calendar captures. It is a bounded shell
-  checkpoint; collapsed/compact reversal, iPhone tab rendering, and the full
-  route/gesture matrix remain unverified.
-- Usage/Home/Clipper refinement `e8bbefa` is Astra Medium GREEN after two
-  focused review/fix cycles, a serialized Mac build, and exact artifact
-  inspection. It preserves empty-history range selection and connector
-  recovery states, and implements the measured 224/256pt chart contract.
-- Dashboard refinement `0d094ee` is Astra Medium GREEN: compact system
-  typography, semantic icons, neutral navigation selection, opacity-only route
-  motion, 5/5 tests, and a production build. Browser runtime capture remains
-  unavailable.
-- T12a calendar zoom normalization `80d4f5d` plus T12b/T13a in `b425ca9` are
-  Astra Medium GREEN: density, baseline offset/focal inputs, extreme finite
-  viewport math, midnight marker/label refresh, and bounded widget snapshot
-  I/O are covered by source and focused regressions. T12c in `fc1b3c1` is
-  Astra Medium source MERGE with Mac pinch progress, guarded settles,
-  matched-geometry ownership, and reduced-motion paint retention; its
-  serialized Mac build-for-testing passed. The iOS lane reaches changed Swift
-  compilation but stops at actool because no iphonesimulator runtime is
-  available. T12d D1–D3 are accepted through `b6bc465`; D4–D5, simulator
-  execution, physical gesture, and widget evidence remain open.
-- T0 must reconcile registry RM-01 hero morph, RM-02 ring reveal/halo, RM-03 chart draw, related atomic/non-overlap metadata and BF coaching language with current design. Preserve original hash, reviewed replacement contracts, rationale, amendment/refreeze history and unrelated thresholds; never silently accept obsolete behavior, prune scope or implement generic AI.
-- All ACTIVE phases1–9 and registry leaves remain scope: Finance/ledger, Tax/Documents, Business, Investments, Reminders Tasks/Grocery/Shopping, shell/settings/reports, bounded full Fitness and hardware; issue#2 Canvas adds explicit completion scope. Honest unavailable states do not erase unfinished functionality.
-- Gates: G0 reconciled contracts/evidence; G1 successful canonical Windows recovery/protected gateway; G2 live bank/import/health provenance; G3 permitted signed Mac+iPhone/widgets/App Groups; G4 full visual/runtime/performance matrix; G5 Canvas decisions/round trip; G6 final security, registry, branch/PR parity and geonq acceptance. All remain open here.
 
-## 2. Serialized dispatch and disjoint ownership
-- One Luna Max implementer at a time; Astra Medium reviews bounded batches/gates. Use those tiers only when available and record actual worker identity; role/nickname is not model evidence. No scheduling, watchers, overnight supervisors or unattended retry loops are added.
-- Future dispatch pins actual base SHA, inspects dirty/index changes without resetting unrelated work, resolves symbols and assigns exact paths/tests/evidence. Parent inspects returned diff, commands/exits/counts, producing SHA, artifact paths, complexity and uncertainties.
-- Paths below are repository-relative; braces enumerate literal alternatives, never globs. NEW means proposed, not inspected implementation. Ownership sets are disjoint. Additional source/tests/generated project/lockfile/workflow files require an Astra-reviewed exact-path amendment before writing; no directory-wide grants.
-- Reopen the original owner for fixes/wiring; never give its file to another tranche. Tests may be executed read-only by other owners. RED changes are quarantined and causally repaired/re-reviewed or reverted only within owned work; changes invalidate affected downstream receipts.
-- Order: T0 → T10a early installer/capability preflight → T1 → Astra A1 → T2 → Astra A2 → T3 → T4 → T5 → T6 → T7 → Astra B → T8 → T9 → T10b physical integration → Astra C → T11 → T12 → T13 → T14 → Astra D → T15 → T16 → Astra E.
-- T10a assesses existing-code feasibility; T10b proves integrated devices. Independent source work may continue serially while external receipts are blocked, but dependent live acceptance cannot. T11 tokens precede shell work, then original module owners perform sequential visual corrections.
-- Named exclusive follow-ups: T3b document/supplement gateway routes after T5/T9; T3c Planning registration after T14; T10c project/entitlement wiring after T14; T11b shell and T12b Calendar Projects entry after T14. Contracts/isolated modules precede wiring, then end-to-end proof; no circular completion dependency.
-- Astra A1 must pass before canonical recovery mutation; A2 before live banking. B–E include relevant follow-ups. T0 alone owns coordination/registry/status updates, including closeout. Future commit/push/remote checks belong to the execution operator; this edit performs or approves no merge.
+Prepared by Astra Medium from the Luna Max audit on 2026-09-18. Baseline:
+`5d1bf650803480e46925c3cfa3c870040d909a36`, clean `main`, aligned with
+`origin/main`. Release is **NO-GO**. The 258-leaf registry has 0 accepted
+leaves; it is an acceptance ledger, not a completion percentage.
 
-## 3. Luna tranches: exact write sets, deliverables and evidence
-| Tranche | Exclusive owning paths | Expected outcome/evidence and dependency |
-|---|---|---|
-| T0 | Coordination/{HANDOFF,PHASE_STATUS,DECISIONS}.md; tasks/{ACTIVE,final-execution-plan,design}.md; docs/LIFEOS_ACCEPTANCE_REGISTRY.md; artifacts/final/T0/requirements-map.md; artifacts/final/T0/security-findings.md (NEW; registry validator changes require a separate reviewed defect packet) | First reconcile baseline, each leaf/ACTIVE phase/Canvas requirement, owner/source/tests/missing evidence/blocker. Parent-led named security-finding table replaces the two failed broad worker audits. Missing original findings remain an input blocker, never FIXED. Audited registry correction/refreeze and validation receipts. |
-| T1 | services/windows-service-host/deploy/{Deployment.Common,rollback,install}.ps1; services/windows-service-host/deploy/tests/Deployment.{Behavior,Static,LegacyServe}.Tests.ps1; scripts/tests/test_windows_deployment_source.py | After T0: retain reviewed diagnostics; full31,401-unit disposable measurement before optimization. Bind journal AND progress identity/bytes/hash/sequence/ACL to transaction/stages/snapshots. Post-barrier observation never mutates SCM. Production-reader regressions, native PS5.1 static/behavior/legacy/failure parity, scan/time/RSS receipts; Astra A1. |
-| T2 | scripts/build_windows_release.sh; scripts/tests/test_windows_release_builder.py; services/windows-service-host/deploy/{preflight,verify,verify-candidate,tailscale_snapshot}.ps1; services/windows-service-host/src/{WindowsAclProtector,ChildProcess,ChildSupervisor,ServiceHostConfig,HealthProbe}.cs | After A1/fresh operator identity: §4 recovery, protected cutover, SID/ACL/reparse/DPAPI/listener/health/restart/reboot/restore receipts; Astra A2. Preserve authority/verified rollback candidate on failure. Extra service-host test edits need exact-path amendment. |
-| T3 | services/gateway/{enablebanking,main,test_enablebanking,test_gateway}.py; ios/Shared/{FinanceDomain,FinanceCoordinator,TailscaleSyncClient}.swift; ios/LifeOS/Settings.swift; ios/LifeOSTests/{BankConsent,SettingsConnectionLifecycle,FinanceCoordinator,TailscaleSyncClientSecurity}Tests.swift | Live work after A2: inspect existing consent; actual Sparkasse/supported Revolut gateway→Mac→iPhone balance/transaction/currency/source/time. Explicit Business eligibility, expiry/revoke/partial/retry/no-client-secret evidence. Own later gateway document/supplement/Planning wiring; rerun full gateway suite after follow-ups. |
-| T4 | ios/Shared/Finance{StatementImporter,ImportedTransaction,ImportedTransactionStore,BudgetDomain,BudgetStore,AllocationDomain,AllocationStore,TrackingPreferences,TrackingPreferencesStore,WealthProjection,WealthAllocation,TransactionCategory,Categorizer}.swift; ios/LifeOS/Modules/Finance/{FinanceView,FinanceAnalyticsView,FinanceImportView,FinanceChartModeViews}.swift; ios/LifeOSTests/{FinanceStatementImporter,FinanceTradeRepublicImportIntegration,FinanceImportViewModelSync}Tests.swift | After T3 contracts: RF-01–21/PC-04 ledger, auditable cash, search/filter/inspector, budgets/cycles/categories/allocations, recurring/bills/goals, analytics modes/ranges, net worth/holdings/travel Tools/context. Real TR/RH preview→confirm→reimport/correction conserves cents/balances, classifies known institutions, rejects ambiguous/unknown mappings, retains originals/provenance/pre-migration backup, and exposes uncertain recurring items through explicit weekly/monthly/yearly management. |
-| T5 | ios/Shared/TaxDocuments.swift; ios/LifeOS/TaxDocumentsView.swift; ios/LifeOSTests/{TaxDocument,DurableStorageSafety}Tests.swift | After T4: archive/OCR/editable metadata/conflicts/matching/Missing Documents. Encrypted Windows original with hash/readback receipt; metadata-only T3b sync, never raw OCR pages. Crash safety/masking/CSV formula defenses. Staging deletion needs confirmation/archive receipt; never delete Files/iCloud originals. |
-| T6 | NEW: ios/Shared/{BusinessLedgerProjection,InvestmentLedgerProjection}.swift; ios/LifeOS/Modules/Business/BusinessView.swift; ios/LifeOS/Modules/Investments/InvestmentsView.swift; ios/LifeOSTests/{BusinessLedgerProjection,InvestmentLedgerProjection}Tests.swift | After T4–T5: Business customers/suppliers/invoices/VAT/uploads/reports; investment lots/dividends/interest/allocation/performance/gains over one Finance ledger. Missing ledger support returns to T4 first. Import/export/replay/tax-link reconciliation, no competing ledger or Clipper duplication. |
-| T7 | NEW: ios/Shared/{RemindersTaskRepository,ShoppingListDomain}.swift; ios/LifeOS/Modules/Tasks/TasksView.swift; ios/LifeOS/Modules/Grocery/GroceryView.swift; ios/LifeOS/Modules/Shopping/ShoppingView.swift; ios/LifeOSTests/{RemindersTaskRepository,ShoppingListDomain}Tests.swift | After T0: Reminders owns tasks; resolve distinct Grocery/Shopping ownership/clearing before implementation. Permission/revoke/offline/edit/complete/relaunch receipts; read-only Calendar projections, no competing task store; shell wiring stays T11. |
-| T8 | ios/Shared/{HealthKitAdapter,HealthKitDomain,HealthKitReconciliation,HealthKitAnchorStore,FitnessTrainingDomain,FitnessTrainingStore,FitnessTrainingProjection,FitnessStrengthDomain,FitnessJournalStore,FitnessBiologyDomain,FitnessRetentionDomain,FitnessLifestyleLedger}.swift; ios/LifeOS/{HealthKitFitnessComposition,HealthKitFitnessProjection,HealthKitFitnessRepository,HealthKitIntegration,HealthKitProductionBridge,FitnessTrainingCoordinator}.swift; ios/LifeOS/Modules/Fitness/Fitness{View,TrainingView,TrainingSessionView,StrengthView,BiologyView,StressView,LifestyleView}.swift; ios/LifeOSTests/{HealthKitReconciliation,HealthKitProductionBridge,HealthKitFitnessRepository,FitnessTrainingCoordinator,FitnessTrainingStore}Tests.swift | After T3 contracts/T10a: all BF contracts, source-qualified recovery/load/sleep/stress/reserve/monitor/body/journal/activity/strength; local templates/exercises/sets/rest/PR/history/report. Atomic finish-once/durable timers/offline edits; denial≠zero. §6 comparison plus T10b physical receipts before live acceptance. |
-| T9 | ios/Shared/{NutritionBarcode,NutritionBarcodeScanner,NutritionDomain,NutritionGoalDomain,NutritionGoalStore,NutritionMealDomain,NutritionMealStore,FoodPhotoPreparationCoordinator,FoodPhotoSanitizer,SupplementDomain,SupplementHistoryDomain,SupplementNotificationActionToken,SupplementNotificationAdapter,SupplementNotificationDelegate,SupplementNotificationPermissionCoordinator,SupplementNotificationPlanner,SupplementNotificationTimeResolver,SupplementReducer,SupplementStore}.swift; ios/LifeOS/Modules/Fitness/Fitness{NutritionView,SupplementsView}.swift; services/api/src/{nutrition-photo,open-food-facts}.ts; services/gateway/{supplement_catalog,test_supplement_catalog}.py; ios/LifeOSTests/{NutritionMealStore,FoodPhotoSanitizer,SupplementNotificationAdapter,SupplementStore}Tests.swift | After T8 stores; gateway T3b: manual/barcode/recipe/recent/photo draft→confirmed meal, editable macros/consent/sanitization/correction lineage/full NU-02 benchmark. Confirmed-only totals/widgets/health writes. Supplements inventory/refill/Taken/Snooze/Skip once-only; terminated/background/DST/locked/denied evidence. Exact binary8/9/10 GiB storage gates; ≤3 images/meal, originals≤90d, detail≤365d, derivatives≤500 KiB; export/delete/encrypted restore. |
-| T10 | scripts/{install_personal_device.sh,install_personal_device_checks.py,run_prerelease_lanes.sh}; scripts/tests/test_personal_device_installer.py; ios/project.yml; ios/LifeOS/{Info.plist,LifeOS.entitlements}; ios/LifeOSWidget/LifeOSWidget.entitlements; ios/Shared/SigningStatus.swift; ios/LifeOS/Modules/Automation/LifeOSAppIntents.swift; ios/LifeOSTests/{SigningStatus,LifeOSAppIntents,HealthKitCapabilityConfiguration}Tests.swift | a early/b after T8–T9/c after T14: §5 feasibility, reviewed installer/renewal, actual Mac+iPhone app/widget signatures/permitted group readback/manual Shortcuts. Inspect prerelease script, correct missing -jobs 1 if still true. Project additions/widget exclusions stay here; extra Mac entitlements/generated files need exact amendment. |
-| T11 | ios/Shared/{DesignTokens,Typography,LifeOSIcon,LifeOSMotionKit,LifeOSComponents,LifeOSResponsiveContainer,LifeOSInteractionKit,LifeOSChartKit}.swift; ios/LifeOSMac/LifeOSMacApp.swift; ios/LifeOS/{LifeOSApp,OverviewView,CodexView}.swift; ios/LifeOS/Usage/{UsageFacts,UsageFactsView,UsageProjectionChart,UsageTokenActivity}.swift; ios/LifeOS/Modules/ModuleNavigation.swift; ios/LifeOSTests/{LifeOSDesignSystem,LifeOSChartInteraction}Tests.swift | After T0/contracts: tokens→shell/Home/Usage/Clipper→original module-owner visual passes. One navigation authority; keyboard/command/inspector/report/deep links/context and canceled retired callbacks. `39f2c21` is a reviewed shell checkpoint; actual expanded/collapsed/switcher Mac and iPhone runtime evidence remain required. |
-| T12 | ios/Shared/{CalendarViews,CalendarLayout,CalendarDomain,CalendarCoordinator,CalendarPeerSync,CalendarStore,CalendarIconAsset}.swift; ios/LifeOS/CalendarView.swift; ios/LifeOSTests/{CalendarLayout,CalendarPeerSync,CalendarConflictIntegration}Tests.swift | After T11 tokens: focal40/64/120 density, separate header expansion, full-day scroll/paging/edit arbitration/DST/recurrence/undo and §8 recordings. Preserve pairing/replay/bounded decode/outbox/tombstones; Astra targeted symbol-fallback re-review. |
-| T13 | ios/LifeOS/{WidgetSnapshotPublisher,LifeOSBackgroundRefresh}.swift; ios/Shared/{FutureWidgetSnapshot,CalendarWidgetDateGrid}.swift; ios/LifeOSWidget/{LifeOSWidget,CalendarWidget,NextEventWidget,UsageWidget,FutureModuleWidgets}.swift; ios/LifeOSTests/WidgetSnapshotPublisherTests.swift; ios/LifeOSMacWidget/LifeOSMacWidget.swift | After T3,T8–T12: every WG/WS leaf/kind/family; protected versioned privacy-filtered atomic snapshots/coalesced reload/freshness/expiry/lock/redaction/deep links. Actual dark/clear/tinted grey-wallpaper proof; reload request never means immediate display. |
-| T14 | NEW: ios/Planning/{PlanningVaultBinding,PlanningDomain,PlanningCanvasCodec,PlanningMarkdownCodec,PlanningVaultStore,PlanningMutationJournal,PlanningConflictResolver,PlanningGraphProjection,PlanningSpatialIndex}.swift; ios/LifeOS/Modules/Planning/{PlanningCanvasView,PlanningNodeInspector}.swift; ios/LifeOSTests/{PlanningCanvasCodec,PlanningMarkdownCodec,PlanningMutationJournal,PlanningConflictResolver,PlanningSpatialIndex}Tests.swift; services/gateway/{planning,test_planning}.py; packages/contracts/src/planning.ts | After T10a feasibility: §7 access→lossless codec→proposals/conflicts→Mac→phone→Windows mirror. Operator choices gate publication. Preserve originals/conflicts. T3c/T10c/T11b/T12b wire after isolated review, then real round trip. |
-| T15 | services/api/src/{server,local-auth,ingest-secret,claude-ingest,codex-adapter,atomic-file,history,json-boundary}.ts; apps/dashboard/src/{main.tsx,styles.css} and apps/dashboard/index.html only if release-served; NEW: services/api/src/final-boundary.test.ts | After integrated T2–T14: final security and live Usage/Clipper freshness/idempotency/truth, no prompt/file-content collection. Collector/contract/dependency/CI edits need exact amendments; gateway/native fixes return to owners. Served web gets CSP/truth checks, never substitutes for native evidence. |
-| T16 | NEW: artifacts/final/T16/release-evidence.md only | All gates/follow-ups: final matrix, leaf/ACTIVE/Canvas/user completeness and candidate/signed/deployed/branch/PR audit. Acceptance/status edits return to T0, fixes to owners. Retain previous candidate/restore receipts; merge needs gates AND explicit operator authorization. |
-## 4. Windows recovery precedes current Enable Banking re-certification
-1. Future operator starts read-only: PID/command/start-time ownership, SCM, strict marker/journal/progress identity/phase/sequence, disk/memory and healthy C:/D: protection. Active marker≠running process. No duplicate recovery, unknown-process termination, BitLocker disable/re-encryption or key disclosure.
-2. Preserve the verified canonical manifest, recovery marker, journal, progress, backups and authority files. Never edit/delete the marker to unlock install, fabricate recovered state or reset the legacy checkout.
-3. Disposable PS5.1 corpus exercises production readers: changed/replaced/truncated journal/progress, same-length hash mismatch, interrupted tails, forged context, ACL/reparse/ancestor replacement, absent-service/SCM drift, writer barrier and crash/retry every stage. Mock OS boundaries only; record full-size scans/time/RSS.
-4. Descriptor-bound validated journal/progress/stage/snapshot authority survives to mutation; changed identity/bytes/ACL or incomplete state fails closed, with fresh validation before repair/final release. Post-barrier verification never creates/deletes/reconfigures/starts/stops services. Rejected mutating reconcile/TOCTOU shortcut stays excluded.
-5. Only Astra A1 plus fresh operator/admin identity and transaction mutex permits verified deploy/rollback.ps1 -ManifestPath <canonical manifest>. Observe the same owned PID/CPU/stage; time alone is not failure. Safe owned-process stop under resource danger preserves recovery-required state; observation cannot become recovery success.
-6. Successful recovery/postconditions precede install. Build via scripts/build_windows_release.sh using verified Node/pinned wheelhouse; bind SOURCE_SHA/archive digest/manifest through transfer. Verify-candidate→non-mutating preflight→install on identical protected inputs; retain backups/legacy fallback until verified cutover.
-7. Prove API auto/gateway delayed-auto, virtual identities, absolute binaries, loopback-only127.0.0.1:8787/8421 and approved Tailscale HTTPS host/8420. Verify SYSTEM identity snapshot access, service-SID ACLs/reparse refusal/DPAPI/unauthorized effective access/health/restart/reboot/encrypted restore. No secrets in arguments/logs/evidence.
-8. After A2 inspect existing Enable Banking sessions before reconsent. The provider path is historically live-proven; re-certify current deployment/native readback rather than rebuilding the adapter. Operator supplies protected key/cert/app-ID paths, exact callback/ASPSP mapping and consent if necessary. Reconcile real account counts/balances/transactions/currency/observedAt gateway→Mac→iPhone; partial/stale remains distinct. Controlled replay/invalid-state/expiry/revoke uses disposable consent; no unattended live revocation.
-9. Sparkasse is live regulated banking; Revolut Personal/Business support and eligibility must be proven or unavailable. Trade Republic and Robinhood remain supported manual CSV/PDF investment imports with operator samples, institution detection, original hash/batch/provenance/preview/confirm/correction/reimport receipts, visibly separate investment transactions, and verified net-worth contribution; NextSemis is an optional final gate after this direct path. No production pytr, PayPal fallback or fabricated balances.
+## Rules for every tranche
 
-## 5. Secure Mac+iPhone signing, App Groups and Shortcuts
-- geonq must unlock/trust USB iPhone, enable Developer Mode as required, authenticate the chosen team and approve HealthKit/Reminders/notifications. Record actual model/OS/team/profile/expiry. Purchase/enrollment, credentials and consent cannot be inferred from this plan.
-- Personal Team renewal and capability support must be checked against current Apple documentation and actual issued profiles in T10a; do not turn remembered restrictions into a proven blocker. Inspect actual expiry and App Groups/HealthKit permission before promising free-team feasibility. Source entitlements do not grant capability; no unattended renewal promise.
-- T10a verifies current official capability limits and actual permitted profiles during future authorized execution. Unsupported App Groups/HealthKit require geonq's explicit Developer Program decision or separately approved reduced scope; full requested release stays blocked. Never strip required entitlements, bypass signing or copy containers to manufacture success.
-- Inspected source declares app HealthKit/App Groups and widget App Groups; this is not physical capability proof. SigningStatus cannot self-renew and treats unknown metadata as unavailable. Labels do not prove profile membership, installation or shared-container access.
-- Validate signed app AND extension/strict signature/expanded non-placeholder host/group/team/profile capability/expiry. Prove physical Mac and iPhone independently: launch→persist real record→widget readback→lock/redact→relaunch→renew preserving data. HealthKit stays iOS-only; Mac uses authorized projections.
-- Reviewed installer uses allowlisted Apple tools/minimal environment/bounded output/timeouts/fail-closed cancellation. No signing/provider credentials in source/prompts/archives. Current sync is Tailscale identity plus edge capability, not an invented persisted Keychain bearer; legacy cleanup/physical host/transport remain open.
-- Mac “LifeOS USB Refresh”: manual Shortcut invokes reviewed installer with explicit device/team inputs; reports installed build/expiry only after validation. Missing/locked device/canceled auth/wrong group/failed install is failure. No silent self-renewal; actual renewal now and future expiry require separate real observations.
-- iPhone “LifeOS Morning Sync”: open Zepp, invoke official action only if available or request visible manual Sync, then LifeOS refresh/status. Opening Zepp≠sync. AppIntents cannot sign/install code; denied/no-readable-samples stays honest. User-triggered Shortcuts remain the default; no Claude/usage-limit watcher or scheduling machinery belongs here.
+1. One Luna Max implementation worker at a time. Astra Medium reviews the
+   actual diff and evidence in batches. Close each worker after its report.
+2. Dispatch from the current SHA with exact file paths, symbols, invariants,
+   prohibited changes, focused tests, evidence path, and stop conditions.
+3. Shared integration owners are exclusive for `ios/project.yml`, generated
+   Xcode changes, app entry points, `ModuleNavigation.swift`, `Settings.swift`,
+   `TailscaleSyncClient.swift`, gateway `main.py`, and contract exports.
+4. Each tranche ends with focused verification, Astra review, a commit, push,
+   and local/remote SHA parity. Unexpected scope, destructive migration,
+   security-boundary change, or reproducible crash stops that tranche.
+5. Real data is authoritative. Fixtures are explicit and labelled. Missing
+   data stays unavailable. No generic advisor or conversational AI; calorie
+   photo tracking is the only in-app AI.
+6. Apple lanes use `-jobs 1 -parallel-testing-enabled NO`, a fresh owned
+   result/DerivedData path, the storage guard, and independent xcresult
+   validation. A quiet compile is not a hang; an interruption is unverified.
 
-## 6. Zepp workout fidelity boundaries
-- LifeOS owns templates/exercises/sets/reps/load/rest/PR/history; Zepp is a read-only source through proven Helio→Zepp→HealthKit transport. No assumed public Zepp API, proprietary readiness/load/Training Effect parity or recovered sets/reps.
-- Compare identical workouts in Zepp/Health/LifeOS with sensor/firmware/Zepp/iOS versions: strength, outdoor GPS, intervals/pauses, HR/gaps, energy, duplicate sources, edit/delete/replay, DST/backfill, offline/lock/revoke. Preserve UUID/sync version/source/device/units and reported versus elapsed duration.
-- Routes/distance/laps/zones require actual source AND adapter support. Read denial is indistinguishable from no readable samples, never zero. Unsupported/partial/stale/conflicting fields remain qualified; do not imply Zepp-equivalent fidelity.
-- Local finish commits once, timestamps survive background/relaunch; refresh cannot duplicate sessions/overwrite edited sets. Link imported summaries only through reliable matching or explicit selection, retaining provenance. “Waiting for watch sync” persists until readback. Physical comparisons gate HK-05/affected BF acceptance.
+## 1. Stability and truth ledger — L/S
 
-## 7. Issue#2 Canvas architecture and unresolved operator choices
-- Decisions still open: selected non-Uni vault/project folder; stock rectangular fallback versus maintained shape plugin; phone publication when Mac is absent; Windows mirror/proposals versus canonical editing. These are proposed choices, not approved decisions or a fresh issue-state report.
-- Proposed selected LifeOS/Projects/<uuid>/{Project.md,Map.canvas,Notes/,Assets/,_lifeos/}: Markdown/YAML identities/semantic links authoritative, standard Canvas coordinates presentation, sidecar custom shapes/bends and rebuildable private index. Unselected notes read-only; no transitive vault export.
-- Proposed Mac canonical writer uses user-selected security-scoped bookmarks/coordinated file access; phone stores durable proposals with queued/conflicted/published states; Windows protected mirror/proposals stays outside iCloud. Publication/writer role waits for operator choice. No generic AI planning or vault watcher.
-- Lossless bounds: note≤1 MiB, Canvas≤5 MiB,1,000 nodes/3,000 edges, finite coordinates/safe relative paths; reject traversal/case collisions/reparse. Preserve unknown valid fields or read-only; never lossy save. Exact-byte base hashes/coordinated reread/journaled same-directory atomic replace/manifest last; preserve originals/conflicts on crash/replay.
-- Calendar Projects is a separate viewport: Mac pan/pinch/space-drag/marquee/undo/Escape; phone deliberate node drag versus pan/pinch; zoom25–200%, note inspector, labeled colors/shapes/edge handles/arrows/labels and explicit Obsidian/external actions. No preview scripts/automatic remote fetch.
-- Build graph/index per revision, update incident edges per node move, bounded visible rendering; measure spatial lookup target O(log V+k), no file rewrite per pointer frame. Real Obsidian→LifeOS→Obsidian text/metadata/layout/unknown-field round trip, shape fallback/offline conflicts/no unrelated leakage required. “Saved to vault” only after readback; no fake editor before compatibility.
+The three historical `EXC_BAD_ACCESS` reports are real crashes in temporary
+XCTest hosts. The stability receipt shows a separate manual LifeOSMac build
+survived a focused serial 1/1 test and no new crash report appeared. Do not
+change lifecycle code, suppress reporting, or disable tests without a new
+symbolicated reproduction.
 
-## 8. SF Pro visual contract and runtime matrix
-- Follow tasks/design.md: SF Pro/system including wordmark; Mac title/body/control/metadata/value22/13/13/12/28, phone24/17/15/13/30, semantic scaling/monospaced digits. Home/Usage radius12/heavy detail16, one title/source notice, semantic SF Symbols with OS fallbacks (Fitness ECG).
-- Compact Linear/Vercel quality: sidebar208/resizable184–240, below900 collapse52, switcher if remaining content<360; Mac gutters24/toolbar44, phone gutters16/hit44. Respect content720/960 and enlarged-text reflow; no global scale/giant KPI/empty scaffolds.
-- Flat black/white-led surfaces; action#0253C4, observed#5DA0FD, green dashed estimates, neutral dotted targets, orange calories/teal protein. Explicit labels/patterns, no resting glow/decorative gradients/duplicated unavailable notices.
-- Motion: hover120ms/immediate press/release140ms; Mac route crossfade120ms/Home detail180ms+8pt/one native stack, phone interactive native push/pop. Retarget current presentation; no hero morph/card-flight/financial count-up/ring-chart replay/stale completion. Direct gestures track input; selectors .24/.90; Reduce Motion instant/≤100ms opacity.
-- Remove generic Advisor/AI/chat/coaching from routes/views/menus/models/intents/backend/prompts/tests/served web through original owners; no renamed advice. Calorie-photo alone remains consented/proposal-only until confirmation. Usage accounting/deterministic source explanations remain data reporting.
-| Matrix | Required current-build evidence and pass condition |
-|---|---|
-| All destinations | Home/Usage/Clipper/Calendar, Finance+Tools/import, every Fitness/workout/nutrition/supplement page, Tax, Business, Investments, Tasks/Grocery/Shopping, Projects, Settings/reports: action→result→Back. One hierarchy, no clipping/overflow/duplicate notices, edges within1pt, drafts/context preserved. |
-| Viewports/states | Frozen Mac900/1200/1512/1800×982 plus design800×700/1100×800/1280×800/1440×900; content559/560,719/720,959/960. Phone375×667/393×852/430×932 plus physical iPhone17 portrait/landscape. Light/dark/largest text/keyboard/de-DE/80-character names/large currency; live/zero/unavailable/loading/stale/partial/error/pending/denied/revoked/locked/redacted where applicable. |
-| Shell/motion/accessibility | Expanded/collapsed/switcher, especially52pt header;20 Home→Usage→Back→Clipper→Back cycles/reversal50/100/150ms/refresh/resize/background/keyboard/Reduce Motion. One interactive destination, no teleport/replay/lost input; tasks/subscriptions return to baseline. VoiceOver/keyboard focus/labels/roles/actions/chart alternatives. |
-| Calendar | Physical Mac focal timeline pinch40–120/default64 at09:15/23:45; header outward≥1.12/inward≤.88 expansion, owner fixed at gesture begin/cancel restores/no slider/no double mutation. Phone header tap and scroll00–24 over blank/event/resize areas; slow/fast/diagonal paging/edit/auto-scroll/DST/recurrence/undo. One today-only now marker; gutter drift≤1pt/focal≤2pt except bounds. |
-| Widgets | Preserve recorded18 iPhone/17 Mac kinds; enumerate actual supported families/identifiers/destinations; seven aliases counted once. Actual WidgetKit full-color/dark/transparent-clear/tinted Home/Lock surfaces on grey#606060/#808080/#A0A0A0 plus white; live/stale/empty/locked/redacted/reload/readback/deep links. Composited text≥4.5:1/graphics≥3:1; system tint/background removal can override styling, no forced transparency/immediate-refresh promise. |
-| Physical performance/storage | QA-04A/B/C verbatim:30 signed physical launches each Mac/iPhone, shell p95≤1.5s/cached route≤2.5s/none>5s or failure/offline shell. Three30s runs per scroll/drag/scrub/tab at frozen widths/themes/Reduce Motion: frame p95≤16.7ms/none>50ms/input-visible p95≤100ms/zero lost input. Manifest-backed12-month storage: Windows accounting≤5s p95/compaction≤120s/restore≤180s; phone accounting≤2s p95/cache rebuild≤60s; crash every boundary/100% manifest equality. |
-- Each cell PASS/FAIL/UNVERIFIED with source/build SHA, viewport/device/OS/scale/locale/text/theme/mode, expected/observed and inspected image/video/trace ID. SOURCE/TESTED/VISUAL/INTERACTION/LIVE/SYSTEM-DEVICE remain separate. Fixtures are isolated/labeled layout-only, never personal-store/widget writes or live/device/interaction proof.
+Diagnostic scope: `ios/LifeOSMac/LifeOSMacApp.swift`,
+`ios/LifeOSMacSnapshotTests/LifeOSMacSnapshotTests.swift`,
+`ios/LifeOSMacUITests/LifeOSMacUITests.swift`,
+`ios/TestPlans/LifeOSMacLogic.xctestplan`, `ios/project.yml`, and
+`scripts/run_prerelease_lanes.sh`. Record PID/parent/path/arguments, crash
+UUID/exception/stack, explicit UI-test termination, and manual-app behavior.
+Keep manual and temporary builds separate; never use broad `killall`.
 
-## 9. Verification, final Astra review and completion evidence
-- Future native command: xcodebuild -project ios/LifeOS.xcodeproj -scheme <manifest scheme> -destination <recorded destination> -jobs 1 -parallel-testing-enabled NO -derivedDataPath <unique SHA/lane> -resultBundlePath <unique xcresult> -only-testing:<target/suite> test CODE_SIGNING_ALLOWED=NO for unsigned diagnostics only. Resolve scripts/native_lane_manifest.json and validator CLI help first; physical/signature lanes use real signing.
-- One native build/test, one needed simulator/DerivedData writer; check owned processes/memory first, stop new work on pressure/sustained swap growth, retire only owned idle processes. Canceled/zero-test/skipped/malformed archive or Mac runner materialization failure cannot pass.
-- Focused Python: python3 -B -m unittest discover -s scripts/tests -p '<assigned test filename>'; pinned gateway: python -m pytest services/gateway/test_gateway.py services/gateway/test_enablebanking.py; API workspace typecheck/full suite. Native Windows Static/Behavior/LegacyServe/failure-parity run on disposable PS5.1; real recovery receipts separate. No unpinned dependency installs.
-- T3–T4 run BankConsent/SettingsConnectionLifecycle/FinanceCoordinator/import tests plus real reconciliation; T5–T7 Tax/DurableStorage/proposed ledger/Reminders/list tests and permission/import/export round trips. T8–T9 HealthKit reconciliation/bridge/repository, training coordinator/store, nutrition/photo/supplement tests plus physical fidelity and full NU-02 held-out corpus thresholds.
-- T10 runs installer/syntax/SigningStatus/AppIntents/capability checks and actual signature/renewal/Shortcut receipts. T11–T13 design/chart/Calendar peer/conflict/layout/widget tests plus inspected Mac/phone recordings; T14 proposed codec/journal/conflict/index/gateway auth tests plus selected-vault round trip.
-- Seven native lanes/exact scopes/counts remain frozen QA-01/02 contracts; resolve manifest/registry mismatches through audited T0 amendment, never reduced expectations. T16 uses scripts/validate_xcresult.py and scripts/validate_native_release.py with resolved arguments/nonzero retained evidence.
-- Astra A1 recovery identity/non-mutating observation before retry; A2 actual cutover/gateway before banking; B T3–T7 cents/authority/import/privacy/completeness; C T8–T10 health/nutrition/installer/device; D T11–T14 opened visuals/gestures/widgets/Canvas; E T15–T16 integrated security/live/release. Reopen affected batches after fixes; missing artifacts cannot receive GREEN.
-- Final security: forged identity/Host/DNS-rebinding/CORS/unauthorized peer/direct listener; replay/future timestamps/deletions/duplicates; body/response/content-type/redirect/time bounds; malformed icons; legacy secrets/DPAPI/ACL; tax/OCR/CSV leakage; atomic crash/symlink/reparse; concurrent/corrupt history; executable/ComSpec/PATH/Python injection; constant-time credentials; dependencies/CI pinning/fork-secret isolation/served CSP.
-- Canvas adds traversal/case collision/unauthorized enumeration/receipt replay/oversized maps/conflicting writers. Live negative tests are non-destructive on authorized endpoints; fault injection stays isolated. T15 records concrete OPEN/PARTIAL/FIXED findings/severity/source/operational/regression IDs. Unresolved release-blocking findings hold G6.
-- Each tranche records artifacts/final/<tranche>/<run-id>/evidence.md, with exact artifact filenames fixed before capture, source/build SHA, command/exit/count, device/state, source→display reconciliation and digests. Raw private bank/health/vault/device captures remain protected locally; only sanitized substantive evidence is committed.
-- T0 closeout binds each accepted leaf to tracked repo:// artifact/SHA-256/real evidence commit E/exact claim-kind/types/thresholds. No remote evidence URL, empty receipt, future/self-referential SHA or source-only live acceptance. Preserve258 leaves/seven aliases unless an explicit audited scope amendment requires refreeze.
-- Normal registry validation after evidence changes; final python3 -B scripts/validate_acceptance_registry.py --score. Every P0, aggregate≥95%, every workstream≥90% and geonq visual approval form the registry checkpoint. Full requested completion also resolves remaining ACTIVE/user/Canvas scope; unexplained5% omission is not completion.
-- Final future operator verifies local branch/index/base, origin, PR#1 head/base/diff/CI/comments and exact candidate/signed/deployed provenance. Documentation-only commits may follow code only with recorded source-tree equality. Draft/open/mergeable status remains historical until rechecked; no Windows/GitHub access here.
-- Release requires operational recovery/restart/backup/restore, live bank/import/health proof, permitted physical Mac+iPhone/widgets, every matrix, final security review, registry and geonq product acceptance. geonq has authorized merging this personal checkpoint; merge is an integration action and does not close G6 or convert NO-GO into release acceptance. Resolve review comments before merge when present, then retain NO-GO/blocked-external leaves until the release gates pass.
-**Immediate next dispatch:** canonical Windows recovery evidence. A1.1 is
-accepted at `0f8fd8e`; complete A1.2 is checkpointed at `29bbbde`; A1.3 is
-accepted at `f6a848a`; D3 is accepted at `b6bc465`. T12d D4/D5 follow the
-recovery evidence. T10a remains a source-gap receipt, and canonical mutation
-still requires the A1/A2 evidence gates.
-Remaining blockers are live provider data, Personal Team capability/signing/devices,
-Zepp fidelity, vault/writer/plugin
-decisions, runtime/visual/security/registry, and final operator evidence.
-## 10. Dispatch contract replacing broad one-worker tranches
-- Sections 3 paths are exclusive OWNER inventories, not permission to dispatch an entire row. Every invocation gets one packet below, exact expanded paths, current symbol/line anchors from `rg -n`, its own focused tests, and at most one behavior change. NEW paths are proposals; verify absence before creating. No line numbers are invented here.
-- Model contract: Luna Max reads/implements; Astra Medium specifies/reviews. Record tool-reported model/effort and worker ID; if unavailable, report that limitation, never disguise another model using a nickname. This planning role is not evidence of a runtime model setting.
-- Every packet inherits commands in §9 and design evidence in §8; return a useful read-only finding or a buildable patch within a 20-minute implementation budget. Send an early 5-minute finding/next-command handoff. A timeout is not termination: parent checks the SAME live handle and requests an orderly checkpoint; no duplicate worker or rollback until terminal and ownership inspected. Long measured recovery has its own stage/CPU protocol (§4), not this timeout.
-- Resource budget: one implementer, then reviewer, never overlapping native jobs; one simulator maximum, `-jobs 1`, unique DerivedData. Record baseline/peak RSS and swap; pause new dispatch under OS memory pressure or sustained swap growth. Stop only identified task-owned idle processes; never kill unrelated apps or delete another worker's files.
-- Entry: clean or explicitly isolated base; approved requirements/owner list; inputs accessible; commands/test target verified; dependencies passed or marked source-only. Exit: exact diff within scope, build success, nonzero focused tests or explicit environment block, opened artifacts where applicable, complexity analysis and no introduced warnings. Environment-blocked output is not a passing tranche.
-- Handoff schema: packet/base/head/worktree/model/effort; requirement IDs; exact changed paths+symbols; causal finding; command+exit+test count; artifact path+digest+device/state; expected/observed; O/time/RSS; unresolved findings; owned PID/session state; next literal command. Parent verifies diff/receipts before any commit. No handoff means no credit, not automatic deletion.
-- Astra entry: complete handoff and inspected parent evidence; exit: scoped verdict with findings by severity/path, missing runtime cells, causal fix instructions and affected downstream gates. Review 2–3 related small packets together; recovery/auth/codec destructive-write boundaries require review before live mutation. RED returns to original owner, not a fresh broad worker.
-| Sequential packet | Exact subset of §3 ownership and stop boundary | Required outcome before advancing |
-|---|---|---|
-| T0a → T0b | T0 docs only: requirements-map then security-findings | Map EVERY registry leaf/alias and ACTIVE bullet to owner/gate; crosswalk below is an index, not substitute. Security matrix has all 12 High/Medium and every Low Claude finding, current symbols, FIXED/PARTIAL/OPEN/UNVERIFIED, regression and deployed proof. Split audits into calendar, local API, privacy/storage; no broad audit. |
-| T10a | Read-only scripts/install_personal_device*; ios/project.yml; app/widget entitlements; current official Apple capability docs | Record actual available devices/runtime/team/profile capability and exact operator action; no install/purchase or entitlement removal. Resolve signing feasibility before large feature investment. |
-| T1a → T1b → A1 → T2a → A2 | T1a read-only recovery production readers and disposable native benchmark; T1b only demonstrated hot-path defect in Deployment.Common.ps1 plus corresponding Deployment.*.Tests.ps1; T2a §3 T2 owner | Full 31,401-unit time/RSS/scan receipt and strict failure matrix first. No speculative optimization; no canonical mutation before A1. Recover, then candidate/install/health/restart/restore; A2 requires real postconditions. |
-| T3a → T4a → T4b | T3 exact owner; T4a Shared Finance*.swift in its inventory + importer/integration tests; T4b only listed Finance views + import UI tests | Reuse consent/read real banks; ledger/import conservation and idempotence before visual finance changes. Reopen T4a for models rather than adding competing stores in views. |
-| T5a → T5b → T3b | T5a TaxDocuments.swift + TaxDocumentTests.swift; T5b TaxDocumentsView.swift + DurableStorageSafetyTests.swift; T3b gateway main.py/test_gateway.py only | Secure metadata/archive protocol first; Tax import/review/matching/export next; metadata-only gateway integration last. Source test names may be extended only through owner amendment. |
-| T6a → T6b → T7a → T7b → B | T6a Business* listed paths/test; T6b Investment* listed paths/test; T7a RemindersTaskRepository.swift/TasksView.swift/matching test; T7b remaining T7 paths | One ledger; Business/VAT and investments lots/performance; Tasks permissions/outbox; Grocery/Shopping clearing. No module accepted from a placeholder screen. |
-| T8a → T8b → T8c | T8a HealthKit* files/tests; T8b FitnessTraining* and Strength* files/tests; T8c remaining T8 owner files | Source reconciliation before native workout flow, then remaining BF readiness/body/journal/activity. Existing unlisted Fitness domain files require exact owner amendment, not reconstruction. Each packet returns after one model or UI behavior; repeat owner suffixes as needed. |
-| T9a → T9b → T9c | T9a Nutrition* and FitnessNutritionView + matching tests; T9b FoodPhoto* and nutrition-photo.ts + sanitizer tests; T9c Supplement* + FitnessSupplementsView + listed gateway catalog/tests | Manual/barcode/recipe persistence; consented photo proposal and held-out benchmark; idempotent notification actions/inventory. No estimated proposal enters totals before confirmation. |
-| T10b → C | T10 installer, AppIntents, signing/configuration owner only | Physical install/group/HealthKit/Shortcuts; retain early feasibility receipt separately. C needs actual current profile/device evidence, not source entitlements. |
-| T11a → T11b | T11a Shared token/component files and design tests; T11b remaining shell/Home/Usage files/tests | Inspect existing scoped GREEN work first; make only reproduced corrections. Full route/rapid reversal recordings required; same owner fixes module integration later. |
-| T12a → T12b → T12c → T12d | a CalendarLayout.swift + CalendarLayoutTests.swift; b CalendarViews.swift only; c CalendarView.swift only; d CalendarDomain/Coordinator/PeerSync/Store/IconAsset.swift + peer/conflict tests | a pure 40/64/120 focal/cancel/owner policy; b scroll endpoint and today-only marker; c wire header/timeline pinch separately and remove slider; d bounded security/recurrence/DST/undo reconciliation. Each must compile before next; no API removal leaving callers broken. d starts read-only and changes only demonstrated defects. |
-| T13a → T13b → D1 | a publisher/background/snapshot/grid + publisher test; b widget views and both bundle files | Data protection/readback before rendering matrix; D1 reviews T11–13 with physical trackpad/phone/widget proof. Preserve exact family inventory. |
-| T14a → T14b → T14c → T14d → D2 | a PlanningDomain/VaultBinding/CanvasCodec/MarkdownCodec + codec tests; b Store/MutationJournal/ConflictResolver + matching tests; c GraphProjection/SpatialIndex + index test + two Planning views; d planning.py/test_planning.py/planning.ts | Resolve vault/writer/shape decision first; round-trip codec before writes; crash/conflict durability before gestures; protected Windows transport last. Reopen T3/T10/T11/T12 owners for registration/project/route wiring. No broad four-layer worker. |
-| T15a → T15b → T16 → E | T15a API exact listed paths/test; T15b release-served dashboard only; T16 evidence only; security fixes return to original owner | Bounded final API/transport tests then source+deployed cross-boundary Astra review; no pen-test against bank/Apple/Zepp infrastructure. Final gates/registry/branch parity and operator acceptance. |
-- When even a packet spans too much code, return the symbol inventory first and dispatch one subsection with the same owner; do not use the budget to rewrite unrelated files. Disjointness is across owners; repeated suffix invocations are sequential resumptions of the same owner, never concurrent overlapping grants.
+Reconcile `Coordination/{HANDOFF,PHASE_STATUS,DECISIONS}.md`,
+`tasks/{ACTIVE,todo,final-execution-plan}.md`, and `README.md`. Every
+requirement row is `requirement → owner → source status → verification →
+SHA/evidence → next action`, classified S (source), L (local), W (Windows), P
+(physical/provider), or U (unsupported).
 
-## 11. Dependency graph, gate closure, and measurable cost
-- Graph: G0 → {T10a capability preflight, G1 recovery}; G1 → G2 live bank/import/collector proof; {G0,T10a,implemented T8–13} → G3 physical capability/automation; {G2,G3,all ACTIVE features} → G4 complete visual/runtime; {G0,T10a,vault decisions,T14+wiring} → G5 Canvas round trip; {G1,G2,G3,G4,G5} → G6 release. G2 health closes only after G3 physical provenance; early banking can finish independently. External waits permit independent SOURCE work only.
-- Crosswalk: ACTIVE1–2/9 → RF,PC,DA-06,ST + G1/G2/G3; ACTIVE3 → Tax/DT + G1/G2/G4; ACTIVE4–5 → Business/Investments/RF + G2/G4; ACTIVE6 → Tasks/Grocery/Shopping + G3/G4; ACTIVE7 → IA,UX,RM,US,CL,ST,WG,WS,QA + G2/G3/G4; ACTIVE8 → all BF/HK/NU/SU/DT/DA-02–04 + G2/G3/G4; issue#2/user Canvas → G5; SY/GW/SG/QA + all owners → G6. T0 must resolve actual leaf IDs from the registry without fabricating prefix matches.
-- G0 exit: one immutable requirements map with no orphan leaf/ACTIVE bullet/user addition, amended/refrozen contradictory contracts, actual ownership/test commands. G1 exit: recovered marker/journal postconditions, exact candidate service/edge health plus restart/reboot/restore and denied-access receipts. G2 exit: source→gateway→app matching real timestamps/amounts, TR import replay, provenance/freshness/revoke behaviors; unsupported providers explicitly resolved by their contracts, never invented.
-- G3 exit: actual permitted signed Mac/iPhone/extensions, App Group write/read, physical HealthKit permissions, widget refresh/lock/deep link, installer renewal preserving data, executed Shortcuts with honest limitations. G4 exit: every release route/state/action-return matrix, screenshots S1–S7/H1/U1/M1, frozen performance/storage gates and geonq visual acceptance. G5 exit: selected vault real three-way round trip, conflicts/offline/phone publication, shape fidelity decision fulfilled. G6 exit: no unresolved release-blocking security finding, all gates/requirements, registry score AND remaining requested scope complete, exact source/signed/deployed/PR provenance, review comments resolved.
-| Data path | Complexity/memory expectation; measured evidence |
-|---|---|
-| Recovery/archive | O(bytes+units) verification per phase, bounded streaming buffers; no repeated full journal scan per unit or weaker identity checks. Measure production 31,401-unit counts, phases/time/RSS; compare baseline before optimization. |
-| Finance/Tax/imports | O(n) parse/dedupe via stable-key maps, O(n log n) necessary ordering, indexed lookups; bounded pages/bytes and cancellable background work. Decimal/integer-cents arithmetic; benchmark 1k/10k/limit records, duplicate reimports, OCR adversarial long digits, archive memory. |
-| Calendar/tasks | O(n log n+k) interval ordering/layout where k is visible overlaps, O(n) indexed merge, bounded recurrence expansion by viewport+limit; no quadratic duplicate lookup. Measure 1,024-event bound, all-overlap worst case, DST and gesture frames; no layout/storage I/O per frame. |
-| Health/workouts/nutrition | O(delta) anchored ingestion, O(n) rebuild once/revision; keyed deletions/session matching, no all-pairs workout match. Timers O(1) timestamp-derived; bounded images/retention. Measure 12-month corpus/restore and actual battery/background behavior. |
-| Usage/Clipper/widgets | Normalize O(n log n) once if unsorted, aggregate O(n), select O(log n), ≤240 chart points; publisher O(changed snapshots), bounded per-family output. Measure ingestion replay/history, refresh coalescing, render/RSS; no history scan per pointer frame. |
-| Canvas | O(V+E) decode/index rebuild; indexed hit query target O(log V+k), node move O(degree), bounded visible render; worst-case dense maps measured at 1,000/3,000 limits. Journal writes at committed edits, not every drag frame; no blanket O(n) claim. Tests must measure p95/p99/max, input size, hardware, cold/warm and RSS, not just assert constants or mirror the implementation. Run registry performance thresholds unchanged; if infeasible, record FAIL with causal evidence instead of weakening the threshold. |
+## 2. Canonical Windows backend — W/S
+
+Owner: `services/windows-service-host/deploy/`, `services/windows-service-host/src/`,
+`services/windows-service-host/tests/`, `scripts/build_windows_release.sh`,
+`scripts/tests/test_windows_release_builder.py`, and
+`scripts/tests/test_windows_deployment_source.py`.
+
+Read actual roots, service state, marker, transaction, manifest, journal,
+progress identity, protected configuration, and staging candidate. Resolve
+the 31,401-unit history into one current receipt. Run candidate verification
+and read-only preflight; Astra reviews the exact cutover packet; then perform
+the already-authorized transaction-bound recovery/install. Never clear a
+marker to bypass recovery.
+
+Verify `LifeOSAPI`/`LifeOSGateway` service accounts, dependencies, ACL/SID and
+reparse protections, loopback-only children, Tailscale Serve identity and
+capability policy, direct-listener rejection, `/health`, `/ready`, restart,
+reboot, and rollback. Preserve secrets out of command lines and receipts.
+Use disposable failure injection before canonical mutation. Stop on identity
+mismatch, unexplained journal state, missing rollback material, or preflight
+failure. Evidence goes under `artifacts/final/windows/`.
+
+## 3. Live finance and wealth — S/L/W/P
+
+Connector owner: `services/gateway/{enablebanking,test_enablebanking,test_gateway}.py`,
+`ios/Shared/{FinanceDomain,FinanceCoordinator,FinanceReadback}.swift`, and
+the existing consent/settings tests. Recover the existing Enable Banking
+configuration first. Compare provider → gateway → Mac/iPhone account identity,
+exact amount/currency, transaction identity, timestamps, freshness, consent,
+revoke, expiry, pagination, partial failure, retry and offline cache behavior.
+
+Import/wealth owner: `FinanceStatementImporter.swift`,
+`FinanceInstitutionDetector.swift`, `FinanceImportMapping.swift`,
+`FinanceImportedTransaction*.swift`, `FinanceRecurringPayment*.swift`,
+`FinanceRobinhoodImporter.swift`, `FinanceInvestment*.swift`,
+`FinanceWealthProjection.swift`, `FinanceBankCashProjection.swift`, Finance
+views, and matching tests. Run real Trade Republic/Robinhood preview → confirm
+→ relaunch → reimport/correction → net-worth reconciliation. Preserve exact
+money, source/account/period/provenance, stable IDs, and correction lineage;
+keep investments separate from spending and reject incomplete valuations.
+Recurring candidates must remain suggestions until explicit weekly/monthly/
+yearly management. NextSemis is the last optional gate.
+
+## 4. Offline durability — S/L/W/P
+
+Each owner proves local-first persistence before acknowledgement, mutation IDs,
+bounded replay, conflict/deletion semantics, stale-versus-failed state,
+restart during writes, disk-full recovery, expired authorization, and a
+clock-controlled eight-day Windows outage. Preserve pending mutations until
+acknowledged and never let a stale server snapshot overwrite a newer local
+edit. Use existing domain authorities; do not add a universal competing store.
+
+## 5. Fitness, Zepp, and nutrition — S/L/P/U
+
+Workout owner: `ios/Shared/FitnessTraining{Domain,Store,Projection}.swift`,
+`FitnessStrengthDomain.swift`, `ios/LifeOS/FitnessTrainingCoordinator.swift`,
+`ios/LifeOS/Modules/Fitness/FitnessTraining{View,SessionView}.swift`, and
+existing training tests. LifeOS owns exercises, templates, sets, reps, load,
+rest, completion, history and reports. HealthKit/Zepp observations are
+read-only, source-qualified, timestamped, unit-safe and deletion-aware.
+
+Health owner: `HealthKit{Adapter,Domain,Reconciliation,AnchorStore}.swift`,
+`ios/LifeOS/HealthKit{FitnessComposition,FitnessProjection,FitnessRepository,
+Integration,ProductionBridge}.swift`. Match records only with explicit
+confidence and ambiguity handling. Physical proof compares Zepp, Apple Health,
+and LifeOS fields; never claim proprietary Zepp readiness/load/PAI/Training
+Effect or exact strength parity without a legitimate source. Calorie-photo
+AI remains an editable proposal and confirmed values only enter totals.
+
+## 6. Obsidian Canvas — S/L/W/P
+
+Build four disjoint packets. **Codec/binding:** new
+`ios/Planning/{PlanningDomain,PlanningVaultBinding,PlanningCanvasCodec,
+PlanningMarkdownCodec}.swift` and codec tests. Read/write standard `.canvas`
+and Markdown while preserving node IDs, edges, coordinates, groups, colors,
+supported node types, unknown JSON fields and untouched Markdown/frontmatter.
+Reject traversal, escaping symlinks, case collisions, duplicate IDs, oversized
+inputs and invalid coordinates. Do not promise arbitrary shape parity beyond
+the standard format.
+
+**Durability:** new `PlanningVaultStore.swift`,
+`PlanningMutationJournal.swift`, `PlanningConflictResolver.swift` and tests.
+Use expected content versions, same-directory atomic replacement, recoverable
+journal entries and conflict copies. Preferred topology is a selected
+non-Uni iCloud vault under `LifeOS/`; do not select a vault by guessing and do
+not silently overwrite Obsidian edits.
+
+**Interaction:** new `PlanningGraphProjection.swift`, `PlanningSpatialIndex.swift`,
+`ios/LifeOS/Modules/Planning/{PlanningCanvasView,PlanningNodeInspector}.swift`
+and tests. Implement pan, focal zoom, selection, node drag, edge editing,
+color/type controls, Markdown detail, undo/redo and keyboard actions with
+unambiguous Mac/iPhone gesture ownership. Rebuild O(V+E); target spatial
+queries O(log V+k); persist committed edits, not every drag frame.
+
+**Transport/wiring:** new `services/gateway/{planning,test_planning}.py` and
+`packages/contracts/src/{planning.ts,planning.test.ts}`. Accept only bounded
+project-relative operations with identity, expected revision, mutation ID and
+explicit conflicts. Add Calendar/project registration only after isolated
+codec/store/view tests pass. Prove Mac → Obsidian → iPhone → Mac round trip
+before live vault writes.
+
+## 7. Widgets, signing and Shortcuts — S/L/P
+
+Owners: `scripts/install_personal_device{,_checks.py}.sh` (resolve exact
+current name), installer tests, `ios/Shared/SigningStatus.swift`,
+`ios/LifeOS/Modules/Automation/LifeOSAppIntents.swift`, widget publisher/
+snapshot files, `ios/LifeOSWidget/`, `ios/LifeOSMacWidget/`, and the project/
+entitlement integration owner. Run capability preflight early.
+
+Provide an honest Morning Sync Shortcut: open Zepp, use an officially exposed
+sync action if one exists or show the manual step, then refresh LifeOS and show
+observed freshness. Provide USB Refresh: call the reviewed Mac installer,
+verify the connected device/profile/App Group, and report expiry/failure.
+Opening Zepp is not proof of synchronization; AppIntents cannot renew an
+Apple signature. Verify existing widgets plus the lock-screen calendar widget
+in dark/tinted/transparent modes on the grey wallpaper, with stale/locked/
+deep-link states. Physical signing, App Group, HealthKit, widget, background
+refresh and seven-day renewal remain P gates.
+
+## 8. Visual/motion acceptance — S/L/P
+
+Apply the current design coordination docs route by route. Use SF Pro/system
+typography, one consistent icon abstraction, compact Mac hierarchy, readable
+phone sizing, distinct brand palette, green estimates, truthful unavailable
+states, and no generic AI. Calendar must own vertical scrolling and focal
+trackpad pinch; navigation/chart motion must be interruptible, avoid jumps and
+retired callbacks, and settle correctly under Reduce Motion. Use actual
+captures/interaction recordings at Mac widths, light/dark, loading/stale/live,
+rapid reversals, and reduced motion. Static snapshots alone cannot certify
+motion or whole-app quality.
+
+## 9. Final security/release gate — L/W/P
+
+Astra reviews the final actual diff and deployed evidence for peer admission,
+pairing/replay/timestamps/duplicate IDs/deletions, Tailscale identity/header/
+Host/redirect/body bounds, secret handling, tax protection/migration/regex/CSV,
+atomic writes/symlinks/path traversal, usage cross-process races, offline
+restore/retention, executable resolution, dependencies/CI and canonical
+deployment. Use disposable data and owned endpoints only; do not attack bank,
+Apple, Google or Zepp infrastructure. Every finding names SHA, payload,
+expected/observed result, remediation and retest.
+
+## Immediate next dispatch
+
+After this stability receipt, dispatch the canonical Windows candidate/preflight
+packet with exact inspected parameters. In parallel only when write scopes are
+disjoint, dispatch Canvas codec/domain work or workout source hardening. Do
+not start live finance or physical-device acceptance before the required
+backend/device prerequisites. Finish each packet with review, commit, push,
+and handoff update.

@@ -4,15 +4,14 @@ Updated 2026-09-18 Europe/Berlin.
 
 ## Active task
 
-Continue after the validated Gemini manual-usage and storage-guard tranches.
-Keep the release verdict honest; do not call the product done.
+Continue after the validated usage-management and LifeOSMac stability
+tranches. Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. The current pushed checkpoints are `4856fae` (`Refine
-  usage registry hierarchy`), `1d57435` (`Add manual Gemini usage tracking`),
-  and `5aa3fb1` (`Guard repo build cache cleanup`). Earlier finance and
-  registry checkpoints remain `1956569` and `273f4dd`.
+- Release is **NO-GO**. `main` is clean and pushed at `5d1bf65` (`test: cover
+  usage connection management flows`). Earlier source checkpoints remain
+  `4856fae`, `1d57435`, `5aa3fb1`, `1956569`, and `273f4dd`.
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
@@ -110,6 +109,16 @@ Keep the release verdict honest; do not call the product done.
   macOS focused finance **25/25 passed** and iOS device SDK
   `build-for-testing` succeeded. Simulator execution remains unavailable.
 
+## LifeOSMac stability receipt
+
+- The current post-`5d1bf65` serialized Mac logic lane completed **193/193**
+  with exit 0; the independent validator passed. A focused stability lane
+  completed **1/1** while an isolated manual LifeOSMac build stayed alive.
+  The three older `EXC_BAD_ACCESS` reports are temporary XCTest hosts; no new
+  LifeOSMac crash report appeared during reproduction. Receipt:
+  `artifacts/final/stability/2026-09-18-lifeosmac.md`. No speculative app
+  lifecycle change was made.
+
 ## Storage policy
 
 - `scripts/maintain_macos_storage.sh` is report/dry-run by default; deletion
@@ -140,10 +149,12 @@ Keep the release verdict honest; do not call the product done.
 
 ## Next action
 
-Use the `4856fae`, `1d57435`, and `5aa3fb1` checkpoints as the source of truth.
-After approved canonical recovery, continue live recurring reconciliation and
-the verified Robinhood/net-worth path, then the remaining Zepp, Obsidian,
-widget, signing, visual, and security gates.
+Use `5d1bf65` plus the stability receipt as the source of truth. Continue with
+the canonical Windows candidate/preflight and recovery packet, then live
+finance/net-worth reconciliation, the missing Obsidian Canvas implementation,
+Zepp/workout evidence, widgets/Shortcuts/signing, visual acceptance, and the
+final batched security review. Do not rerun the full Mac suite without a code
+change or a relevant failure.
 Keep each packet reviewed and reflected in these short handoff files.
 
 ## Validation discipline

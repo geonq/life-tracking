@@ -2,97 +2,84 @@
 
 Updated 2026-09-18 Europe/Berlin.
 
+## Release state
+
 - Release: **NO-GO**.
-- Current pushed checkpoints are `4856fae` (`Refine usage registry hierarchy`),
-  `1d57435` (`Add manual Gemini usage tracking`), and `5aa3fb1` (`Guard repo
-  build cache cleanup`). Earlier finance and registry checkpoints are
-  `1956569` and `273f4dd`.
+- `main` and `origin/main` are aligned at `5d1bf65`.
+- The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0
+  formally accepted leaves. This is an evidence ledger, not a percentage.
+- The old `worker/t11a-shared-visual-foundation` branch is patch-equivalent to
+  `main`; no unmerged source was found.
+
+## Verified source and local evidence
+
 - Windows disposable static, legacy Serve, native progress, native snapshot,
-  and complete behavior suites pass. Behavior has one installed-service skip;
-  canonical deployment remains unverified.
-- Fresh canonical SSH readback shows Tailscale running, `LifeOSAPI` stopped,
-  no `LifeOSGateway` service, no LifeOS listener, and only the legacy sync
-  task in Ready state. The marker is still `active` with an
-  `artifacts-complete` journal of 31,401 units; no recovery process is active.
-  Canonical recovery remains unverified.
-- Local source harness is 75 passed/2 skipped. Native C# compile has 0 errors.
-- Storage guard `bash -n` and **10/10** tests pass. It now owns direct-child
-  `lifeos-derived-*` caches and fail-closed process probes. Seven old caches
-  totaling about 14 GiB were removed; the post-cleanup check reports 33 GiB
-  free. CoreSimulatorService is unavailable; the kept iPhone 17 entry remains.
-- Apple lanes check storage before every lane and serialize xcodebuild.
-- Finance institution detection/importer is pushed and Astra Medium reviewed
-  **MERGE**. Native Mac logic is 55/55; generic iOS test build succeeds;
-  simulator execution remains unavailable.
-- Finance mapping/preview, content-free provenance, mapped-v3 account and
-  configuration identity, cross-device account relabeling, deterministic
-  persistence, legacy attempted-request recovery, duplicate/reimport fences,
-  and gateway identity validation are pushed at `5fe26a4`. The bounded Mac
-  finance suite is 17/17; Mac build-for-testing, contracts (199/199),
-  contract typecheck, Swift parse, gateway AST, and diff checks pass. Astra
-  Medium returned **MERGE**.
-- The local mapped-v3 recurring-payment packet is pushed at `453d304`. Its
-  serial macOS build-for-testing and recurring/import suites pass 56/56;
-  final Astra Medium review returned **MERGE**. Live-bank reconciliation is
-  still separate.
-- Finance investment validation is pushed at `8c1a225`; the provider-neutral
-  native AI usage watcher registry tranche is pushed at `273f4dd`. The focused
-  finance suite passes 21/21; contracts typecheck and build cleanly and pass
-  212/212 tests. Astra Medium returned **MERGE**. The native AI usage watcher
-  registry tranche is now validated:
-  Claude remains supported; Gemini subscription/Google AI Pro and Gemini API
-  are honest manual/unsupported boundary rows with no fabricated quota or
-  observations; legacy GLM/DeepSeek/Google AI Studio observations remain
-  visible as `legacyValidated` nonofficial data. Exact connection/window
-  selection, evidence policy, bounded preferences, atomic conversion failure,
-  failure retention, and reset/draft safety are covered. Focused macOS
-  registry/coordinator tests pass 14/14 in the elevated lane; Mac compile and
-  iPhone device SDK build pass. iOS simulator build remains environment-
-  blocked because no runtime is available and `simdiskimaged` is unhealthy.
-- Validated live finance readback is pushed at `1956569` and Astra Medium
-  reviewed **MERGE**. Controller evidence: the focused macOS finance suite is
-  **25/25 passed** and the iOS device SDK `build-for-testing` succeeded. The
-  packet covers bounded readback parsing, source alias canonicalization, exact
-  cents, bank-cash separation, source/row timestamp aging, and
-  consent/failure/cancellation precedence. Simulator execution remains
-  environment-blocked.
-- The manual Google AI Pro/Gemini subscription watcher packet is committed at
-  `1d57435`: bounded validated readings, used/remaining conversion, advancing
-  freshness, fixed reviewed connection actions, rollback-safe UserDefaults,
-  and persistence-before-publication. Focused Mac tests are **22/22**; the
-  serialized full Mac suite is **192/192**; generic iOS device SDK build
-  succeeds; Astra Medium re-review returned **MERGE**. Simulator/UI runtime
-  remains unavailable.
-- The Usage hierarchy follow-up is pushed at `4856fae`: focused Mac visual
-  tests **4/4** passed with an independent xcresult check and the generic
-  iPhone SDK build reports `BUILD SUCCEEDED`. The disconnected fixture is
-  verified; populated live registry rendering and whole-app visual/runtime
-  acceptance remain open.
-- The post-visual full serialized Mac logic lane completed **192/192** with
-  exit 0; the xcresult validator independently reports **192/192** passed.
-  linkd/SceneStorage test-host messages are warnings only.
-- Existing reviewed slices cover calendar security, Usage/Finance/Fitness,
-  shell/navigation, tax accessibility, installer boundary, and API security.
-- Open: live recurring reconciliation, Robinhood/net-worth, canonical Windows
-  install/readback, live finance/providers, automatic Gemini auth/quota
-  transport and subscription readback, workouts, Obsidian Canvas,
-  widgets/Shortcuts/signing, physical iPhone, whole-app visual and runtime
-  acceptance, final security review.
-- Canonical Windows recovery is pending explicit operator approval because the
-  transaction-bound rollback mutates services and restored files; automatic
-  review blocked that action until approval.
-- Astra Medium reviewed the corrected Windows/storage candidate **MERGE** with
-  no blocking source findings. Canonical and concurrent-race evidence remain
-  unverified.
-- Next: continue live recurring reconciliation and verified Robinhood/net-worth
-  work, then Zepp/workouts, Obsidian Canvas, widgets/Shortcuts/signing, visual
-  acceptance, and final security. Every Apple lane must retain the storage
-  preflight and use the repo-cache cleanup option when needed.
+  and behavior suites pass: 75 source checks, 2 environment skips; native C#
+  extraction has 0 errors and 31 nullable/platform warnings.
+- Storage guard syntax and tests pass 10/10. Apple lanes are serialized and
+  reject active builds or less than 15 GiB free space.
+- Finance source packets cover institution mapping, bounded import/reimport,
+  recurring suggestions and Manage Payment, investments/Robinhood validation,
+  and bounded live-readback parsing. Recorded focused Mac counts are 17/17,
+  56/56, 21/21, and 25/25; contract counts are 199/199 and 212/212.
+- Usage source packets cover provider-neutral registry management and honest
+  manual Gemini subscription readings. Focused counts are 14/14, 22/22, and
+  4/4 for the hierarchy visual slice.
+- The current serialized Mac logic lane completed **193/193** with exit 0 and
+  independent xcresult validation.
+- The isolated LifeOSMac stability lane completed **1/1**. A separately
+  launched manual build remained alive throughout. The existing three
+  `EXC_BAD_ACCESS` reports are temporary XCTest hosts; no new crash report was
+  produced during reproduction. See
+  `artifacts/final/stability/2026-09-18-lifeosmac.md`.
+- Generic iOS device SDK/build-for-testing lanes compile. CoreSimulator is
+  unavailable and `simdiskimaged` is unhealthy, so iOS interactions remain
+  unexecuted.
 
-Keep the product boundary: truthful live data, SF Pro, compact Linear/Vercel
-quality, no generic AI, and calorie-photo AI only.
+## Backend state
 
-Xcode lanes are serialized and must be polled to exit. Quiet Swift compile or
-link phases can take several minutes; an interrupted lane is unverified and
-must be rerun. Stop early only for a clear failure, proven hang, or resource
-safety issue.
+- Tailscale and BitLocker are healthy on GEONQSERVER.
+- Canonical `LifeOSAPI` is stopped, `LifeOSGateway` is absent, no LifeOS
+  listener is bound, and the legacy `LifeOSSyncServer` task is Ready.
+- Disposable staging exists at
+  `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical install/recovery is
+  still separate. A marker-bound recovery journal is recorded at
+  `artifacts-complete`; no recovery process is active.
+- The actual `.ts.net` SSH endpoint is
+  `domke@geonqserver.tail5f8789.ts.net`; the earlier `tailscaleip` placeholder
+  is not resolvable.
+
+## Open gates
+
+- Canonical Windows candidate verification, supervised recovery/install,
+  service/ACL/Serve/health/readiness/listener readback, and rollback receipt.
+- Real Enable Banking consent/readback, live recurring reconciliation, and
+  verified Robinhood/Trade Republic/net-worth reconciliation.
+- Obsidian Canvas is source-incomplete: codecs, durable vault store, conflict
+  journal, graph/spatial index, native views, gateway route, and round-trip
+  tests do not exist yet.
+- Zepp-to-HealthKit workout provenance and field accuracy require a physical
+  iPhone and real samples. Zepp proprietary readiness/load/PAI/Training Effect
+  remains unsupported without a legitimate source.
+- Widgets, lock-screen rendering, App Group, personal signing renewal, native
+  Shortcuts, background refresh, and physical iPhone behavior.
+- Whole-app visual/motion acceptance and final batched security review,
+  including tax regex/privacy, cross-process usage writes, and deployed
+  identity-bound transport.
+- Automatic Gemini subscription quota/authentication remains unsupported until
+  an official endpoint is verified. Gemini API usage remains a separate
+  product. No generic advisor AI is permitted.
+
+## Operating rules
+
+- One Luna Max implementation worker at a time; Astra Medium reviews actual
+  diffs/evidence in batches. Exact file boundaries are mandatory.
+- Every tranche gets focused tests, an Astra review, a commit, a push, and
+  local/remote SHA parity before the next tranche.
+- Use real data where available; unavailable states remain unavailable and
+  fixtures are explicit only.
+- Use `xcodebuild -jobs 1 -parallel-testing-enabled NO`; poll until exit. A
+  quiet compile is not a stop condition. Record an interrupted lane as
+  unverified and rerun it when relevant.
+- Stop completed disposable apps/builds through targeted cleanup only. Never
+  run broad `killall` or delete an active result/cache.
