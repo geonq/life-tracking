@@ -29,8 +29,9 @@ Updated 2026-09-18 Europe/Berlin.
   independent xcresult validation.
 - The isolated LifeOSMac stability lane completed **1/1**. A separately
   launched manual build remained alive throughout. The existing three
-  `EXC_BAD_ACCESS` reports are temporary XCTest hosts; no new crash report was
-  produced during reproduction. See
+  `EXC_BAD_ACCESS` reports are temporary XCTest hosts. A separate `SIGABRT`
+  came only from executing the Mach-O directly under the sandbox; the normal
+  LaunchServices fixture produced no new crash. See
   `artifacts/final/stability/2026-09-18-lifeosmac.md`.
 - Mac visual checks now use `scripts/launch_macos_visual_fixture.sh`, which
   stages an unsigned fixture under a dedicated bundle ID. A focused UI test

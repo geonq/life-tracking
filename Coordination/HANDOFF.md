@@ -115,9 +115,11 @@ tranches. Keep the release verdict honest; do not call the product done.
 - The current post-`f53c77c` serialized Mac logic lane completed **193/193**
   with exit 0; the independent validator passed. A focused stability lane
   completed **1/1** while an isolated manual LifeOSMac build stayed alive.
-  The three older `EXC_BAD_ACCESS` reports are temporary XCTest hosts; no new
-  LifeOSMac crash report appeared during reproduction. The visual fixture
-  launcher now stages the manual app under
+  The three older `EXC_BAD_ACCESS` reports are temporary XCTest hosts. One
+  additional `SIGABRT` was produced only by an invalid direct-Mach-O launch;
+  its unified log shows sandbox-denied WindowServer/LaunchServices services.
+  The normal LaunchServices fixture run produced no new crash. The visual
+  fixture launcher now stages the manual app under
   `com.hermes.lifeos.mac.visual-fixture`, so UI-test terminate/relaunch calls
   cannot close the window under inspection. Receipt:
   `artifacts/final/stability/2026-09-18-lifeosmac.md`.

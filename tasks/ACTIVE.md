@@ -36,8 +36,9 @@ evidence, not an implementation percentage.
   task Ready.
 - The current serial Mac logic lane is **193/193 passed**. A focused stability
   lane is **1/1 passed** while an isolated manual LifeOSMac build stayed open.
-  The three old `EXC_BAD_ACCESS` reports belong to temporary XCTest hosts;
-  no new crash report appeared. Manual visual checks now launch through
+  The three old `EXC_BAD_ACCESS` reports belong to temporary XCTest hosts; a
+  separate `SIGABRT` came only from an invalid direct-Mach-O launch. The normal
+  LaunchServices fixture produced no new crash. Manual visual checks now launch through
   `scripts/launch_macos_visual_fixture.sh` under a dedicated bundle ID, so
   UI-test relaunch cleanup cannot close the inspected app. Receipt:
   `artifacts/final/stability/2026-09-18-lifeosmac.md`.
