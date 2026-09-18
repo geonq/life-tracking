@@ -5,7 +5,7 @@ Updated 2026-09-18 Europe/Berlin.
 ## Release state
 
 - Release: **NO-GO**.
-- `main` and `origin/main` are aligned at `58a0902`.
+- `main` and `origin/main` are aligned at `d2ece98`.
 - The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0
   formally accepted leaves. This is an evidence ledger, not a percentage.
 - The old `worker/t11a-shared-visual-foundation` branch is patch-equivalent to
@@ -37,6 +37,9 @@ Updated 2026-09-18 Europe/Berlin.
   stages an unsigned fixture under a dedicated bundle ID. A focused UI test
   failed its existing calendar assertion while the isolated fixture remained
   open before, during, and after the run; the host collision is fixed.
+- The Mac Home repair is pushed at `d2ece98`. Geometry checks pass **2/2**;
+  the exact dark 800x600, 1200x800, and 1512x982 populated/unavailable snapshot
+  matrix passes **1/1** with six kept attachments and manual visual approval.
 - Generic iOS device SDK/build-for-testing lanes compile. CoreSimulator is
   unavailable and `simdiskimaged` is unhealthy, so iOS interactions remain
   unexecuted.

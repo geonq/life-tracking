@@ -2,7 +2,7 @@
 
 Status: IN PROGRESS — updated 2026-09-18 Europe/Berlin.
 
-The authoritative source checkpoint is clean `main` at `58a0902`, aligned
+The authoritative source checkpoint is clean `main` at `d2ece98`, aligned
 with `origin/main`. Release remains **NO-GO**. The frozen registry contains
 258 leaves, 7 aliases, and 0 formally accepted leaves; this is acceptance
 evidence, not an implementation percentage.
@@ -44,6 +44,9 @@ evidence, not an implementation percentage.
   `artifacts/final/stability/2026-09-18-lifeosmac.md`.
 - Generic iOS SDK/build-for-testing compiles; CoreSimulator is unavailable and
   physical iPhone/runtime evidence remains open.
+- Mac Home composition is pushed at `d2ece98`: the reviewed populated and
+  unavailable dark snapshot matrix passes at 800x600, 1200x800, and 1512x982;
+  geometry checks pass **2/2** and six kept captures were manually approved.
 - The bounded Obsidian Canvas/Markdown codec and value binding packet is pushed
   at `f53c77c`; focused tests are **31/31**, the independent smoke harness
   passed, and the post-commit Mac logic lane is **193/193**. Durable vault

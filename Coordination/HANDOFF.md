@@ -9,8 +9,8 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. `main` is clean and pushed at `58a0902` (`test:
-  isolate Mac visual fixture from UI host`), on top of `f53c77c` (`feat: add
+- Release is **NO-GO**. `main` is clean and pushed at `d2ece98` (`fix:
+  refine Mac Home dashboard composition`), on top of `f53c77c` (`feat: add
   bounded Obsidian Canvas codecs`). Earlier source checkpoints remain
   `4856fae`, `1d57435`, `5aa3fb1`, `1956569`, and `273f4dd`.
 - Windows verification uses disposable staging at
@@ -112,6 +112,11 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## LifeOSMac stability receipt
 
+- The bounded Mac Home repair is pushed at `d2ece98`: centered 1200pt
+  composition, restrained native-SF hierarchy, equal-height cards, and a
+  clean unavailable row. Geometry checks passed **2/2**; the dark acceptance
+  snapshot passed **1/1** with six kept captures at 800x600, 1200x800, and
+  1512x982; manual inspection accepted both states.
 - The current post-`f53c77c` serialized Mac logic lane completed **193/193**
   with exit 0; the independent validator passed. A focused stability lane
   completed **1/1** while an isolated manual LifeOSMac build stayed alive.
