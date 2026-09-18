@@ -10,6 +10,11 @@ Updated 2026-09-18 Europe/Berlin.
 - Windows disposable static, legacy Serve, native progress, native snapshot,
   and complete behavior suites pass. Behavior has one installed-service skip;
   canonical deployment remains unverified.
+- Fresh canonical SSH readback shows Tailscale running, `LifeOSAPI` stopped,
+  no `LifeOSGateway` service, no LifeOS listener, and only the legacy sync
+  task in Ready state. The marker is still `active` with an
+  `artifacts-complete` journal of 31,401 units; no recovery process is active.
+  Canonical recovery remains unverified.
 - Local source harness is 75 passed/2 skipped. Native C# compile has 0 errors.
 - Storage guard `bash -n` and **10/10** tests pass. It now owns direct-child
   `lifeos-derived-*` caches and fail-closed process probes. Seven old caches
@@ -63,6 +68,9 @@ Updated 2026-09-18 Europe/Berlin.
   iPhone SDK build reports `BUILD SUCCEEDED`. The disconnected fixture is
   verified; populated live registry rendering and whole-app visual/runtime
   acceptance remain open.
+- The post-visual full serialized Mac logic lane completed **192/192** with
+  exit 0; the xcresult validator independently reports **192/192** passed.
+  linkd/SceneStorage test-host messages are warnings only.
 - Existing reviewed slices cover calendar security, Usage/Finance/Fitness,
   shell/navigation, tax accessibility, installer boundary, and API security.
 - Open: live recurring reconciliation, Robinhood/net-worth, canonical Windows
@@ -70,6 +78,9 @@ Updated 2026-09-18 Europe/Berlin.
   transport and subscription readback, workouts, Obsidian Canvas,
   widgets/Shortcuts/signing, physical iPhone, whole-app visual and runtime
   acceptance, final security review.
+- Canonical Windows recovery is pending explicit operator approval because the
+  transaction-bound rollback mutates services and restored files; automatic
+  review blocked that action until approval.
 - Astra Medium reviewed the corrected Windows/storage candidate **MERGE** with
   no blocking source findings. Canonical and concurrent-race evidence remain
   unverified.

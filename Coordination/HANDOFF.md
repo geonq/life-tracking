@@ -16,6 +16,12 @@ Keep the release verdict honest; do not call the product done.
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
+- Fresh canonical SSH readback confirms Tailscale is running, `LifeOSAPI` is
+  stopped, `LifeOSGateway` is absent, no LifeOS listener is bound, and the
+  legacy `LifeOSSyncServer` task is only Ready. BitLocker is on for C: and D:.
+  The marker remains `active`; its bound journal is `artifacts-complete` with
+  31,401 units and no recovery process is running. Canonical recovery is not
+  complete and remains separate from disposable evidence.
 - No generic advisor, conversational AI, or demo fallback is allowed. Calorie
   photo tracking is the only in-app AI feature. The Usage module retains the
   Claude watcher and now has a provider-neutral native registry over the
@@ -91,6 +97,10 @@ Keep the release verdict honest; do not call the product done.
   unavailable source. The disconnected fixture is verified; populated live
   registry rendering, simulator runtime, and whole-app visual acceptance
   remain open.
+- After `4856fae`, the serialized full Mac logic lane completed **192/192**
+  with exit 0 and `** TEST SUCCEEDED **`; `scripts/validate_xcresult.py`
+  independently reported `192/192` passed. The test-host linkd/SceneStorage
+  messages are environment warnings, not failures.
 - Validated live finance readback is pushed at `1956569` and reviewed by Astra
   Medium **MERGE**. The packet canonicalizes recognized bank aliases before
   grouping, uses bounded content-type-checked readback parsing, keeps exact
@@ -124,12 +134,16 @@ Keep the release verdict honest; do not call the product done.
   Obsidian Canvas round trip; widgets, Shortcuts, signing, physical iPhone.
 - Whole-app visual/runtime acceptance remains open; current UI slices are
   evidence for those slices only, not product-wide approval.
+- Canonical Windows recovery is pending explicit operator approval for the
+  transaction-bound rollback command; automatic review blocked that mutating
+  action until approval is present.
 
 ## Next action
 
-Use the `4856fae`, `1d57435`, and `5aa3fb1` checkpoints as the source of truth. Continue
-live recurring reconciliation and the verified Robinhood/net-worth path, then
-the remaining Zepp, Obsidian, widget, signing, visual, and security gates.
+Use the `4856fae`, `1d57435`, and `5aa3fb1` checkpoints as the source of truth.
+After approved canonical recovery, continue live recurring reconciliation and
+the verified Robinhood/net-worth path, then the remaining Zepp, Obsidian,
+widget, signing, visual, and security gates.
 Keep each packet reviewed and reflected in these short handoff files.
 
 ## Validation discipline

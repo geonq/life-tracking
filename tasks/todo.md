@@ -56,6 +56,17 @@ security, and operator evidence.
 
 ## Verified checkpoint
 
+The current canonical Windows receipt is not complete: SSH confirms Tailscale
+running, `LifeOSAPI` stopped, no `LifeOSGateway`, no LifeOS listener, and a
+marker-bound `artifacts-complete` journal with 31,401 units. No recovery process
+is active. The transaction-bound rollback is prepared but awaits explicit
+operator approval because it mutates services and restored files.
+
+After `4856fae`, the serialized full Mac logic lane completed **192/192** with
+exit 0 and `** TEST SUCCEEDED **`; `scripts/validate_xcresult.py` independently
+reported **192/192** passed. The known linkd/SceneStorage messages are test-host
+warnings only.
+
 `4856fae` is the bounded Usage hierarchy follow-up. Its focused Mac visual
 lane passed **4/4** with an independent xcresult check and the generic iPhone
 SDK build reports `BUILD SUCCEEDED`. It makes provider usage compact and
