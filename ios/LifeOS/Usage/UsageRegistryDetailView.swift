@@ -8,6 +8,7 @@ struct UsageRegistryDetailView: View {
     let connectionID: UsageConnectionID
     let selectedWindowID: UsageWindowID?
     let onSelectWindow: (UsageWindowID) -> Void
+    let onOpenSettings: (() -> Void)?
 
     @State private var freshnessNow = Date.now
 
@@ -32,6 +33,19 @@ struct UsageRegistryDetailView: View {
         observation?.evidenceKind == .manual
     }
 
+    private var observationColor: Color {
+        guard let observation else { return LifeOSTokens.tertiaryText }
+        if observation.freshness == .stale || effectiveManualFreshness == .stale {
+            return LifeOSTokens.warningText
+        }
+        switch observation.evidenceKind {
+        case .estimated:
+            return LifeOSTokens.estimate
+        case .providerReported, .legacyValidated, .locallyMeasured, .manual:
+            return LifeOSTokens.Series.actual
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: UsageLayoutContract.contentGap) {
             header
@@ -53,7 +67,7 @@ struct UsageRegistryDetailView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
             Text(connectionTitle)
-                .lifeOSTypography(.pageTitle, weight: .semibold)
+                .lifeOSTypography(.sectionTitle, weight: .semibold)
                 .foregroundStyle(LifeOSTokens.primaryText)
             Text(connection?.planLabel ?? descriptor?.productKind.rawValue.capitalized ?? "Usage source")
                 .lifeOSTypography(.metadata)
@@ -113,6 +127,7 @@ struct UsageRegistryDetailView: View {
             }
             .padding(.horizontal, LifeOSTokens.Space.sm)
             .padding(.vertical, LifeOSTokens.Space.xs)
+            .frame(minHeight: LifeOSTokens.Control.standardHeight, alignment: .leading)
             .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
@@ -127,22 +142,25 @@ struct UsageRegistryDetailView: View {
             VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
                 UsageCardHeader(
                     title: selectedWindow?.label ?? "Usage",
-                    subtitle: descriptor?.productKind == .api ? "Project or provider observation" : "Provider observation",
+                    subtitle: descriptor?.productKind == .api ? "API usage" : "Subscription usage",
                     icon: .usage
                 )
                 if let observation {
                     valueBlock(observation)
                     Divider().overlay(LifeOSTokens.hairlineBorder)
-                    evidenceBlock(observation)
+                    sourceDisclosure(observation)
                 } else {
-                    Text("No observed value for this window.")
+                    Text("No value for this window.")
                         .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.secondaryText)
                     Text(connection?.reasonCode == "automatic_quota_unavailable"
-                         ? "Automatic consumer subscription quota is unavailable."
-                         : "This source has not supplied an observation yet.")
+                         ? "Automatic subscription usage is unavailable."
+                         : "No usage has been reported for this window yet.")
                         .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
+                    if let onOpenSettings {
+                        LifeOSButton("Open Settings", variant: .tertiary, action: onOpenSettings)
+                    }
                 }
             }
         }
@@ -150,56 +168,87 @@ struct UsageRegistryDetailView: View {
 
     @ViewBuilder
     private func valueBlock(_ observation: UsageRegistryObservation) -> some View {
-        switch observation.value {
-        case .percentage(let value):
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
             HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xs) {
-                Text("\(Int(value.rounded()))%")
-                    .lifeOSTypography(.metric)
-                    .foregroundStyle(LifeOSTokens.Series.actual)
-                    .monospacedDigit()
-                Text("used")
-                    .lifeOSTypography(.body)
-                    .foregroundStyle(LifeOSTokens.secondaryText)
-            }
-        case .counter(let used, let limit):
-            HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xs) {
-                Text(used.formatted(.number.notation(.compactName)))
-                    .lifeOSTypography(.metric)
-                    .foregroundStyle(LifeOSTokens.Series.actual)
-                    .monospacedDigit()
-                Text(limit.map { "of \($0.formatted(.number.notation(.compactName)))" } ?? "measured")
-                    .lifeOSTypography(.body)
-                    .foregroundStyle(LifeOSTokens.secondaryText)
-            }
-        }
+                switch observation.value {
+                case .percentage(let usedPercent):
+                    Text("\(Int((100 - usedPercent).rounded()))%")
+                        .lifeOSTypography(.inlineMonitoringValue)
+                        .foregroundStyle(observationColor)
+                    Text("remaining")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                case .counter(let used, let limit):
+                    Text(used.formatted(.number.notation(.compactName)))
+                        .lifeOSTypography(.inlineMonitoringValue)
+                        .foregroundStyle(observationColor)
+                    Text(limit.map { "of \($0.formatted(.number.notation(.compactName)))" } ?? "measured")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                }
 
-        if let resetAt = observation.resetAt {
-            Text("Resets \(resetAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))")
-                .lifeOSTypography(.metadata)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
-        }
-        if let estimate {
-            Text(estimateText(estimate))
-                .lifeOSTypography(.metadata, weight: .medium)
-                .foregroundStyle(LifeOSTokens.estimate)
+                Spacer(minLength: LifeOSTokens.Space.xs)
+                if let resetAt = observation.resetAt {
+                    Text("Resets \(resetAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+
+            if case .percentage(let usedPercent) = observation.value {
+                HStack(alignment: .center, spacing: LifeOSTokens.Space.xs) {
+                    Text("Used")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                    GeometryReader { geometry in
+                        Capsule()
+                            .fill(LifeOSTokens.primaryText.opacity(0.10))
+                            .overlay(alignment: .leading) {
+                                Capsule()
+                                    .fill(observationColor)
+                                    .frame(width: geometry.size.width * CGFloat(min(max(usedPercent / 100, 0), 1)))
+                            }
+                    }
+                    .frame(height: 4)
+                }
+                .frame(minHeight: 14, alignment: .center)
+            }
+
+            if let estimate {
+                Text(estimateText(estimate))
+                    .lifeOSTypography(.metadata, weight: .medium)
+                    .foregroundStyle(LifeOSTokens.estimate)
+            }
         }
     }
 
-    private func evidenceBlock(_ observation: UsageRegistryObservation) -> some View {
-        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
-            Text(evidenceText(observation))
-                .lifeOSTypography(.metadata, weight: .medium)
-                .foregroundStyle(LifeOSTokens.secondaryText)
-            Text("Observed \(observation.observedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))")
-                .lifeOSTypography(.metadata)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+    private func sourceDisclosure(_ observation: UsageRegistryObservation) -> some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+                Text("Observed \(observation.observedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                Text("Source: \(observation.source)")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            }
+            .padding(.top, LifeOSTokens.Space.xxs)
+        } label: {
+            HStack(spacing: LifeOSTokens.Space.xs) {
+                Text(evidenceText(observation))
+                    .lifeOSTypography(.metadata, weight: .medium)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                Spacer(minLength: 0)
+            }
         }
     }
 
     private var unsupportedCard: some View {
         LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: UsageLayoutContract.cardPadding) {
             VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
-                UsageCardHeader(title: connectionTitle, subtitle: descriptor?.productKind == .api ? "API / project usage" : "Subscription usage", icon: .usage)
+                UsageCardHeader(title: "Usage unavailable", subtitle: descriptor?.productKind == .api ? "API / project usage" : "Subscription usage", icon: .usage)
                 Text(unsupportedMessage)
                     .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.secondaryText)
@@ -221,7 +270,7 @@ struct UsageRegistryDetailView: View {
                 : "Manually recorded · \(observation.observedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
         }
         switch connection?.availability {
-        case .available: return "Observed source"
+        case .available: return "Usage available"
         case .unsupported: return "Automatic usage unavailable"
         case .disabled: return "Hidden from Usage"
         case .unavailable, .none: return "No observed usage"
@@ -231,11 +280,11 @@ struct UsageRegistryDetailView: View {
     private var unsupportedMessage: String {
         switch connection?.providerID.rawValue {
         case "gemini_subscription":
-            return "Google AI Pro is available as a catalog entry, but Google does not expose the consumer subscription quota through a documented endpoint for this app. No number is inferred or scraped."
+            return "Automatic Google AI Pro usage is unavailable. Add a manual reading from the official Gemini page to show a value."
         case "gemini_api":
-            return "Gemini API is a separate project usage product. Automatic metering is not configured in this v1 presentation path, so it does not share or invent a subscription balance."
+            return "Gemini API uses project usage separately from Google AI Pro. Automatic project usage is unavailable here, so no subscription balance is shown."
         default:
-            return "This catalog entry has no validated observation yet. Connect a reviewed source before displaying a number."
+            return "Usage is unavailable for this source until a value is reported."
         }
     }
 
@@ -279,11 +328,11 @@ struct UsageRegistryDetailView: View {
 
     private func evidenceText(_ observation: UsageRegistryObservation) -> String {
         switch observation.evidenceKind {
-        case .providerReported: return observation.official ? "Official provider observation · \(observation.source)" : "Provider observation · non-official"
-        case .legacyValidated: return "Legacy validated observation · \(observation.source)"
-        case .locallyMeasured: return "Locally measured · \(observation.source)"
-        case .manual: return "Manual entry · non-official"
-        case .estimated: return "Estimate · non-official"
+        case .providerReported: return observation.official ? "Official provider · \(observation.source)" : "Provider reported · not verified"
+        case .legacyValidated: return "Validated source · \(observation.source)"
+        case .locallyMeasured: return "Measured locally · \(observation.source)"
+        case .manual: return "Manual entry"
+        case .estimated: return "Estimate"
         }
     }
 

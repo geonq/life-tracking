@@ -387,7 +387,8 @@ struct UsageView: View {
                             presentation: registryPresentation,
                             connectionID: activeConnection.connectionID,
                             selectedWindowID: selectedWindowID,
-                            onSelectWindow: selectWindow
+                            onSelectWindow: selectWindow,
+                            onOpenSettings: onManageConnections ?? onOpenSettings
                         )
                     } else {
                         usageHeader(nil)
