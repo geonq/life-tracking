@@ -178,9 +178,6 @@ def _legacy_action_kind(action: Mapping[str, Any], index: int) -> str:
     test_plan = _legacy_text_field(action, "testPlanName", context="action")
     action_result = action.get("actionResult")
     if not isinstance(action_result, Mapping):
-        command_name = command.casefold() if command else None
-        if command_name in _LEGACY_NON_TEST_COMMANDS:
-            return "non-test"
         _fail(
             f"xcresult legacy action[{index}] is missing actionResult; "
             "relevance cannot be established"
@@ -189,7 +186,8 @@ def _legacy_action_kind(action: Mapping[str, Any], index: int) -> str:
     # Validate typed status whenever it is present, even when another field
     # later classifies this as a non-test action. Status alone is not a test
     # discriminator, but malformed status data must never be ignored.
-    _legacy_text_field(action_result, "status", context="action")
+    if _legacy_text_field(action_result, "status", context="action") is None:
+        _fail(f"xcresult legacy action[{index}] is missing action status")
     result_name = _legacy_text_field(action_result, "resultName", context="action result")
     command_name = command.casefold() if command else None
     result_name_normalized = result_name.casefold() if result_name else None

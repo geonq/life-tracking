@@ -377,6 +377,39 @@ class XCResultSummaryCommandTests(unittest.TestCase):
             ):
                 xcresult_summary(self.result_path)
 
+    def test_missing_action_result_with_conflicting_metadata_fails_closed(self) -> None:
+        modern_failure = subprocess.CalledProcessError(1, ["xcrun"], output="unsupported")
+        ambiguous_action = {
+            "schemeCommandName": self.typed_text("Build"),
+            "testPlanName": self.typed_text("Tests"),
+            "title": self.typed_text("Testing LifeOS"),
+        }
+        root = subprocess.CompletedProcess(
+            [], 0, stdout=self.legacy_root(extra_raw_actions=(ambiguous_action,))
+        )
+        with patch(
+            "scripts.validate_xcresult.subprocess.run",
+            side_effect=[modern_failure, root],
+        ):
+            with self.assertRaisesRegex(XCResultInvariantError, "missing actionResult"):
+                xcresult_summary(self.result_path)
+
+    def test_action_without_status_fails_closed(self) -> None:
+        modern_failure = subprocess.CalledProcessError(1, ["xcrun"], output="unsupported")
+        malformed_action = {
+            "schemeCommandName": self.typed_text("Build"),
+            "actionResult": {"resultName": self.typed_text("action")},
+        }
+        root = subprocess.CompletedProcess(
+            [], 0, stdout=self.legacy_root(extra_raw_actions=(malformed_action,))
+        )
+        with patch(
+            "scripts.validate_xcresult.subprocess.run",
+            side_effect=[modern_failure, root],
+        ):
+            with self.assertRaisesRegex(XCResultInvariantError, "missing action status"):
+                xcresult_summary(self.result_path)
+
     def test_empty_action_metadata_fails_closed(self) -> None:
         modern_failure = subprocess.CalledProcessError(1, ["xcrun"], output="unsupported")
         empty_metadata_action = {
