@@ -11,6 +11,11 @@ readonly DEVELOPER_ROOT="${LIFEOS_DEVELOPER_ROOT:-$HOME/Library/Developer}"
 readonly DERIVED_DATA_ROOT="${LIFEOS_DERIVED_DATA_ROOT:-$DEVELOPER_ROOT/Xcode/DerivedData}"
 readonly DEVICE_SUPPORT_ROOT="${LIFEOS_DEVICE_SUPPORT_ROOT:-$DEVELOPER_ROOT/Xcode/iOS DeviceSupport}"
 readonly ARCHIVES_ROOT="${LIFEOS_ARCHIVES_ROOT:-$DEVELOPER_ROOT/Xcode/Archives}"
+repo_lane_root="${LIFEOS_REPO_LANE_ROOT:-$ROOT}"
+while [[ "$repo_lane_root" != "/" && "$repo_lane_root" == */ ]]; do
+    repo_lane_root="${repo_lane_root%/}"
+done
+readonly REPO_LANE_ROOT="$repo_lane_root"
 readonly KEEP_SIMULATOR_UDID="${LIFEOS_KEEP_SIMULATOR_UDID:-FE7DBF30-8478-48A3-AB6C-3E472F9E0FEA}"
 readonly KEEP_SIMULATOR_NAME="${LIFEOS_KEEP_SIMULATOR_NAME:-iPhone 17}"
 readonly KEEP_DEVICE_SUPPORT_PREFIX="${LIFEOS_KEEP_DEVICE_SUPPORT_PREFIX:-iPhone18,3}"
@@ -25,6 +30,7 @@ check_free_space=0
 clear_derived_data=0
 clear_all_derived_data=0
 clear_repo_artifacts=0
+clear_repo_build_caches=0
 prune_simulators=0
 prune_device_support=0
 
@@ -40,6 +46,7 @@ Options:
   --clear-derived-data      remove LifeOS-* global Xcode DerivedData
   --clear-all-derived-data  remove every global Xcode DerivedData directory
   --clear-repo-artifacts    remove generated LifeOS validation artifacts
+  --clear-repo-build-caches remove direct repo-level lifeos-derived-* caches
   --prune-simulators        delete shutdown/unavailable simulators except the kept iPhone
   --prune-device-support    remove iOS DeviceSupport outside the kept device prefix
   --help                    show this help
@@ -67,6 +74,29 @@ show_size() {
     fi
 }
 
+repo_build_cache_paths() {
+    [[ -d "$REPO_LANE_ROOT" ]] || return 0
+    /usr/bin/find "$REPO_LANE_ROOT" -mindepth 1 -maxdepth 1 \
+        -type d -name 'lifeos-derived-*' -print
+}
+
+report_repo_build_caches() {
+    local found=0
+    while IFS= read -r path; do
+        found=1
+        show_size "Repo build cache $(/usr/bin/basename "$path")" "$path"
+    done < <(repo_build_cache_paths)
+    if [[ "$found" -eq 0 ]]; then
+        builtin printf 'Repo build caches: none\n'
+    fi
+}
+
+repo_build_cache_path_is_scoped() {
+    local path="$1"
+    [[ "$path" == "$REPO_LANE_ROOT"/lifeos-derived-* ]] && \
+        [[ "$(/usr/bin/dirname "$path")" == "$REPO_LANE_ROOT" ]]
+}
+
 free_bytes() {
     local free_kib
     free_kib="$(/bin/df -k "$HOME" | /usr/bin/awk 'NR == 2 { print $4 }')"
@@ -78,6 +108,10 @@ safe_remove_directory() {
     local path="$1"
     [[ -n "$path" && -d "$path" && ! -L "$path" ]] || return 0
     case "$path" in
+        "$REPO_LANE_ROOT"/lifeos-derived-*)
+            repo_build_cache_path_is_scoped "$path" || \
+                die "refusing an unscoped repo-cache deletion: $path"
+            ;;
         "$DERIVED_DATA_ROOT"/*|"$DEVICE_SUPPORT_ROOT"/*|\
         "$ROOT/artifacts/apple-validation"|"$ROOT/artifacts/apple-validation"/*|\
         "$ROOT/artifacts/apple-prerelease"|"$ROOT/artifacts/apple-prerelease"/*|\
@@ -157,6 +191,15 @@ plan_derived_data() {
     done < <(/usr/bin/find "$DERIVED_DATA_ROOT" -mindepth 1 -maxdepth 1 -type d -name "$pattern" -print)
 }
 
+plan_repo_build_caches() {
+    if [[ "$clear_repo_build_caches" -eq 0 ]]; then
+        return 0
+    fi
+    while IFS= read -r path; do
+        safe_remove_directory "$path"
+    done < <(repo_build_cache_paths)
+}
+
 plan_device_support() {
     if [[ ! -d "$DEVICE_SUPPORT_ROOT" || "$prune_device_support" -eq 0 ]]; then
         return 0
@@ -173,7 +216,8 @@ assert_builds_are_idle() {
     if [[ "$apply_changes" -eq 0 ]]; then
         return 0
     fi
-    if [[ "$clear_derived_data" -eq 1 || "$clear_repo_artifacts" -eq 1 || "$prune_device_support" -eq 1 ]]; then
+    if [[ "$clear_derived_data" -eq 1 || "$clear_repo_artifacts" -eq 1 || \
+        "$clear_repo_build_caches" -eq 1 || "$prune_device_support" -eq 1 ]]; then
         if [[ ! -x "$PGREP_PATH" ]]; then
             die "cannot verify whether xcodebuild is active; process probe is unavailable: $PGREP_PATH"
         fi
@@ -195,6 +239,7 @@ while [[ $# -gt 0 ]]; do
         --clear-derived-data) clear_derived_data=1; shift ;;
         --clear-all-derived-data) clear_derived_data=1; clear_all_derived_data=1; shift ;;
         --clear-repo-artifacts) clear_repo_artifacts=1; shift ;;
+        --clear-repo-build-caches) clear_repo_build_caches=1; shift ;;
         --prune-simulators) prune_simulators=1; shift ;;
         --prune-device-support) prune_device_support=1; shift ;;
         --help|-h) usage; exit 0 ;;
@@ -211,6 +256,7 @@ show_size 'iOS DeviceSupport' "$DEVICE_SUPPORT_ROOT"
 show_size 'Xcode Archives' "$ARCHIVES_ROOT"
 show_size 'Repo generated artifacts' "$ROOT/artifacts"
 show_size 'Repo local DerivedData' "$ROOT/ios/DerivedData"
+report_repo_build_caches
 free_bytes_value="$(free_bytes)"
 free_gib="$(/usr/bin/awk -v bytes="$free_bytes_value" 'BEGIN { printf "%.1f", bytes / (1024 * 1024 * 1024) }')"
 builtin printf 'Free home-volume space: %s GiB\n' "$free_gib"
@@ -218,6 +264,7 @@ builtin printf 'Free home-volume space: %s GiB\n' "$free_gib"
 assert_builds_are_idle
 print_simulators
 plan_derived_data
+plan_repo_build_caches
 plan_device_support
 if [[ "$clear_repo_artifacts" -eq 1 ]]; then
     safe_remove_directory "$ROOT/artifacts/apple-validation"
@@ -234,6 +281,8 @@ if [[ "$check_free_space" -eq 1 ]]; then
     builtin printf 'PASS: free space is above the %s GiB floor\n' "$MIN_FREE_GIB"
 fi
 
-if [[ "$apply_changes" -eq 0 && ( "$clear_derived_data" -eq 1 || "$clear_repo_artifacts" -eq 1 || "$prune_simulators" -eq 1 || "$prune_device_support" -eq 1 ) ]]; then
+if [[ "$apply_changes" -eq 0 && ( "$clear_derived_data" -eq 1 || \
+    "$clear_repo_artifacts" -eq 1 || "$clear_repo_build_caches" -eq 1 || \
+    "$prune_simulators" -eq 1 || "$prune_device_support" -eq 1 ) ]]; then
     builtin printf 'Dry run only. Add --apply to perform the planned cleanup.\n'
 fi
