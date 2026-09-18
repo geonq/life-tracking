@@ -394,6 +394,47 @@ class XCResultSummaryCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(XCResultInvariantError, "missing actionResult"):
                 xcresult_summary(self.result_path)
 
+    def test_malformed_action_result_on_build_fails_closed(self) -> None:
+        modern_failure = subprocess.CalledProcessError(1, ["xcrun"], output="unsupported")
+        for malformed_result in (None, [], "not-an-object"):
+            with self.subTest(malformed_result=malformed_result):
+                malformed_action = {
+                    "schemeCommandName": self.typed_text("Build"),
+                    "actionResult": malformed_result,
+                }
+                root = subprocess.CompletedProcess(
+                    [], 0, stdout=self.legacy_root(extra_raw_actions=(malformed_action,))
+                )
+                with patch(
+                    "scripts.validate_xcresult.subprocess.run",
+                    side_effect=[modern_failure, root],
+                ):
+                    with self.assertRaisesRegex(XCResultInvariantError, "missing actionResult"):
+                        xcresult_summary(self.result_path)
+
+    def test_valid_action_result_with_conflicting_metadata_fails_closed(self) -> None:
+        modern_failure = subprocess.CalledProcessError(1, ["xcrun"], output="unsupported")
+        conflicting_action = {
+            "schemeCommandName": self.typed_text("Build"),
+            "testPlanName": self.typed_text("Tests"),
+            "title": self.typed_text("Testing LifeOS"),
+            "actionResult": {
+                "resultName": self.typed_text("action"),
+                "status": self.typed_text("succeeded"),
+            },
+        }
+        root = subprocess.CompletedProcess(
+            [], 0, stdout=self.legacy_root(extra_raw_actions=(conflicting_action,))
+        )
+        with patch(
+            "scripts.validate_xcresult.subprocess.run",
+            side_effect=[modern_failure, root],
+        ):
+            with self.assertRaisesRegex(
+                XCResultInvariantError, "conflicting test and non-test metadata"
+            ):
+                xcresult_summary(self.result_path)
+
     def test_action_without_status_fails_closed(self) -> None:
         modern_failure = subprocess.CalledProcessError(1, ["xcrun"], output="unsupported")
         malformed_action = {
