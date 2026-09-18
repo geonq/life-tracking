@@ -1,9 +1,9 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-18 Europe/Berlin. Release: **NO-GO**. Current checkpoints are
-`1d57435` (manual Gemini usage tracking) and `5aa3fb1` (repo build-cache
-cleanup); earlier finance readback and usage registry checkpoints are
-`1956569` and `273f4dd`.
+Updated 2026-09-18 Europe/Berlin. Release: **NO-GO**. Current pushed
+checkpoints are `4856fae` (Usage registry hierarchy), `1d57435` (manual
+Gemini usage tracking), and `5aa3fb1` (repo build-cache cleanup); earlier
+finance readback and usage registry checkpoints are `1956569` and `273f4dd`.
 Do not use unverified percentage estimates for completion. Acceptance is
 tracked by registry gates and their required live, runtime, device, visual,
 security, and operator evidence.
@@ -55,6 +55,15 @@ security, and operator evidence.
    registry row before changing the release verdict.
 
 ## Verified checkpoint
+
+`4856fae` is the bounded Usage hierarchy follow-up. Its focused Mac visual
+lane passed **4/4** with an independent xcresult check and the generic iPhone
+SDK build reports `BUILD SUCCEEDED`. It makes provider usage compact and
+hierarchical, exposes reset context and a Used track, collapses provenance,
+distinguishes estimates from observed data, and supplies a Settings action
+when the selected source is unavailable. Only the disconnected fixture is
+verified; populated live registry rendering and whole-app visual/runtime
+acceptance remain open.
 
 `1d57435` is the validated manual Google AI Pro/Gemini subscription checkpoint.
 It has Astra Medium **MERGE** review, focused Mac tests **22/22**, full
@@ -154,6 +163,11 @@ No scheduler or automatic deletion of source/personal/final evidence was
 added. Future Apple work must use the guard and owned per-lane DerivedData;
 parallel native builds remain disallowed on this Mac. Repo-level lane caches
 must be cleaned only through the explicit reviewed option.
+
+Serialized Xcode lanes may be quiet for several minutes during Swift compile
+or link. Poll until exit and inspect the explicit result; stop early only for a
+clear failure, proven hang, or resource safety issue. An interrupted lane is
+unverified and must be rerun.
 
 The frozen registry is structurally valid but has 0 accepted leaves; do not use
 the earlier 60% estimate as release progress. Acceptance must be earned with

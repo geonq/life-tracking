@@ -3,9 +3,9 @@
 Updated 2026-09-18 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Current checkpoints are `1d57435` (`Add manual Gemini usage tracking`) and
-  `5aa3fb1` (`Guard repo build cache cleanup`); they are ready to push with
-  this documentation update. Earlier finance and registry checkpoints are
+- Current pushed checkpoints are `4856fae` (`Refine usage registry hierarchy`),
+  `1d57435` (`Add manual Gemini usage tracking`), and `5aa3fb1` (`Guard repo
+  build cache cleanup`). Earlier finance and registry checkpoints are
   `1956569` and `273f4dd`.
 - Windows disposable static, legacy Serve, native progress, native snapshot,
   and complete behavior suites pass. Behavior has one installed-service skip;
@@ -58,6 +58,11 @@ Updated 2026-09-18 Europe/Berlin.
   serialized full Mac suite is **192/192**; generic iOS device SDK build
   succeeds; Astra Medium re-review returned **MERGE**. Simulator/UI runtime
   remains unavailable.
+- The Usage hierarchy follow-up is pushed at `4856fae`: focused Mac visual
+  tests **4/4** passed with an independent xcresult check and the generic
+  iPhone SDK build reports `BUILD SUCCEEDED`. The disconnected fixture is
+  verified; populated live registry rendering and whole-app visual/runtime
+  acceptance remain open.
 - Existing reviewed slices cover calendar security, Usage/Finance/Fitness,
   shell/navigation, tax accessibility, installer boundary, and API security.
 - Open: live recurring reconciliation, Robinhood/net-worth, canonical Windows
@@ -75,3 +80,8 @@ Updated 2026-09-18 Europe/Berlin.
 
 Keep the product boundary: truthful live data, SF Pro, compact Linear/Vercel
 quality, no generic AI, and calorie-photo AI only.
+
+Xcode lanes are serialized and must be polled to exit. Quiet Swift compile or
+link phases can take several minutes; an interrupted lane is unverified and
+must be rerun. Stop early only for a clear failure, proven hang, or resource
+safety issue.

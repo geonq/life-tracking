@@ -9,10 +9,10 @@ Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. Current checkpoints are `1d57435` (`Add manual Gemini
-  usage tracking`) and `5aa3fb1` (`Guard repo build cache cleanup`); they are
-  ready to push with this handoff. Earlier finance and registry checkpoints
-  remain `1956569` and `273f4dd`.
+- Release is **NO-GO**. The current pushed checkpoints are `4856fae` (`Refine
+  usage registry hierarchy`), `1d57435` (`Add manual Gemini usage tracking`),
+  and `5aa3fb1` (`Guard repo build cache cleanup`). Earlier finance and
+  registry checkpoints remain `1956569` and `273f4dd`.
 - Windows verification uses disposable staging at
   `C:\Users\domke\lifeos-a2-snapshot-20260916`; canonical installation and
   recovery remain untouched. `LifeOSGateway` is absent and `LifeOSAPI` stopped.
@@ -83,6 +83,14 @@ Keep the release verdict honest; do not call the product done.
   serialized Mac logic suite is **192/192**, and the generic iOS device SDK
   build reports `BUILD SUCCEEDED`. Astra Medium re-review is **MERGE**;
   simulator/UI runtime remains unverified.
+- The bounded Usage hierarchy follow-up is pushed at `4856fae`. It passes the
+  focused Mac visual lane **4/4** with an independent xcresult check and the
+  generic iPhone SDK build reports `BUILD SUCCEEDED`. It adds compact
+  remaining/Used presentation, reset context, collapsed provenance, estimated
+  versus observed color semantics, and a visible Settings action for an
+  unavailable source. The disconnected fixture is verified; populated live
+  registry rendering, simulator runtime, and whole-app visual acceptance
+  remain open.
 - Validated live finance readback is pushed at `1956569` and reviewed by Astra
   Medium **MERGE**. The packet canonicalizes recognized bank aliases before
   grouping, uses bounded content-type-checked readback parsing, keeps exact
@@ -119,10 +127,18 @@ Keep the release verdict honest; do not call the product done.
 
 ## Next action
 
-Use the `1d57435` and `5aa3fb1` checkpoints as the source of truth. Continue
+Use the `4856fae`, `1d57435`, and `5aa3fb1` checkpoints as the source of truth. Continue
 live recurring reconciliation and the verified Robinhood/net-worth path, then
 the remaining Zepp, Obsidian, widget, signing, visual, and security gates.
 Keep each packet reviewed and reflected in these short handoff files.
+
+## Validation discipline
+
+Serialized Xcode lanes may be quiet for several minutes while Swift compiles
+or links. Poll until the command exits and inspect its explicit success or
+failure marker plus the result bundle. Stop only for a clear failure, a
+proven hang, or a storage/process safety issue; an interrupted lane is
+unverified and must be rerun before its result is used.
 
 ## Blockers
 
