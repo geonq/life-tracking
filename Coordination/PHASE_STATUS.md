@@ -5,7 +5,7 @@ Updated 2026-09-18 Europe/Berlin.
 ## Release state
 
 - Release: **NO-GO**.
-- `main` and `origin/main` are aligned at `f53c77c`.
+- `main` and `origin/main` are aligned at `58a0902`.
 - The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0
   formally accepted leaves. This is an evidence ledger, not a percentage.
 - The old `worker/t11a-shared-visual-foundation` branch is patch-equivalent to
@@ -32,6 +32,10 @@ Updated 2026-09-18 Europe/Berlin.
   `EXC_BAD_ACCESS` reports are temporary XCTest hosts; no new crash report was
   produced during reproduction. See
   `artifacts/final/stability/2026-09-18-lifeosmac.md`.
+- Mac visual checks now use `scripts/launch_macos_visual_fixture.sh`, which
+  stages an unsigned fixture under a dedicated bundle ID. A focused UI test
+  failed its existing calendar assertion while the isolated fixture remained
+  open before, during, and after the run; the host collision is fixed.
 - Generic iOS device SDK/build-for-testing lanes compile. CoreSimulator is
   unavailable and `simdiskimaged` is unhealthy, so iOS interactions remain
   unexecuted.

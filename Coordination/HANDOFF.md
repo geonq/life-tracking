@@ -9,7 +9,8 @@ tranches. Keep the release verdict honest; do not call the product done.
 
 ## Current truth
 
-- Release is **NO-GO**. `main` is clean and pushed at `f53c77c` (`feat: add
+- Release is **NO-GO**. `main` is clean and pushed at `58a0902` (`test:
+  isolate Mac visual fixture from UI host`), on top of `f53c77c` (`feat: add
   bounded Obsidian Canvas codecs`). Earlier source checkpoints remain
   `4856fae`, `1d57435`, `5aa3fb1`, `1956569`, and `273f4dd`.
 - Windows verification uses disposable staging at
@@ -115,9 +116,11 @@ tranches. Keep the release verdict honest; do not call the product done.
   with exit 0; the independent validator passed. A focused stability lane
   completed **1/1** while an isolated manual LifeOSMac build stayed alive.
   The three older `EXC_BAD_ACCESS` reports are temporary XCTest hosts; no new
-  LifeOSMac crash report appeared during reproduction. Receipt:
-  `artifacts/final/stability/2026-09-18-lifeosmac.md`. No speculative app
-  lifecycle change was made.
+  LifeOSMac crash report appeared during reproduction. The visual fixture
+  launcher now stages the manual app under
+  `com.hermes.lifeos.mac.visual-fixture`, so UI-test terminate/relaunch calls
+  cannot close the window under inspection. Receipt:
+  `artifacts/final/stability/2026-09-18-lifeosmac.md`.
 
 ## Storage policy
 

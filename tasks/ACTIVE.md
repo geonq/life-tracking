@@ -2,7 +2,7 @@
 
 Status: IN PROGRESS — updated 2026-09-18 Europe/Berlin.
 
-The authoritative source checkpoint is clean `main` at `f53c77c`, aligned
+The authoritative source checkpoint is clean `main` at `58a0902`, aligned
 with `origin/main`. Release remains **NO-GO**. The frozen registry contains
 258 leaves, 7 aliases, and 0 formally accepted leaves; this is acceptance
 evidence, not an implementation percentage.
@@ -37,7 +37,9 @@ evidence, not an implementation percentage.
 - The current serial Mac logic lane is **193/193 passed**. A focused stability
   lane is **1/1 passed** while an isolated manual LifeOSMac build stayed open.
   The three old `EXC_BAD_ACCESS` reports belong to temporary XCTest hosts;
-  no new crash report appeared. Receipt:
+  no new crash report appeared. Manual visual checks now launch through
+  `scripts/launch_macos_visual_fixture.sh` under a dedicated bundle ID, so
+  UI-test relaunch cleanup cannot close the inspected app. Receipt:
   `artifacts/final/stability/2026-09-18-lifeosmac.md`.
 - Generic iOS SDK/build-for-testing compiles; CoreSimulator is unavailable and
   physical iPhone/runtime evidence remains open.
