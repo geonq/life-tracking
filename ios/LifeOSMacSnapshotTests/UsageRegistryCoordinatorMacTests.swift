@@ -311,6 +311,227 @@ final class UsageRegistryCoordinatorMacTests: XCTestCase {
         let ledger = try UsageHistoryLedger(archive: decoded, now: now)
         XCTAssertEqual(ledger.entries, [entry])
     }
+
+    func testManualReadingSaveBuildsRegistryAndStoreFailureKeepsVisibleState() async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let store = InMemoryUsageManualReadingStore()
+        let coordinator = await MainActor.run {
+            UsageCoordinator(
+                fetch: { CoordinatorUsageFixtures.emptyPayload(now: now) },
+                initialUpdatedAt: now,
+                historyPersistence: RegistryHistoryStore(),
+                manualReadingStore: store,
+                clock: { now }
+            )
+        }
+        let reading = try UsageManualReading(
+            providerID: try UsageProviderID(UsageManualReading.supportedProviderID),
+            adapterID: UsageManualReading.supportedAdapterID,
+            window: .fiveHour,
+            usedPercent: 42,
+            observedAt: now.addingTimeInterval(-60),
+            resetAt: now.addingTimeInterval(2_400),
+            now: now
+        )
+
+        let saved = await MainActor.run { coordinator.saveUsageManualReading(reading) }
+        XCTAssertTrue(saved)
+        let subscriptionID = try UsageConnectionID("catalog.gemini_subscription")
+        let windowID = try UsageWindowID("catalog.gemini_subscription.five_hour")
+        let selection = UsageRegistrySelection(connectionID: subscriptionID, windowID: windowID)
+        let visible = await MainActor.run {
+            (
+                coordinator.manualReadings,
+                coordinator.registryPresentation.connection(id: subscriptionID),
+                coordinator.registryPresentation.observation(for: selection)?.value
+            )
+        }
+        XCTAssertEqual(visible.0, [reading])
+        XCTAssertEqual(visible.1?.availability, .available)
+        XCTAssertEqual(visible.2, .percentage(42))
+
+        let replacement = try UsageManualReading(
+            providerID: try UsageProviderID(UsageManualReading.supportedProviderID),
+            adapterID: UsageManualReading.supportedAdapterID,
+            window: .fiveHour,
+            usedPercent: 80,
+            observedAt: now.addingTimeInterval(-30),
+            resetAt: now.addingTimeInterval(2_400),
+            now: now
+        )
+        store.saveError = .saveFailed
+        let failed = await MainActor.run { coordinator.saveUsageManualReading(replacement) }
+        XCTAssertFalse(failed)
+        let afterFailure = await MainActor.run {
+            (
+                coordinator.manualReadings,
+                coordinator.registryPresentation.observation(for: selection)?.value,
+                coordinator.manualReadingErrorMessage
+            )
+        }
+        XCTAssertEqual(afterFailure.0, [reading])
+        XCTAssertEqual(afterFailure.1, .percentage(42))
+        XCTAssertNotNil(afterFailure.2)
+
+        store.saveError = nil
+        let deleted = await MainActor.run { coordinator.deleteUsageManualReadings() }
+        XCTAssertTrue(deleted)
+        let afterDelete = await MainActor.run {
+            (
+                coordinator.manualReadings,
+                coordinator.registryPresentation.connection(id: subscriptionID)?.availability,
+                coordinator.registryPresentation.windows(for: subscriptionID)
+            )
+        }
+        XCTAssertTrue(afterDelete.0.isEmpty)
+        XCTAssertEqual(afterDelete.1, .unsupported)
+        XCTAssertTrue(afterDelete.2.isEmpty)
+    }
+
+    func testManualReadingLoadFailureIsExposedForRecovery() async {
+        let store = InMemoryUsageManualReadingStore()
+        store.loadError = .invalidEnvelope
+        let coordinator = await MainActor.run {
+            UsageCoordinator(
+                fetch: { CoordinatorUsageFixtures.emptyPayload(now: .now) },
+                historyPersistence: RegistryHistoryStore(),
+                manualReadingStore: store
+            )
+        }
+
+        let errorMessage = await MainActor.run { coordinator.manualReadingErrorMessage }
+        XCTAssertEqual(errorMessage, "Manual usage readings unavailable")
+    }
+
+    func testManualReadingBatchReplacementFailurePreservesStoredAndVisibleReadings() async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let store = InMemoryUsageManualReadingStore()
+        let coordinator = await MainActor.run {
+            UsageCoordinator(
+                fetch: { CoordinatorUsageFixtures.emptyPayload(now: now) },
+                initialUpdatedAt: now,
+                historyPersistence: RegistryHistoryStore(),
+                manualReadingStore: store,
+                clock: { now }
+            )
+        }
+        let providerID = try UsageProviderID(UsageManualReading.supportedProviderID)
+        let first = try UsageManualReading(
+            providerID: providerID,
+            adapterID: UsageManualReading.supportedAdapterID,
+            window: .fiveHour,
+            usedPercent: 24,
+            observedAt: now.addingTimeInterval(-60),
+            resetAt: now.addingTimeInterval(2_400),
+            now: now
+        )
+        let second = try UsageManualReading(
+            providerID: providerID,
+            adapterID: UsageManualReading.supportedAdapterID,
+            window: .weekly,
+            usedPercent: 41,
+            observedAt: now.addingTimeInterval(-90),
+            resetAt: now.addingTimeInterval(7_200),
+            now: now
+        )
+
+        let initialSave = await MainActor.run {
+            coordinator.saveUsageManualReadings([first, second])
+        }
+        XCTAssertTrue(initialSave)
+
+        let firstSelection = UsageRegistrySelection(
+            connectionID: try UsageConnectionID("catalog.gemini_subscription"),
+            windowID: try UsageWindowID("catalog.gemini_subscription.five_hour")
+        )
+        let secondSelection = UsageRegistrySelection(
+            connectionID: try UsageConnectionID("catalog.gemini_subscription"),
+            windowID: try UsageWindowID("catalog.gemini_subscription.weekly")
+        )
+        let replacementFirst = try UsageManualReading(
+            providerID: providerID,
+            adapterID: UsageManualReading.supportedAdapterID,
+            window: .fiveHour,
+            usedPercent: 82,
+            observedAt: now.addingTimeInterval(-30),
+            resetAt: now.addingTimeInterval(2_400),
+            now: now
+        )
+        let replacementSecond = try UsageManualReading(
+            providerID: providerID,
+            adapterID: UsageManualReading.supportedAdapterID,
+            window: .weekly,
+            usedPercent: 73,
+            observedAt: now.addingTimeInterval(-45),
+            resetAt: now.addingTimeInterval(7_200),
+            now: now
+        )
+        store.saveError = .saveFailed
+        let failedReplacement = await MainActor.run {
+            coordinator.saveUsageManualReadings([replacementFirst, replacementSecond])
+        }
+        let afterFailure = await MainActor.run {
+            (
+                coordinator.manualReadings,
+                coordinator.registryPresentation.observation(for: firstSelection)?.value,
+                coordinator.registryPresentation.observation(for: secondSelection)?.value,
+                coordinator.manualReadingErrorMessage
+            )
+        }
+
+        XCTAssertFalse(failedReplacement)
+        XCTAssertEqual(store.readings, [first, second])
+        XCTAssertEqual(afterFailure.0, [first, second])
+        XCTAssertEqual(afterFailure.1, .percentage(24))
+        XCTAssertEqual(afterFailure.2, .percentage(41))
+        XCTAssertNotNil(afterFailure.3)
+    }
+
+    func testManualReadingSaveUsesTheCurrentInjectedClock() async throws {
+        let initialTime = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let clock = MutableUsageClock(initialTime)
+        let store = InMemoryUsageManualReadingStore()
+        let coordinator = await MainActor.run {
+            UsageCoordinator(
+                fetch: { CoordinatorUsageFixtures.emptyPayload(now: initialTime) },
+                initialUpdatedAt: initialTime,
+                historyPersistence: RegistryHistoryStore(),
+                manualReadingStore: store,
+                clock: { clock.value }
+            )
+        }
+        let observedAt = initialTime.addingTimeInterval(30)
+        let reading = try UsageManualReading(
+            providerID: try UsageProviderID(UsageManualReading.supportedProviderID),
+            adapterID: UsageManualReading.supportedAdapterID,
+            window: .fiveHour,
+            usedPercent: 36,
+            observedAt: observedAt,
+            resetAt: observedAt.addingTimeInterval(2_400),
+            now: observedAt
+        )
+
+        let beforeClockAdvance = await MainActor.run {
+            coordinator.saveUsageManualReadings([reading])
+        }
+        XCTAssertTrue(store.readings.isEmpty)
+        clock.value = observedAt
+        let afterClockAdvance = await MainActor.run {
+            coordinator.saveUsageManualReadings([reading])
+        }
+
+        XCTAssertFalse(beforeClockAdvance)
+        XCTAssertTrue(afterClockAdvance)
+        XCTAssertEqual(store.readings, [reading])
+    }
+}
+
+private final class MutableUsageClock: @unchecked Sendable {
+    var value: Date
+
+    init(_ value: Date) {
+        self.value = value
+    }
 }
 
 private enum CoordinatorUsageFixtures {

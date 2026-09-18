@@ -181,6 +181,8 @@ public final class UsageCoordinator: ObservableObject {
     @Published public private(set) var registryPresentation: UsageRegistryPresentation
     @Published public private(set) var registryPreferences: UsageRegistryPreferencesState
     @Published public private(set) var registryPreferencesError: UsageRegistryPreferencesError?
+    @Published public private(set) var manualReadings: [UsageManualReading]
+    @Published public private(set) var manualReadingErrorMessage: String?
 
     private let fetchPayload: @Sendable () async throws -> APIUsagePayload
     private var refreshTask: Task<Void, Never>?
@@ -191,6 +193,8 @@ public final class UsageCoordinator: ObservableObject {
     private let reloadWidgets: () -> Void
     private let allowsRefresh: Bool
     private let registryPreferencesStore: UsageRegistryPreferencesPersisting
+    private let manualReadingStore: UsageManualReadingStore
+    private let clock: () -> Date
     private var historyLedger: UsageHistoryLedger
     private var presentationAuthorities: [UsagePresentationScope: UsagePresentationAuthority]
     /// A ledger mutation remains pending until its encoded archive has
@@ -203,7 +207,9 @@ public final class UsageCoordinator: ObservableObject {
                 initialProviders: [ProviderSnapshot] = [],
                 initialUpdatedAt: Date? = nil,
                 historyPersistence: UsageHistoryPersistence = UserDefaultsUsageHistoryPersistence(),
-                registryPreferencesStore: UsageRegistryPreferencesPersisting = UserDefaultsUsageRegistryPreferencesStore()) {
+                registryPreferencesStore: UsageRegistryPreferencesPersisting = UserDefaultsUsageRegistryPreferencesStore(),
+                manualReadingStore: UsageManualReadingStore = UserDefaultsUsageManualReadingStore(),
+                clock: @escaping () -> Date = { Date.now }) {
         self.fetchPayload = {
             let data = try await client.fetchUsage()
             return try JSONDecoder.lifeOS.decode(APIUsagePayload.self, from: data)
@@ -214,6 +220,8 @@ public final class UsageCoordinator: ObservableObject {
         self.reloadWidgets = UsageWidgetTimelineReloader.reload
         self.allowsRefresh = true
         self.registryPreferencesStore = registryPreferencesStore
+        self.manualReadingStore = manualReadingStore
+        self.clock = clock
         let loadedPreferences: UsageRegistryPreferencesState
         let preferencesError: UsageRegistryPreferencesError?
         do {
@@ -228,6 +236,7 @@ public final class UsageCoordinator: ObservableObject {
         self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
         self.historyErrorMessage = loadedHistory.errorMessage
         let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
+        let loadedManualReadings = Self.loadManualReadings(from: manualReadingStore, now: clock())
         self.providers = initialProviders
         let initialAuthorities = Self.initialPresentationAuthorities(
             for: initialProviders,
@@ -241,6 +250,8 @@ public final class UsageCoordinator: ObservableObject {
         self.lastUpdated = initialUpdatedAt
         self.registryPreferences = loadedPreferences
         self.registryPreferencesError = preferencesError
+        self.manualReadings = loadedManualReadings.readings
+        self.manualReadingErrorMessage = loadedManualReadings.errorMessage
         let initialState = Self.initialState(
             providers: initialProviders, updatedAt: initialUpdatedAt, staleAfter: staleAfter
         )
@@ -250,6 +261,8 @@ public final class UsageCoordinator: ObservableObject {
             connectorStates: Self.connectorStates(for: initialProviders),
             generatedAt: initialUpdatedAt,
             preferences: loadedPreferences,
+            manualReadings: loadedManualReadings.readings,
+            now: clock(),
             failure: initialState == .stale ? .restoredStaleCache : .none
         )
         self.registryPresentation = initialRegistry
@@ -276,7 +289,9 @@ public final class UsageCoordinator: ObservableObject {
                 initialProviders: [ProviderSnapshot] = [],
                 initialUpdatedAt: Date? = nil,
                 historyPersistence: UsageHistoryPersistence = UserDefaultsUsageHistoryPersistence(),
-                registryPreferencesStore: UsageRegistryPreferencesPersisting = UserDefaultsUsageRegistryPreferencesStore()) {
+                registryPreferencesStore: UsageRegistryPreferencesPersisting = UserDefaultsUsageRegistryPreferencesStore(),
+                manualReadingStore: UsageManualReadingStore = UserDefaultsUsageManualReadingStore(),
+                clock: @escaping () -> Date = { Date.now }) {
         self.fetchPayload = fetch
         self.staleAfter = staleAfter
         self.historyPersistence = historyPersistence
@@ -284,6 +299,8 @@ public final class UsageCoordinator: ObservableObject {
         self.reloadWidgets = UsageWidgetTimelineReloader.reload
         self.allowsRefresh = true
         self.registryPreferencesStore = registryPreferencesStore
+        self.manualReadingStore = manualReadingStore
+        self.clock = clock
         let loadedPreferences: UsageRegistryPreferencesState
         let preferencesError: UsageRegistryPreferencesError?
         do {
@@ -298,6 +315,7 @@ public final class UsageCoordinator: ObservableObject {
         self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
         self.historyErrorMessage = loadedHistory.errorMessage
         let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
+        let loadedManualReadings = Self.loadManualReadings(from: manualReadingStore, now: clock())
         self.providers = initialProviders
         let initialAuthorities = Self.initialPresentationAuthorities(
             for: initialProviders,
@@ -311,6 +329,8 @@ public final class UsageCoordinator: ObservableObject {
         self.lastUpdated = initialUpdatedAt
         self.registryPreferences = loadedPreferences
         self.registryPreferencesError = preferencesError
+        self.manualReadings = loadedManualReadings.readings
+        self.manualReadingErrorMessage = loadedManualReadings.errorMessage
         let initialState = Self.initialState(
             providers: initialProviders, updatedAt: initialUpdatedAt, staleAfter: staleAfter
         )
@@ -320,6 +340,8 @@ public final class UsageCoordinator: ObservableObject {
             connectorStates: Self.connectorStates(for: initialProviders),
             generatedAt: initialUpdatedAt,
             preferences: loadedPreferences,
+            manualReadings: loadedManualReadings.readings,
+            now: clock(),
             failure: initialState == .stale ? .restoredStaleCache : .none
         )
         self.registryPresentation = initialRegistry
@@ -371,7 +393,8 @@ public final class UsageCoordinator: ObservableObject {
             historyPersistence: historyPersistence,
             snapshotPersistence: snapshotPersistence,
             reloadWidgets: reloadWidgets,
-            allowsRefresh: false
+            allowsRefresh: false,
+            manualReadingStore: InMemoryUsageManualReadingStore()
         )
     }
 
@@ -384,7 +407,9 @@ public final class UsageCoordinator: ObservableObject {
         snapshotPersistence: UsageWidgetSnapshotPersistence,
         reloadWidgets: @escaping () -> Void,
         allowsRefresh: Bool,
-        registryPreferencesStore: UsageRegistryPreferencesPersisting = UserDefaultsUsageRegistryPreferencesStore()
+        registryPreferencesStore: UsageRegistryPreferencesPersisting = UserDefaultsUsageRegistryPreferencesStore(),
+        manualReadingStore: UsageManualReadingStore = UserDefaultsUsageManualReadingStore(),
+        clock: @escaping () -> Date = { Date.now }
     ) {
         self.fetchPayload = fetchPayload
         self.staleAfter = staleAfter
@@ -393,6 +418,8 @@ public final class UsageCoordinator: ObservableObject {
         self.reloadWidgets = reloadWidgets
         self.allowsRefresh = allowsRefresh
         self.registryPreferencesStore = registryPreferencesStore
+        self.manualReadingStore = manualReadingStore
+        self.clock = clock
         let loadedPreferences: UsageRegistryPreferencesState
         let preferencesError: UsageRegistryPreferencesError?
         do {
@@ -407,6 +434,7 @@ public final class UsageCoordinator: ObservableObject {
         self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
         self.historyErrorMessage = loadedHistory.errorMessage
         let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
+        let loadedManualReadings = Self.loadManualReadings(from: manualReadingStore, now: clock())
         self.providers = initialProviders
         let initialAuthorities = Self.initialPresentationAuthorities(
             for: initialProviders,
@@ -420,6 +448,8 @@ public final class UsageCoordinator: ObservableObject {
         self.lastUpdated = initialUpdatedAt
         self.registryPreferences = loadedPreferences
         self.registryPreferencesError = preferencesError
+        self.manualReadings = loadedManualReadings.readings
+        self.manualReadingErrorMessage = loadedManualReadings.errorMessage
         let initialState = Self.initialState(
             providers: initialProviders, updatedAt: initialUpdatedAt, staleAfter: staleAfter
         )
@@ -429,6 +459,8 @@ public final class UsageCoordinator: ObservableObject {
             connectorStates: Self.connectorStates(for: initialProviders),
             generatedAt: initialUpdatedAt,
             preferences: loadedPreferences,
+            manualReadings: loadedManualReadings.readings,
+            now: clock(),
             failure: initialState == .stale ? .restoredStaleCache : .none
         )
         self.registryPresentation = initialRegistry
@@ -498,6 +530,8 @@ public final class UsageCoordinator: ObservableObject {
                 mapping: currentLegacyMapping,
                 generatedAt: lastUpdated,
                 preferences: next,
+                manualReadings: manualReadings,
+                now: clock(),
                 failure: registryPresentation.failure
             )
             // Build first, then persist, then publish. A failed rebuild can
@@ -528,7 +562,7 @@ public final class UsageCoordinator: ObservableObject {
         refreshGeneration &+= 1
         refreshTask?.cancel()
         state = providers.contains(where: { $0.provenance.quality == .observed }) ? .stale : .unavailable
-        registryPresentation = registryPresentation.withFailure(.cancelled)
+        registryPresentation = rebuiltRegistryPresentation(failure: .cancelled)
         publishPresentationPacket(
             generation: refreshGeneration,
             updateKind: .cancelled
@@ -545,7 +579,9 @@ public final class UsageCoordinator: ObservableObject {
             rebuilt = try UsageRegistryAdapter.fromLegacy(
                 mapping: mapped,
                 generatedAt: generatedAt,
-                preferences: registryPreferences
+                preferences: registryPreferences,
+                manualReadings: manualReadings,
+                now: clock()
             )
         } catch {
             surfaceRegistryConversionFailure(generation: generation)
@@ -688,7 +724,7 @@ public final class UsageCoordinator: ObservableObject {
             errorMessage = "Usage source unavailable"
             registryFailure = .transport
         }
-        registryPresentation = registryPresentation.withFailure(registryFailure)
+        registryPresentation = rebuiltRegistryPresentation(failure: registryFailure)
         state = providers.contains(where: { $0.provenance.quality == .observed }) ? .stale : .unavailable
         if !providers.isEmpty { publishSnapshot(providers, generatedAt: lastUpdated ?? .now) }
         publishPresentationPacket(generation: generation, updateKind: .failed)
@@ -716,6 +752,8 @@ public final class UsageCoordinator: ObservableObject {
                 mapping: currentLegacyMapping,
                 generatedAt: lastUpdated,
                 preferences: loaded,
+                manualReadings: manualReadings,
+                now: clock(),
                 failure: registryPresentation.failure
             )
             registryPreferences = loaded
@@ -742,6 +780,99 @@ public final class UsageCoordinator: ObservableObject {
     @discardableResult
     public func resetUsageRegistryPreferences() -> Bool {
         updateUsageRegistryPreferences(.empty)
+    }
+
+    public func manualReading(for window: UsageManualReadingWindow) -> UsageManualReading? {
+        manualReadings.first { $0.window == window }
+    }
+
+    @discardableResult
+    public func saveUsageManualReading(_ reading: UsageManualReading) -> Bool {
+        let currentTime = clock()
+        do {
+            let canonical = try UsageManualReadingSet.merged(
+                manualReadings,
+                with: reading,
+                now: currentTime
+            )
+            let rebuilt = try UsageRegistryAdapter.fromLegacy(
+                mapping: currentLegacyMapping,
+                generatedAt: lastUpdated,
+                preferences: registryPreferences,
+                manualReadings: canonical,
+                now: currentTime,
+                failure: registryPresentation.failure
+            )
+            try manualReadingStore.replace(canonical, now: currentTime)
+            // Validate and rebuild first, persist the canonical collection,
+            // then publish last. A failed write or rebuild cannot change the
+            // previous visible registry.
+            manualReadings = canonical
+            manualReadingErrorMessage = nil
+            registryPresentation = rebuilt
+            publishPresentationPacket(
+                generation: refreshGeneration,
+                updateKind: displayOnlyUpdateKind
+            )
+            return true
+        } catch {
+            manualReadingErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func saveUsageManualReadings(_ readings: [UsageManualReading]) -> Bool {
+        let currentTime = clock()
+        do {
+            let next = try UsageManualReadingSet.validated(readings, now: currentTime)
+            let rebuilt = try UsageRegistryAdapter.fromLegacy(
+                mapping: currentLegacyMapping,
+                generatedAt: lastUpdated,
+                preferences: registryPreferences,
+                manualReadings: next,
+                now: currentTime,
+                failure: registryPresentation.failure
+            )
+            try manualReadingStore.replace(next, now: currentTime)
+            manualReadings = next
+            manualReadingErrorMessage = nil
+            registryPresentation = rebuilt
+            publishPresentationPacket(
+                generation: refreshGeneration,
+                updateKind: displayOnlyUpdateKind
+            )
+            return true
+        } catch {
+            manualReadingErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func deleteUsageManualReadings() -> Bool {
+        do {
+            let rebuilt = try UsageRegistryAdapter.fromLegacy(
+                mapping: currentLegacyMapping,
+                generatedAt: lastUpdated,
+                preferences: registryPreferences,
+                manualReadings: [],
+                now: clock(),
+                failure: registryPresentation.failure
+            )
+            try manualReadingStore.delete()
+            manualReadings = []
+            manualReadingErrorMessage = nil
+            registryPresentation = rebuilt
+            publishPresentationPacket(
+                generation: refreshGeneration,
+                updateKind: displayOnlyUpdateKind
+            )
+            return true
+        } catch {
+            manualReadingErrorMessage = error.localizedDescription
+            return false
+        }
     }
 
     private func publishPresentationPacket(
@@ -771,6 +902,30 @@ public final class UsageCoordinator: ObservableObject {
         )
     }
 
+    /// Rebuilds registry presentation from the current source snapshot so
+    /// manual readings are re-evaluated against the injected clock on
+    /// lifecycle failure paths as well as successful refreshes.
+    private func rebuiltRegistryPresentation(
+        manualReadings: [UsageManualReading]? = nil,
+        failure: UsageRegistryPresentationFailure
+    ) -> UsageRegistryPresentation {
+        do {
+            return try UsageRegistryAdapter.fromLegacy(
+                mapping: currentLegacyMapping,
+                generatedAt: lastUpdated,
+                preferences: registryPreferences,
+                manualReadings: manualReadings ?? self.manualReadings,
+                now: clock(),
+                failure: failure
+            )
+        } catch {
+            // The current presentation was already validated. Retain it if a
+            // defensive rebuild fails, while still surfacing the lifecycle
+            // outcome truthfully.
+            return registryPresentation.withFailure(failure)
+        }
+    }
+
     /// Preference changes are display-only. They must preserve the current
     /// source outcome so a failed, cancelled, or stale presentation cannot be
     /// relabeled as a resolved refresh merely because its rows were reordered.
@@ -791,6 +946,8 @@ public final class UsageCoordinator: ObservableObject {
         connectorStates: [Provider: ConnectorState],
         generatedAt: Date?,
         preferences: UsageRegistryPreferencesState,
+        manualReadings: [UsageManualReading],
+        now: Date,
         failure: UsageRegistryPresentationFailure = .none
     ) -> UsageRegistryPresentation {
         let mapping = UsageRegistryAdapter.legacyMapping(
@@ -803,6 +960,8 @@ public final class UsageCoordinator: ObservableObject {
                 mapping: mapping,
                 generatedAt: generatedAt,
                 preferences: preferences,
+                manualReadings: manualReadings,
+                now: now,
                 failure: failure
             )
         } catch {
@@ -940,6 +1099,17 @@ public final class UsageCoordinator: ObservableObject {
             return (try UsageHistoryLedger(archive: archive), nil)
         } catch {
             return (UsageHistoryLedger(), "Usage history unavailable")
+        }
+    }
+
+    private static func loadManualReadings(
+        from store: UsageManualReadingStore,
+        now: Date
+    ) -> (readings: [UsageManualReading], errorMessage: String?) {
+        do {
+            return (try store.load(now: now), nil)
+        } catch {
+            return ([], "Manual usage readings unavailable")
         }
     }
 

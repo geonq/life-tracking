@@ -692,7 +692,11 @@ private struct LifeOSIOSSceneRoot: View {
                 onSave: { usageCoordinator.updateUsageRegistryPreferences($0) },
                 preferenceError: usageCoordinator.registryPreferencesError,
                 onRetryPreferences: { usageCoordinator.reloadUsageRegistryPreferences() },
-                onResetPreferences: { usageCoordinator.resetUsageRegistryPreferences() }
+                onResetPreferences: { usageCoordinator.resetUsageRegistryPreferences() },
+                manualReadings: usageCoordinator.manualReadings,
+                manualReadingErrorMessage: usageCoordinator.manualReadingErrorMessage,
+                onSaveManualReadings: { usageCoordinator.saveUsageManualReadings($0) },
+                onDeleteManualReadings: { usageCoordinator.deleteUsageManualReadings() }
             )
             .presentationDetents([.medium, .large])
         }

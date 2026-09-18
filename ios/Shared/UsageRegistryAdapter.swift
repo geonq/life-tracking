@@ -8,10 +8,12 @@ public enum UsageRegistryAdapter {
         mapping: UsageMappingResult,
         generatedAt: Date?,
         preferences: UsageRegistryPreferencesState = .empty,
+        manualReadings: [UsageManualReading] = [],
         now: Date = .now,
         failure: UsageRegistryPresentationFailure = .none
     ) throws -> UsageRegistryPresentation {
         try preferences.validate()
+        let validatedManualReadings = try UsageManualReadingSet.validated(manualReadings, now: now)
 
         var snapshotsByProvider = [Provider: ProviderSnapshot]()
         for snapshot in mapping.providers {
@@ -129,12 +131,15 @@ public enum UsageRegistryAdapter {
             windowsByConnection[connectionID] = windows
         }
 
-        // These are catalog choices, not authenticated connections. Their
-        // rows explain the supported boundary without inventing a quota.
+        // Google AI Pro has no reviewed automatic consumer-quota endpoint. A
+        // reading entered from the official Gemini surface is the only
+        // supported subscription observation and remains explicitly manual.
         let subscriptionID = try UsageProviderID("gemini_subscription")
         let apiID = try UsageProviderID("gemini_api")
         let subscriptionConnectionID = try UsageConnectionID("catalog.gemini_subscription")
         let apiConnectionID = try UsageConnectionID("catalog.gemini_api")
+        let manualFreshness = Self.manualFreshness(validatedManualReadings, now: now)
+        let hasManualReadings = !validatedManualReadings.isEmpty
         connections.append(try UsageRegistryConnection(
             connectionID: subscriptionConnectionID,
             providerID: subscriptionID,
@@ -142,10 +147,44 @@ public enum UsageRegistryAdapter {
             planLabel: "Subscription",
             sortOrder: 100,
             authState: .notRequired,
-            availability: .unsupported,
-            freshness: .unavailable,
-            reasonCode: "automatic_quota_unavailable"
+            availability: hasManualReadings ? .available : .unsupported,
+            freshness: hasManualReadings ? manualFreshness : .unavailable,
+            reasonCode: hasManualReadings
+                ? (manualFreshness == .stale ? "manual_reading_stale" : nil)
+                : "automatic_quota_unavailable"
         ))
+        if hasManualReadings {
+            var manualWindows = [UsageRegistryWindow]()
+            for reading in validatedManualReadings {
+                let windowID = try UsageWindowID(reading.window.registryWindowID)
+                let window = try UsageRegistryWindow(
+                    id: windowID,
+                    label: reading.window.label,
+                    unit: .percentage,
+                    durationMinutes: reading.window.durationMinutes,
+                    resetPolicy: .providerDefined
+                )
+                manualWindows.append(window)
+                let selection = UsageRegistrySelection(
+                    connectionID: subscriptionConnectionID,
+                    windowID: windowID
+                )
+                completeScopes.insert(selection)
+                observations.append(try UsageRegistryObservation(
+                    selection: selection,
+                    value: .percentage(reading.usedPercent),
+                    resetAt: reading.resetAt,
+                    observedAt: reading.observedAt,
+                    receivedAt: generatedAt ?? reading.observedAt,
+                    source: "user_entry",
+                    evidenceKind: .manual,
+                    scope: .account,
+                    official: false,
+                    freshness: reading.freshness(at: now)
+                ))
+            }
+            windowsByConnection[subscriptionConnectionID] = manualWindows
+        }
         connections.append(try UsageRegistryConnection(
             connectionID: apiConnectionID,
             providerID: apiID,
@@ -169,6 +208,17 @@ public enum UsageRegistryAdapter {
             preferences: preferences,
             failure: failure
         )
+    }
+
+    private static func manualFreshness(
+        _ readings: [UsageManualReading],
+        now: Date
+    ) -> UsageRegistryFreshness {
+        guard !readings.isEmpty else { return .unavailable }
+        let freshness = readings.map { $0.freshness(at: now) }
+        if freshness.contains(.stale) { return .stale }
+        if freshness.contains(.aging) { return .aging }
+        return .fresh
     }
 
     public static func legacyMapping(

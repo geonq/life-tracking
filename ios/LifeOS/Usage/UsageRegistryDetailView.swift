@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Detail surface for registry entries without a legacy chart reference. It
 /// never borrows a different provider's chart, history, reset, or estimate.
@@ -7,6 +8,8 @@ struct UsageRegistryDetailView: View {
     let connectionID: UsageConnectionID
     let selectedWindowID: UsageWindowID?
     let onSelectWindow: (UsageWindowID) -> Void
+
+    @State private var freshnessNow = Date.now
 
     private var connection: UsageRegistryConnection? { presentation.connection(id: connectionID) }
     private var descriptor: UsageProviderDescriptor? { connection.flatMap(presentation.descriptor(for:)) }
@@ -25,6 +28,10 @@ struct UsageRegistryDetailView: View {
     private var observation: UsageRegistryObservation? { presentation.observation(for: selection) }
     private var estimate: UsageRegistryEstimate? { presentation.estimate(for: selection) }
 
+    private var isManualObservation: Bool {
+        observation?.evidenceKind == .manual
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: UsageLayoutContract.contentGap) {
             header
@@ -37,6 +44,10 @@ struct UsageRegistryDetailView: View {
             }
         }
         .accessibilityIdentifier("usage-registry-detail-\(connectionID.rawValue)")
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { now in
+            guard isManualObservation else { return }
+            freshnessNow = now
+        }
     }
 
     private var header: some View {
@@ -56,7 +67,8 @@ struct UsageRegistryDetailView: View {
     }
 
     private var stateSummary: some View {
-        HStack(spacing: LifeOSTokens.Space.xs) {
+        let displayedFreshness = effectiveManualFreshness ?? connection?.freshness
+        return HStack(spacing: LifeOSTokens.Space.xs) {
             Circle()
                 .fill(stateColor)
                 .frame(width: 7, height: 7)
@@ -67,7 +79,7 @@ struct UsageRegistryDetailView: View {
                 Text("· \(presentation.failure.label)")
                     .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.warningText)
-            } else if let freshness = connection?.freshness, freshness != .unknown && freshness != .unavailable {
+            } else if let freshness = displayedFreshness, freshness != .unknown && freshness != .unavailable {
                 Text("· \(freshnessText(freshness))")
                     .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -203,6 +215,11 @@ struct UsageRegistryDetailView: View {
         case .disconnected where connection?.availability == .available: return "Disconnected · cached value"
         default: break
         }
+        if isManualObservation, let observation {
+            return effectiveManualFreshness == .stale
+                ? "Needs updating"
+                : "Manually recorded · \(observation.observedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
+        }
         switch connection?.availability {
         case .available: return "Observed source"
         case .unsupported: return "Automatic usage unavailable"
@@ -227,11 +244,28 @@ struct UsageRegistryDetailView: View {
         case .reauthRequired, .revoked: return LifeOSTokens.warningText
         default: break
         }
+        if isManualObservation, effectiveManualFreshness == .stale {
+            return LifeOSTokens.warningText
+        }
         switch connection?.availability {
         case .available: return LifeOSTokens.Series.actual
         case .disabled: return LifeOSTokens.warningText
         case .unsupported, .unavailable, .none: return LifeOSTokens.tertiaryText
         }
+    }
+
+    private var effectiveManualFreshness: UsageRegistryFreshness? {
+        guard isManualObservation, let observation else { return nil }
+        guard freshnessNow.timeIntervalSinceReferenceDate.isFinite,
+              observation.observedAt.timeIntervalSinceReferenceDate.isFinite else {
+            return .stale
+        }
+        let age = max(0, freshnessNow.timeIntervalSince(observation.observedAt))
+        guard age < UsageManualReading.staleAfter,
+              observation.resetAt.map({ freshnessNow < $0 }) ?? true else {
+            return .stale
+        }
+        return age < UsageManualReading.staleAfter / 2 ? .fresh : .aging
     }
 
     private func freshnessText(_ freshness: UsageRegistryFreshness) -> String {

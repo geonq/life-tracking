@@ -1,5 +1,6 @@
 import SwiftUI
 import Charts
+import Combine
 
 struct CodexView: View {
     let snapshot: ProviderSnapshot
@@ -100,6 +101,7 @@ struct UsageView: View {
     @SceneStorage("LifeOS.usage.selectedConnection.v2") private var selectedConnectionIdentifier = ""
     @SceneStorage("LifeOS.usage.selectedWindow.v2") private var selectedWindowIdentifier = ""
     @Environment(\.dismiss) private var dismiss
+    @State private var freshnessNow = Date.now
 
     init(
         snapshots: [ProviderSnapshot],
@@ -413,6 +415,12 @@ struct UsageView: View {
         }
         .onChange(of: snapshots) { _, _ in
             reconcileSelection()
+        }
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { date in
+            guard registryPresentation.observations.contains(where: { $0.evidenceKind == .manual }) else {
+                return
+            }
+            freshnessNow = date
         }
     }
 
@@ -996,6 +1004,9 @@ struct UsageView: View {
 
     private func statusText(for connection: UsageRegistryConnection?) -> String {
         guard let connection else { return "No source selected" }
+        if connection.providerID.rawValue == "gemini_subscription" {
+            return manualGeminiStatus(for: connection) ?? "Quota unavailable"
+        }
         switch connection.authState {
         case .reauthRequired: return "Reauthorization required"
         case .revoked: return "Access revoked"
@@ -1005,7 +1016,6 @@ struct UsageView: View {
         if registryPresentation.failure != .none, connection.availability == .available {
             return registryPresentation.failure.label
         }
-        if connection.providerID.rawValue == "gemini_subscription" { return "Quota unavailable" }
         if connection.providerID.rawValue == "gemini_api" { return "API / project" }
         switch connection.availability {
         case .available:
@@ -1014,6 +1024,30 @@ struct UsageView: View {
         case .disabled: return "Hidden"
         case .unavailable: return "No data"
         }
+    }
+
+    private func manualGeminiStatus(for connection: UsageRegistryConnection) -> String? {
+        let manualObservations = registryPresentation.observations
+            .filter({
+                $0.selection.connectionID == connection.connectionID &&
+                $0.evidenceKind == .manual
+            })
+        guard let latestObservation = manualObservations.max(by: { $0.observedAt < $1.observedAt }) else {
+            return nil
+        }
+        let recorded = "Manually recorded · \(latestObservation.observedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
+        let needsUpdating = manualObservations.contains { manualGeminiIsStale($0) }
+        return needsUpdating ? "\(recorded) · Needs updating" : recorded
+    }
+
+    private func manualGeminiIsStale(_ observation: UsageRegistryObservation) -> Bool {
+        guard freshnessNow.timeIntervalSinceReferenceDate.isFinite,
+              observation.observedAt.timeIntervalSinceReferenceDate.isFinite else {
+            return true
+        }
+        let age = max(0, freshnessNow.timeIntervalSince(observation.observedAt))
+        guard age < UsageManualReading.staleAfter else { return true }
+        return observation.resetAt.map { freshnessNow >= $0 } ?? false
     }
 
 }

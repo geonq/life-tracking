@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Compact local display management for the provider registry. These controls
 /// change what appears in Usage; they do not disconnect a source or revoke
@@ -9,27 +10,42 @@ struct UsageConnectionsView: View {
     let preferenceError: UsageRegistryPreferencesError?
     let onRetryPreferences: () -> Bool
     let onResetPreferences: () -> Bool
+    let manualReadings: [UsageManualReading]
+    let manualReadingErrorMessage: String?
+    let onSaveManualReadings: (([UsageManualReading]) -> Bool)?
+    let onDeleteManualReadings: (() -> Bool)?
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @State private var orderedIDs: [UsageConnectionID]
     @State private var hiddenIDs: Set<UsageConnectionID>
     @State private var pinnedIDs: Set<UsageConnectionID>
     @State private var saveError: String?
     @State private var preferenceActionError: String?
     @State private var hasDirtyEdits = false
+    @State private var showingManualReading = false
+    @State private var freshnessNow = Date.now
 
     init(
         presentation: UsageRegistryPresentation,
         onSave: @escaping (UsageRegistryPreferencesState) -> Bool = { _ in true },
         preferenceError: UsageRegistryPreferencesError? = nil,
         onRetryPreferences: @escaping () -> Bool = { false },
-        onResetPreferences: @escaping () -> Bool = { false }
+        onResetPreferences: @escaping () -> Bool = { false },
+        manualReadings: [UsageManualReading] = [],
+        manualReadingErrorMessage: String? = nil,
+        onSaveManualReadings: (([UsageManualReading]) -> Bool)? = nil,
+        onDeleteManualReadings: (() -> Bool)? = nil
     ) {
         self.presentation = presentation
         self.onSave = onSave
         self.preferenceError = preferenceError
         self.onRetryPreferences = onRetryPreferences
         self.onResetPreferences = onResetPreferences
+        self.manualReadings = manualReadings
+        self.manualReadingErrorMessage = manualReadingErrorMessage
+        self.onSaveManualReadings = onSaveManualReadings
+        self.onDeleteManualReadings = onDeleteManualReadings
         _orderedIDs = State(initialValue: presentation.orderedConnections(includeHidden: true).map(\.connectionID))
         _hiddenIDs = State(initialValue: presentation.preferences.hiddenConnectionIDs)
         _pinnedIDs = State(initialValue: presentation.effectivePinnedConnectionIDs)
@@ -105,8 +121,29 @@ struct UsageConnectionsView: View {
             } message: {
                 Text(preferenceActionError ?? "Try again or reset the saved display state.")
             }
+            .sheet(isPresented: $showingManualReading) {
+                UsageManualReadingView(
+                    currentReadings: manualReadings,
+                    now: freshnessNow,
+                    initialErrorMessage: manualReadingErrorMessage,
+                    onSave: { readings in
+                        onSaveManualReadings?(readings) ?? false
+                    },
+                    onDelete: {
+                        onDeleteManualReadings?() ?? false
+                    }
+                )
+#if os(iOS)
+                .presentationDetents([.medium, .large])
+#else
+                .frame(minWidth: 520, minHeight: 520)
+#endif
+            }
             .onChange(of: presentation) { _, next in
                 syncFromPresentation(next)
+            }
+            .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { date in
+                freshnessNow = date
             }
         }
     }
@@ -144,6 +181,24 @@ struct UsageConnectionsView: View {
                     .lineLimit(2)
             }
             Spacer(minLength: LifeOSTokens.Space.xs)
+            let actions = UsageConnectionActionResolver.actions(for: connection, descriptor: descriptor)
+            if !actions.isEmpty {
+                Menu {
+                    ForEach(actions) { action in
+                        Button {
+                            perform(action)
+                        } label: {
+                            Label(action.title, systemImage: action.isManualEntry ? "square.and.pencil" : "arrow.up.right")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .frame(width: 26, height: 26)
+                }
+                .menuStyle(.borderlessButton)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+                .accessibilityLabel("Actions for \(connectionTitle(connection, descriptor: descriptor))")
+            }
             Button {
                 if isPinned { pinnedIDs.remove(connection.connectionID) }
                 else { pinnedIDs.insert(connection.connectionID) }
@@ -193,12 +248,21 @@ struct UsageConnectionsView: View {
             return "Disconnected · cached value"
         default: break
         }
+        if connection.providerID.rawValue == "gemini_subscription",
+           let latest = manualReadings.max(by: { $0.observedAt < $1.observedAt }) {
+            if manualReadings.contains(where: { $0.status(at: freshnessNow) == .needsUpdating }) {
+                return "Needs updating"
+            }
+            return "Manually recorded · \(latest.observedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
+        }
         if presentation.failure != .none, connection.availability == .available {
             return "\(presentation.failure.label) · cached value"
         }
         switch connection.providerID.rawValue {
         case "gemini_subscription":
-            return "Automatic quota unavailable · Manual unsupported"
+            return manualReadingErrorMessage == nil
+                ? "Automatic usage unavailable · Add a reading"
+                : "Saved reading unavailable · Recover"
         case "gemini_api":
             return "API / project usage · No subscription balance"
         default:
@@ -220,11 +284,33 @@ struct UsageConnectionsView: View {
         case .reauthRequired, .revoked: return LifeOSTokens.warningText
         default: break
         }
+        if connection.providerID.rawValue == "gemini_subscription", !manualReadings.isEmpty {
+            return manualReadings.contains {
+                $0.status(at: freshnessNow) == .needsUpdating
+            } ? LifeOSTokens.warningText : LifeOSTokens.Series.actual
+        }
         switch connection.availability {
         case .available: return connection.freshness == .stale ? LifeOSTokens.warningText : LifeOSTokens.Series.actual
         case .unsupported, .unavailable: return LifeOSTokens.tertiaryText
         case .disabled: return LifeOSTokens.warningText
         }
+    }
+
+    private func perform(_ action: UsageConnectionAction) {
+        if action.isManualEntry {
+            guard onSaveManualReadings != nil, onDeleteManualReadings != nil else {
+                preferenceActionError = "Manual usage entry is unavailable in this fixture."
+                return
+            }
+            freshnessNow = Date.now
+            showingManualReading = true
+            return
+        }
+        guard let url = action.destination?.url else {
+            preferenceActionError = "This Usage action has no reviewed destination."
+            return
+        }
+        openURL(url)
     }
 
     private func moveRows(from source: IndexSet, to destination: Int) {
