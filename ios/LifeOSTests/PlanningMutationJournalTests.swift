@@ -135,7 +135,7 @@ final class PlanningMutationJournalTests: XCTestCase {
         XCTAssertEqual(pragmas.synchronous, 3)
         XCTAssertEqual(pragmas.foreignKeys, 1)
         XCTAssertEqual(pragmas.busyTimeout, 1_000)
-        XCTAssertEqual(try scalar(database, pragma: "user_version"), "1")
+        XCTAssertEqual(try scalar(database, pragma: "user_version"), "2")
         first.close()
 
         let reopened = PlanningMutationJournal(applicationSupportDirectory: root, vault: identity)
@@ -445,4 +445,242 @@ final class PlanningMutationJournalTests: XCTestCase {
             XCTAssertEqual(error as? PlanningStorageError, .closed)
         }
     }
+
+    func testV2FreshSchemaContainsPublicationDetails() throws {
+        let root = try temporaryRoot("v2")
+        defer { remove(root) }
+        let identity = try vault()
+        let journal = PlanningMutationJournal(applicationSupportDirectory: root, vault: identity)
+        defer { journal.close() }
+        try journal.openValidated()
+        let request = try PlanningMutationRequest(
+            vaultID: identity.vaultID,
+            path: try PlanningStoredPath("Notes/v2.md"),
+            operation: .create,
+            expectedVersion: .absent,
+            proposedBytes: Data()
+        )
+        _ = try journal.stageMutation(request)
+        _ = try journal.beginPublication(for: request.mutationID)
+        let database = databaseURL(root: root, vault: identity)
+        XCTAssertEqual(try scalar(database, pragma: "user_version"), "2")
+        XCTAssertEqual(try journal.publicationAttempt(for: request.mutationID)?.phase, .prepared)
+    }
+
+    func testContextBoundBeginPersistsValidatedContextAcrossReopen() throws {
+        let root = try temporaryRoot("context")
+        defer { remove(root) }
+        let identity = try vault()
+        let context = try PlanningPublicationContext(
+            selectionGeneration: UUID(),
+            rootIdentity: try PlanningFileIdentity(device: 10, inode: 20, fileType: 2),
+            observedVersion: .absent,
+            observedIdentity: nil
+        )
+        let request = try PlanningMutationRequest(
+            vaultID: identity.vaultID,
+            path: try PlanningStoredPath("Notes/context.md"),
+            operation: .create,
+            expectedVersion: .absent,
+            proposedBytes: Data()
+        )
+        let first = PlanningMutationJournal(applicationSupportDirectory: root, vault: identity)
+        try first.openValidated()
+        _ = try first.stageMutation(request)
+        _ = try first.beginPublication(for: request.mutationID, context: context)
+        XCTAssertEqual(try first.publicationAttempt(for: request.mutationID)?.context, context)
+        first.close()
+
+        let reopened = PlanningMutationJournal(applicationSupportDirectory: root, vault: identity)
+        defer { reopened.close() }
+        try reopened.openValidated()
+        XCTAssertEqual(try reopened.publicationAttempt(for: request.mutationID)?.context, context)
+    }
+
+    func testContextBoundBeginRejectsObservationDifferentFromMutationExpectation() throws {
+        let root = try temporaryRoot("context-mismatch")
+        defer { remove(root) }
+        let identity = try vault()
+        let journal = PlanningMutationJournal(applicationSupportDirectory: root, vault: identity)
+        defer { journal.close() }
+        try journal.openValidated()
+        let request = try PlanningMutationRequest(
+            vaultID: identity.vaultID,
+            path: try PlanningStoredPath("Notes/context-mismatch.md"),
+            operation: .create,
+            expectedVersion: .absent,
+            proposedBytes: Data()
+        )
+        _ = try journal.stageMutation(request)
+        let context = try PlanningPublicationContext(
+            selectionGeneration: UUID(),
+            rootIdentity: try PlanningFileIdentity(device: 10, inode: 20, fileType: 2),
+            observedVersion: PlanningContentVersion(data: Data("unexpected".utf8)),
+            observedIdentity: try PlanningFileIdentity(device: 11, inode: 21, fileType: 1)
+        )
+        XCTAssertThrowsError(
+            try journal.beginPublication(for: request.mutationID, context: context)
+        ) { error in
+            XCTAssertEqual(error as? PlanningStorageError, .invalid("publicationContext.expectedVersion"))
+        }
+    }
+
+    func testRetryableFailureAllowsASeparateAttemptAndPreservesReceipt() throws {
+        let root = try temporaryRoot("retry")
+        defer { remove(root) }
+        let identity = try vault()
+        let journal = PlanningMutationJournal(applicationSupportDirectory: root, vault: identity)
+        defer { journal.close() }
+        try journal.openValidated()
+        let request = try PlanningMutationRequest(
+            vaultID: identity.vaultID,
+            path: try PlanningStoredPath("Notes/retry.md"),
+            operation: .create,
+            expectedVersion: .absent,
+            proposedBytes: Data()
+        )
+        _ = try journal.stageMutation(request)
+        let first = try journal.beginPublication(for: request.mutationID)
+        let failed = try journal.recordPublicationOutcome(
+            mutationID: request.mutationID,
+            attemptID: first,
+            outcome: .failed(code: "temporary", retryable: true)
+        )
+        XCTAssertEqual(failed.state, .prepared)
+        let second = try journal.beginPublication(for: request.mutationID)
+        XCTAssertNotEqual(first, second)
+        XCTAssertEqual(try journal.status().pendingMutationCount, 1)
+    }
+
+    func testDurableConflictDecisionReplayReturnsTheSameQueuedChild() throws {
+        let root = try temporaryRoot("decision")
+        defer { remove(root) }
+        let identity = try vault()
+        let journal = PlanningMutationJournal(applicationSupportDirectory: root, vault: identity)
+        defer { journal.close() }
+        try journal.openValidated()
+        let path = try PlanningStoredPath("Notes/decision.md")
+        let request = try PlanningMutationRequest(
+            vaultID: identity.vaultID,
+            path: path,
+            operation: .create,
+            expectedVersion: .absent,
+            proposedBytes: Data("local".utf8)
+        )
+        _ = try journal.stageMutation(request)
+        let conflict = try PlanningConflict(
+            mutationID: request.mutationID,
+            vaultID: identity.vaultID,
+            path: path,
+            operation: .create,
+            reason: "observed",
+            baseVersion: .absent,
+            localBytes: Data("local".utf8),
+            observedVersion: .absent,
+            observedBytes: nil
+        )
+        _ = try journal.recordConflict(conflict)
+        let first = try journal.resolveConflict(conflict.conflictID, resolution: .keepBoth)
+        let childID = try XCTUnwrap(first.newMutationReceipt?.mutationID)
+        let replay = try journal.resolveConflict(conflict.conflictID, resolution: .keepBoth)
+        XCTAssertEqual(replay.newMutationReceipt?.mutationID, childID)
+        XCTAssertEqual(try journal.status().openConflictCount, 0)
+    }
+
+    func testCompactionRetainsResolvedConflictPayloadEvidence() throws {
+        let root = try temporaryRoot("compact")
+        defer { remove(root) }
+        let identity = try vault()
+        let journal = PlanningMutationJournal(applicationSupportDirectory: root, vault: identity)
+        defer { journal.close() }
+        try journal.openValidated()
+        let path = try PlanningStoredPath("Notes/compact.md")
+        let request = try PlanningMutationRequest(
+            vaultID: identity.vaultID,
+            path: path,
+            operation: .create,
+            expectedVersion: .absent,
+            proposedBytes: Data("local".utf8)
+        )
+        _ = try journal.stageMutation(request)
+        let conflict = try PlanningConflict(
+            mutationID: request.mutationID,
+            vaultID: identity.vaultID,
+            path: path,
+            operation: .create,
+            reason: "observed",
+            baseVersion: .absent,
+            localBytes: Data("local".utf8),
+            observedVersion: .absent,
+            observedBytes: nil
+        )
+        _ = try journal.recordConflict(conflict)
+        _ = try journal.resolveConflict(conflict.conflictID, resolution: .keepObserved)
+        XCTAssertEqual(try journal.compactUnreferencedPayloads(), 0)
+        XCTAssertGreaterThan(try journal.status().retainedPayloadBytes, 0)
+    }
+
+    func testRecoveryCursorRoundTripsAndFreezesTheCurrentSequence() throws {
+        let root = try temporaryRoot("cursor")
+        defer { remove(root) }
+        let identity = try vault()
+        let journal = PlanningMutationJournal(applicationSupportDirectory: root, vault: identity)
+        defer { journal.close() }
+        try journal.openValidated()
+        for index in 0..<2 {
+            let request = try PlanningMutationRequest(
+                vaultID: identity.vaultID,
+                path: try PlanningStoredPath("Notes/cursor-\(index).md"),
+                operation: .create,
+                expectedVersion: .absent,
+                proposedBytes: Data()
+            )
+            _ = try journal.stageMutation(request)
+        }
+        let page = try journal.loadPublicationRecoveryPage()
+        let cursor = try XCTUnwrap(
+            try JSONDecoder().decode(
+                PlanningPublicationRecoveryCursor.self,
+                from: JSONEncoder().encode(page.nextCursor)
+            )
+        )
+        let late = try PlanningMutationRequest(
+            vaultID: identity.vaultID,
+            path: try PlanningStoredPath("Notes/cursor-late.md"),
+            operation: .create,
+            expectedVersion: .absent,
+            proposedBytes: Data()
+        )
+        _ = try journal.stageMutation(late)
+        let next = try journal.loadPublicationRecoveryPage(after: cursor)
+        XCTAssertFalse(next.entries.contains { $0.recovery.mutationID == late.mutationID })
+    }
+
+    func testPublicNULWitnessInputDoesNotAdvanceTheAttempt() throws {
+        let root = try temporaryRoot("nul")
+        defer { remove(root) }
+        let identity = try vault()
+        let journal = PlanningMutationJournal(applicationSupportDirectory: root, vault: identity)
+        defer { journal.close() }
+        try journal.openValidated()
+        let request = try PlanningMutationRequest(
+            vaultID: identity.vaultID,
+            path: try PlanningStoredPath("Notes/nul.md"),
+            operation: .create,
+            expectedVersion: .absent,
+            proposedBytes: Data()
+        )
+        _ = try journal.stageMutation(request)
+        let attempt = try journal.beginPublication(for: request.mutationID)
+        XCTAssertThrowsError(
+            try journal.recordStagedIdentity(
+                mutationID: request.mutationID,
+                attemptID: attempt,
+                identity: try PlanningFileIdentity(device: 1, inode: 2, fileType: 1),
+                witnessName: ".lifeos-stage-\(attempt.uuidString.lowercased())\0suffix"
+            )
+        )
+        XCTAssertEqual(try journal.receipt(for: request.mutationID)?.state, .prepared)
+    }
+
 }

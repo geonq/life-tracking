@@ -535,4 +535,157 @@ final class PlanningStorageDomainTests: XCTestCase {
         XCTAssertNotEqual(first.fingerprint, differentPath.fingerprint)
         XCTAssertNil(PlanningContentVersion.absent.digest)
     }
+
+    func testPublicationContextRoundTripAndAdditiveDecoding() throws {
+        let context = try PlanningPublicationContext(
+            selectionGeneration: UUID(),
+            rootIdentity: try PlanningFileIdentity(device: 10, inode: 20, fileType: 2),
+            observedVersion: .absent,
+            observedIdentity: nil
+        )
+        XCTAssertEqual(try roundTrip(context), context)
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(context)) as? [String: Any]
+        )
+        object["future"] = ["version": 3]
+        let additive = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertEqual(
+            try JSONDecoder().decode(PlanningPublicationContext.self, from: additive),
+            context
+        )
+        XCTAssertThrowsError(
+            try PlanningPublicationContext(
+                selectionGeneration: UUID(),
+                rootIdentity: try PlanningFileIdentity(device: 10, inode: 20, fileType: 1),
+                observedVersion: .absent,
+                observedIdentity: nil
+            )
+        )
+        XCTAssertThrowsError(
+            try PlanningPublicationContext(
+                selectionGeneration: UUID(),
+                rootIdentity: try PlanningFileIdentity(device: 10, inode: 20, fileType: 2),
+                observedVersion: .absent,
+                observedIdentity: try PlanningFileIdentity(device: 11, inode: 21, fileType: 1)
+            )
+        )
+    }
+
+    func testPublicationOutcomeTaggedVariantsRemainStrictAndBounded() throws {
+        let published = PlanningPublicationOutcomeRecord.published(.absent)
+        XCTAssertEqual(try roundTrip(published), published)
+        let encoded = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(published)
+        ) as! [String: Any]
+        var unknown = encoded
+        unknown["future"] = true
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                PlanningPublicationOutcomeRecord.self,
+                from: JSONSerialization.data(withJSONObject: unknown)
+            )
+        )
+        let oversized = PlanningPublicationOutcomeRecord.failed(
+            code: String(repeating: "x", count: PlanningPublicationLimits.maximumErrorCodeBytes + 1),
+            retryable: true
+        )
+        XCTAssertThrowsError(try JSONEncoder().encode(oversized))
+        let nul = PlanningPublicationOutcomeRecord.failed(code: "bad\0code", retryable: false)
+        XCTAssertThrowsError(try JSONEncoder().encode(nul))
+    }
+
+    func testPublicationAttemptSnapshotRejectsInvalidPhaseAndNonfiniteRetry() throws {
+        let attemptID = UUID()
+        let mutationID = UUID()
+        let prepared = try PlanningPublicationAttemptSnapshot(
+            attemptID: attemptID,
+            mutationID: mutationID,
+            ordinal: 1,
+            phase: .prepared
+        )
+        XCTAssertEqual(try roundTrip(prepared), prepared)
+        XCTAssertThrowsError(
+            try PlanningPublicationAttemptSnapshot(
+                attemptID: attemptID,
+                mutationID: mutationID,
+                ordinal: 1,
+                phase: .stageReady
+            )
+        )
+        XCTAssertThrowsError(
+            try PlanningPublicationAttemptSnapshot(
+                attemptID: attemptID,
+                mutationID: mutationID,
+                ordinal: 1,
+                phase: .prepared,
+                retryAfter: Date(timeIntervalSince1970: .infinity)
+            )
+        )
+        let legacy = try PlanningPublicationAttemptSnapshot(
+            attemptID: attemptID,
+            mutationID: mutationID,
+            ordinal: 1,
+            phase: .prepared,
+            witnessName: "legacy",
+            legacyUnverified: true
+        )
+        XCTAssertEqual(try roundTrip(legacy), legacy)
+    }
+
+    func testRecoveryAndDurableResolutionRecordsValidateBoundsAndRoundTrip() throws {
+        let vaultID = UUID()
+        let cursor = try PlanningPublicationRecoveryCursor(
+            vaultID: vaultID,
+            maximumSequence: 10,
+            lastExaminedSequence: 4
+        )
+        XCTAssertEqual(try roundTrip(cursor), cursor)
+        XCTAssertThrowsError(
+            try PlanningPublicationRecoveryCursor(
+                vaultID: vaultID,
+                maximumSequence: 3,
+                lastExaminedSequence: 4
+            )
+        )
+        let conflictID = UUID()
+        let fingerprint = planningPublicationDecisionFingerprint(
+            conflictID: conflictID,
+            resolution: .keepObserved
+        )
+        let record = try PlanningDurableResolutionRecord(
+            conflictID: conflictID,
+            decisionFingerprint: fingerprint,
+            resolution: .keepObserved,
+            childMutationID: nil
+        )
+        XCTAssertEqual(try roundTrip(record), record)
+        XCTAssertThrowsError(
+            try PlanningDurableResolutionRecord(
+                conflictID: conflictID,
+                decisionFingerprint: String(repeating: "0", count: 64),
+                resolution: .keepObserved,
+                childMutationID: nil
+            )
+        ) { error in
+            XCTAssertEqual(error as? PlanningStorageError, .invalid("durableResolution.decisionFingerprint"))
+        }
+    }
+
+    func testLegacyConflictInspectionIsExplicitAndCannotBecomeDecisionEvidence() throws {
+        let value = try PlanningLegacyConflictInspection(conflictID: UUID())
+        XCTAssertEqual(try roundTrip(value), value)
+        XCTAssertThrowsError(
+            try PlanningLegacyConflictInspection(
+                conflictID: value.conflictID,
+                sourceSchemaVersion: 2
+            )
+        )
+        XCTAssertThrowsError(
+            try PlanningLegacyConflictInspection(
+                conflictID: value.conflictID,
+                reason: "fabricated"
+            )
+        )
+    }
+
 }
