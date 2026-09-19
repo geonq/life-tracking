@@ -16,6 +16,7 @@ Updated 2026-09-19 Europe/Berlin.
 - Evidence: storage guard PASS with 40.6 GiB free; serial Mac build-for-testing PASS; focused elevated Mac durability 19/19; generic iOS device SDK build-for-testing PASS. CoreSimulator and physical iPhone runtime remain unavailable.
 - Receipt: artifacts/final/planning-core/packet-a-repair-20260919.md.
 - Packet B publication journal is Astra Medium ACCEPTED and pushed at 25e6135. Its receipt records 57/57 focused Mac tests, independent result validation, generic iOS SDK build and storage guard PASS, including retry/reopen and repeated-continuation replay. It excludes filesystem writes, bookmarks, UI, gateway and entitlements.
+- Packet C filesystem publication design is recorded at artifacts/final/planning-core/packet-c-design-20260919.md (145 lines). It is a plan only; no personal-vault access or production files are authorized yet.
 
 ## Verified source and local evidence
 

@@ -193,6 +193,7 @@ expected/observed result, remediation and retest.
 
 ## Immediate next dispatch
 
-Dispatch an Astra Medium Packet C design for filesystem publication, bookmarks,
-symlink and iCloud coordination. Keep Windows/workouts/live finance disjoint;
-every packet ends with review, commit, push and handoff update.
+Dispatch Packet C from `bc9b498` using
+`artifacts/final/planning-core/packet-c-design-20260919.md`. Keep
+Windows/workouts/live finance disjoint; every packet ends with review, commit,
+push and handoff update.

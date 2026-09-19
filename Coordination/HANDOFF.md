@@ -37,7 +37,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 ## Next action
 
-Dispatch an Astra-reviewed Packet C design for filesystem publication/bookmarks, symlink and iCloud coordination, then have Luna implement only its accepted file set. Keep actual-vault writes, graph/UI, gateway and device proof behind their own reviewed packets.
+Use `artifacts/final/planning-core/packet-c-design-20260919.md` for the exact filesystem publication/bookmark/iCloud dispatch. Luna may implement only its allowlist after Astra reviews the actual diff; keep actual-vault writes, graph/UI, gateway and device proof behind their own reviewed packets.
 
 ## Validation discipline
 
