@@ -1214,7 +1214,8 @@ public final class PlanningMutationJournal: @unchecked Sendable {
                                 request: stored.request,
                                 attemptID: attemptID
                             ),
-                            attempt: attempt
+                            attempt: attempt,
+                            sequence: sequence
                         ))
                         examined = sequence
                     }

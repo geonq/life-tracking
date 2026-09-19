@@ -422,10 +422,18 @@ public struct PlanningPublicationRecoveryCursor: Codable, Equatable, Sendable {
 }
 
 public struct PlanningPublicationRecoveryEntry: Sendable, Equatable {
+    /// The durable mutation sequence used to advance recovery without
+    /// rewinding over entries that were already examined.
+    public let sequence: Int64
     public let recovery: PlanningRecoveryEntry
     public let attempt: PlanningPublicationAttemptSnapshot?
 
-    public init(recovery: PlanningRecoveryEntry, attempt: PlanningPublicationAttemptSnapshot?) {
+    public init(
+        recovery: PlanningRecoveryEntry,
+        attempt: PlanningPublicationAttemptSnapshot?,
+        sequence: Int64 = 0
+    ) {
+        self.sequence = sequence
         self.recovery = recovery
         self.attempt = attempt
     }
@@ -443,6 +451,18 @@ public struct PlanningPublicationRecoveryPage: Sendable, Equatable {
     ) throws {
         guard entries.count <= PlanningStorageLimits.recoveryBatch else {
             throw PlanningStorageError.invalid("publicationRecovery.entries")
+        }
+        var previousSequence: Int64 = 0
+        for entry in entries {
+            guard entry.sequence > 0,
+                  entry.sequence > previousSequence,
+                  entry.sequence <= nextCursor.maximumSequence else {
+                throw PlanningStorageError.invalid("publicationRecovery.sequence")
+            }
+            previousSequence = entry.sequence
+        }
+        guard entries.last.map({ $0.sequence <= nextCursor.lastExaminedSequence }) ?? true else {
+            throw PlanningStorageError.invalid("publicationRecovery.cursorBoundary")
         }
         let materialized = entries.reduce(0) { partialResult, entry in
             partialResult + (entry.recovery.request.proposedBytes?.count ?? 0)
