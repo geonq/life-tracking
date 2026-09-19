@@ -1,8 +1,7 @@
 # LifeOS final execution plan
 Prepared by Astra Medium from the Luna Max audit on 2026-09-18. Baseline:
-`d1e66f6`, aligned `main` and `origin/main` after the accepted Packet A
-checkpoint and Packet B design; the worktree contains an uncommitted Packet B
-repair. Release is **NO-GO**. The 258-leaf registry has 0 accepted
+`25e6135`, clean `main` and `origin/main` after the accepted Packet A and
+Packet B checkpoints. Release is **NO-GO**. The 258-leaf registry has 0 accepted
 leaves; it is an acceptance ledger, not a completion percentage.
 ## Rules for every tranche
 1. One Luna Max implementation worker at a time. Astra Medium reviews the
@@ -194,7 +193,6 @@ expected/observed result, remediation and retest.
 
 ## Immediate next dispatch
 
-Finish the local Packet B repair from d1e66f6, obtain Astra acceptance for the
-reopen/replay lineage cases, then commit and push it. Keep
-Windows/workouts/live finance disjoint; every packet ends with review, commit,
-push and handoff update.
+Dispatch an Astra Medium Packet C design for filesystem publication, bookmarks,
+symlink and iCloud coordination. Keep Windows/workouts/live finance disjoint;
+every packet ends with review, commit, push and handoff update.

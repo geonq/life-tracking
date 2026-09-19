@@ -1,8 +1,8 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-19 Europe/Berlin. Release: **NO-GO**. Current pushed
-checkpoint: `d1e66f6`; Packet A is Astra-accepted and included. Packet B is
-local, uncommitted and awaiting repair/re-review. Do not publish guessed
+checkpoint: `25e6135`; Packet A and Packet B are Astra-accepted and included.
+Do not publish guessed
 percentages; use the evidence
 ledger and the classifications in `tasks/final-execution-plan.md`.
 
@@ -58,9 +58,9 @@ ledger and the classifications in `tasks/final-execution-plan.md`.
    lossless Canvas/Markdown codecs; implement vault binding, atomic store, mutation
    journal and conflict copies; graph projection, spatial index and native Mac/
    iPhone interaction; bounded Windows mirror/proposal transport and wiring.
-   Packet B publication is implemented locally but Astra found reopen/replay
-   lineage blockers; repair and accept it before committing. Do not write a
-   real vault until authority and conflict policy are selected.
+   Packet B publication journal is accepted at `25e6135`. Next, specify and
+   implement filesystem publication/bookmarks and iCloud coordination. Do not
+   write a real vault until authority and conflict policy are selected.
 8. **Widgets, Shortcuts, signing** — verify the existing widget catalog plus
    the requested lock-screen widget against dark/tinted/transparent grey
    wallpaper states. Provide honest Morning Sync and USB Refresh Shortcuts;

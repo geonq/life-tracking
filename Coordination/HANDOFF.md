@@ -8,7 +8,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 ## Current truth
 
-- main and origin/main are aligned at d1e66f6, which includes the Astra-accepted Planning Storage Packet A and the Packet B design. The worktree currently contains the uncommitted Packet B implementation repair; the last pushed checkpoint remains d1e66f6.
+- main and origin/main are clean and aligned at 25e6135, which includes the Astra-accepted Planning Storage Packet A and Packet B publication journal.
 - Windows disposable staging is separate from canonical install/recovery. Canonical LifeOSAPI is stopped, LifeOSGateway is absent, no LifeOS listener is bound, the legacy sync task is Ready, Tailscale is running, and BitLocker is on C:/D:.
 - No generic advisor, conversational AI, or demo fallback is allowed. Calorie-photo tracking is the only in-app AI flow. Usage keeps Claude and provider-neutral/manual Gemini boundary rows without fabricated quota.
 - Native SwiftUI/WidgetKit, SF Pro/system typography, brand palette, compact hierarchy, truthful unavailable states, green estimates, and interruptible motion remain product authority.
@@ -17,7 +17,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 - Planning Storage Packet A repair: additive optional-key decoding; strict required/type/semantic validation; bounded payload validation before allocation/hash; NUL-safe explicit-length SQLite text binding. Astra Medium ACCEPT.
 - Packet A source files and focused tests are recorded in artifacts/final/planning-core/packet-a-repair-20260919.md. Storage guard PASS with 40.6 GiB free; Mac build-for-testing PASS; focused Mac durability 19/19; generic iOS device SDK build PASS. Simulator and physical iPhone remain unverified.
-- Packet B implementation is local only at this handoff. Its latest receipt records 57/57 focused Mac durability tests, independent xcresult validation, generic iOS SDK build, storage guard and diff checks. Astra found two reopen/replay lineage blockers; no Packet B commit or push is authorized yet.
+- Packet B publication journal is Astra Medium ACCEPTED and pushed at 25e6135. Its receipt records 57/57 focused Mac durability tests, independent xcresult validation, generic iOS SDK build, storage guard and diff checks, including retry/reopen and repeated-continuation replay.
 - Obsidian Canvas/Markdown codec and value binding are pushed at f53c77c; focused codec tests 31/31, independent smoke pass, Mac logic 193/193. Durable store, conflict journal, graph/UI, gateway route, and sync remain open.
 - Mac Home repair d2ece98 passed geometry 2/2 and dark snapshot acceptance 1/1. Stability receipt records focused 1/1 while an isolated manual build stayed alive; old XCTest crashes were not reproduced in the normal fixture.
 - Finance detector/import, mapping, recurring management, investment/Robinhood validation, and bounded live readback are source-reviewed and locally tested; live provider reconciliation remains open.
@@ -37,7 +37,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 ## Next action
 
-Finish the Packet B lineage repair from the current dirty worktree; Luna Max must cover retryable-failure reopen and repeated self-continuations, then Astra reviews the actual diff and evidence before any commit/push. After acceptance, checkpoint and update this handoff before dispatching filesystem publication.
+Dispatch an Astra-reviewed Packet C design for filesystem publication/bookmarks, symlink and iCloud coordination, then have Luna implement only its accepted file set. Keep actual-vault writes, graph/UI, gateway and device proof behind their own reviewed packets.
 
 ## Validation discipline
 

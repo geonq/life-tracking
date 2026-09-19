@@ -5,7 +5,7 @@ Updated 2026-09-19 Europe/Berlin.
 ## Release state
 
 - Release: NO-GO.
-- main and origin/main are aligned at d1e66f6, including the accepted Packet A checkpoint and Packet B design. The worktree is dirty with the uncommitted Packet B repair.
+- main and origin/main are clean and aligned at 25e6135, including the accepted Packet A checkpoint and Packet B publication journal.
 - The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0 formally accepted leaves; it is an evidence ledger, not a percentage.
 - The old worker/t11a-shared-visual-foundation branch remains patch-equivalent to main.
 
@@ -15,7 +15,7 @@ Updated 2026-09-19 Europe/Berlin.
 - Source behavior: additive optional-key decoding with required/type/semantic validation; payload SQLite type/count/ceiling/length checks before Data allocation/hash; all persisted text rejects embedded NULs and binds explicit UTF-8 lengths.
 - Evidence: storage guard PASS with 40.6 GiB free; serial Mac build-for-testing PASS; focused elevated Mac durability 19/19; generic iOS device SDK build-for-testing PASS. CoreSimulator and physical iPhone runtime remain unavailable.
 - Receipt: artifacts/final/planning-core/packet-a-repair-20260919.md.
-- Packet B is implemented locally within its approved scope and remains uncommitted. Its receipt records 57/57 focused Mac tests, independent result validation, generic iOS SDK build and storage guard PASS; Astra's latest review found two retry/repeated-continuation reopen blockers. The design excludes filesystem writes, bookmarks, UI, gateway and entitlements.
+- Packet B publication journal is Astra Medium ACCEPTED and pushed at 25e6135. Its receipt records 57/57 focused Mac tests, independent result validation, generic iOS SDK build and storage guard PASS, including retry/reopen and repeated-continuation replay. It excludes filesystem writes, bookmarks, UI, gateway and entitlements.
 
 ## Verified source and local evidence
 
@@ -36,7 +36,7 @@ Updated 2026-09-19 Europe/Berlin.
 
 ## Open gates
 
-- Durable Obsidian vault store, publication/conflict journal and idempotency, graph/spatial index, native Mac/iPhone views, bounded gateway route and live round trip.
+- Filesystem-backed Obsidian vault store, security-scoped bookmarks, iCloud coordination, graph/spatial index, native Mac/iPhone views, bounded gateway route and live round trip. Packet B's journal core is accepted but does not authorize real-vault writes.
 - Canonical Windows candidate verification, supervised recovery/install, service/ACL/Serve/health/readiness/listener checks and rollback.
 - Real Enable Banking consent/readback, recurring reconciliation, Trade Republic import, Robinhood/net-worth reconciliation and offline outage behavior.
 - LifeOS-owned workouts and physical Zepp/HealthKit comparison; proprietary Zepp readiness/load/PAI/Training Effect remain unsupported without evidence.
