@@ -1,7 +1,7 @@
 # LifeOS final execution plan
 Prepared by Astra Medium from the Luna Max audit on 2026-09-18. Baseline:
-`833a4a7`, clean `main` and `origin/main` after the accepted Packet A and
-Packet B checkpoints and Packet C design. Release is **NO-GO**. The 258-leaf registry has 0 accepted
+`5dae724`, clean `main` and `origin/main` after the accepted Packet A, Packet B,
+and Packet C checkpoints. Release is **NO-GO**. The 258-leaf registry has 0 accepted
 leaves; it is an acceptance ledger, not a completion percentage.
 ## Rules for every tranche
 1. One Luna Max implementation worker at a time. Astra Medium reviews the
@@ -130,11 +130,11 @@ Use expected content versions, same-directory atomic replacement, recoverable
 journal entries and conflict copies. Preferred topology is a selected
 non-Uni iCloud vault under `LifeOS/`; do not select a vault by guessing and do
 not silently overwrite Obsidian edits. Packet A’s mutation journal/domain
-core is implemented and Astra-accepted; its receipt is
-`artifacts/final/planning-core/packet-a-repair-20260919.md`. The next packet
-must add publication outcome state, durable keepBoth/conflict idempotency,
-bounded recovery progress, terminal payload reclamation, and vault
-coordination/bookmark/symlink closure.
+   core is implemented and Astra-accepted; Packet C adds the bounded
+   filesystem publication/bookmark/cancellation/recovery adapter and is pushed
+   at `5dae724` with receipt
+   `artifacts/final/planning-core/packet-c-publication-20260919.md`. Provider
+   behavior, real-vault round trip, graph/UI and gateway remain separate gates.
 
 **Interaction:** new `PlanningGraphProjection.swift`, `PlanningSpatialIndex.swift`,
 `ios/LifeOS/Modules/Planning/{PlanningCanvasView,PlanningNodeInspector}.swift`
@@ -193,7 +193,6 @@ expected/observed result, remediation and retest.
 
 ## Immediate next dispatch
 
-Dispatch Packet C from `bc9b498` using
-`artifacts/final/planning-core/packet-c-design-20260919.md`. Keep
+Dispatch the graph/spatial-index packet from `5dae724`. Keep
 Windows/workouts/live finance disjoint; every packet ends with review, commit,
 push and handoff update.

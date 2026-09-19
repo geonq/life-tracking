@@ -2,7 +2,7 @@
 
 Status: IN PROGRESS — updated 2026-09-19 Europe/Berlin.
 
-main and origin/main are clean and aligned at 833a4a7, including the accepted Planning Storage Packet A checkpoint, Packet B publication journal and Packet C design. Release remains NO-GO. The 258-leaf registry is acceptance evidence, not an implementation percentage.
+main and origin/main are clean and aligned at 5dae724, including the accepted Planning Storage Packet A checkpoint, Packet B publication journal, and Packet C filesystem publication adapter. Release remains NO-GO. The 258-leaf registry is acceptance evidence, not an implementation percentage.
 
 ## Product authority
 
@@ -17,8 +17,8 @@ main and origin/main are clean and aligned at 833a4a7, including the accepted Pl
 - Evidence receipt: artifacts/final/planning-core/packet-a-repair-20260919.md.
 - Controller evidence: storage guard PASS with 40.6 GiB free; Mac build-for-testing PASS; focused Mac durability 19/19; generic iOS device SDK build PASS. Simulator/physical device remain open.
 - Packet A is committed and pushed at e9a2a2c; its acceptance is a completed checkpoint.
-- Packet B publication journal is Astra Medium ACCEPTED and pushed at 25e6135. Its receipt records 57/57 focused Mac tests, independent result validation, generic iOS SDK build and storage guard PASS, including retry/reopen and repeated-continuation replay. Filesystem publication remains a separate gate.
-- Packet C design is recorded at artifacts/final/planning-core/packet-c-design-20260919.md (145 lines); it is the next exact Luna allowlist after controller review.
+- Packet B publication journal is Astra Medium ACCEPTED and pushed at 25e6135. Its receipt records 57/57 focused Mac tests, independent result validation, generic iOS SDK build and storage guard PASS, including retry/reopen and repeated-continuation replay.
+- Packet C filesystem publication adapter is Astra Medium ACCEPTED and pushed at 5dae724. Its receipt records 84/84 focused Mac tests, 21/21 recovery/adversarial probe cases, generic iOS device-SDK build success, and the prepared-attempt cancellation/reopen regression.
 
 ## Existing evidence
 
@@ -32,7 +32,7 @@ main and origin/main are clean and aligned at 833a4a7, including the accepted Pl
 
 ## Remaining work
 
-1. Implement the exact Packet C filesystem publication/bookmark/iCloud scope from its accepted design before graph/spatial index, native views, bounded gateway route and live round trip.
+1. Implement the graph/spatial index and native Canvas interaction on the accepted local filesystem adapter, then bounded gateway route and live round trip.
 2. Finish Windows candidate verification and supervised recovery/install, then verify service identity/ACLs, Serve, health/readiness, listener, restart and rollback.
 3. Verify live Enable Banking, recurring reconciliation, Trade Republic import, Robinhood/net-worth separation and the accelerated Windows outage.
 4. Implement/verify LifeOS-owned workouts and physical Zepp/HealthKit provenance; leave proprietary Zepp fields unavailable without evidence.

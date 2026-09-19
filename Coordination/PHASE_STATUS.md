@@ -5,7 +5,7 @@ Updated 2026-09-19 Europe/Berlin.
 ## Release state
 
 - Release: NO-GO.
-- main and origin/main are clean and aligned at 833a4a7, including the accepted Packet A checkpoint, Packet B publication journal and Packet C design.
+- main and origin/main are clean and aligned at 5dae724, including the accepted Packet A checkpoint, Packet B publication journal, and Packet C filesystem publication adapter.
 - The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0 formally accepted leaves; it is an evidence ledger, not a percentage.
 - The old worker/t11a-shared-visual-foundation branch remains patch-equivalent to main.
 
@@ -16,7 +16,7 @@ Updated 2026-09-19 Europe/Berlin.
 - Evidence: storage guard PASS with 40.6 GiB free; serial Mac build-for-testing PASS; focused elevated Mac durability 19/19; generic iOS device SDK build-for-testing PASS. CoreSimulator and physical iPhone runtime remain unavailable.
 - Receipt: artifacts/final/planning-core/packet-a-repair-20260919.md.
 - Packet B publication journal is Astra Medium ACCEPTED and pushed at 25e6135. Its receipt records 57/57 focused Mac tests, independent result validation, generic iOS SDK build and storage guard PASS, including retry/reopen and repeated-continuation replay. It excludes filesystem writes, bookmarks, UI, gateway and entitlements.
-- Packet C filesystem publication design is recorded at artifacts/final/planning-core/packet-c-design-20260919.md (145 lines). It is a plan only; no personal-vault access or production files are authorized yet.
+- Packet C filesystem publication adapter is Astra Medium ACCEPTED and pushed at 5dae724. Receipt: `artifacts/final/planning-core/packet-c-publication-20260919.md`; evidence is 84/84 focused Mac tests, 21/21 recovery/adversarial probe cases, and a successful generic iOS device-SDK build. This is local adapter acceptance; iCloud provider behavior, real-vault round trip, and physical-device proof remain open.
 
 ## Verified source and local evidence
 
@@ -37,7 +37,7 @@ Updated 2026-09-19 Europe/Berlin.
 
 ## Open gates
 
-- Filesystem-backed Obsidian vault store, security-scoped bookmarks, iCloud coordination, graph/spatial index, native Mac/iPhone views, bounded gateway route and live round trip. Packet B's journal core is accepted but does not authorize real-vault writes.
+- iCloud provider behavior, graph/spatial index, native Mac/iPhone views, bounded gateway route and live Mac→Obsidian→iPhone round trip. Packet C's local adapter is accepted but does not by itself prove provider or physical-device behavior.
 - Canonical Windows candidate verification, supervised recovery/install, service/ACL/Serve/health/readiness/listener checks and rollback.
 - Real Enable Banking consent/readback, recurring reconciliation, Trade Republic import, Robinhood/net-worth reconciliation and offline outage behavior.
 - LifeOS-owned workouts and physical Zepp/HealthKit comparison; proprietary Zepp readiness/load/PAI/Training Effect remain unsupported without evidence.

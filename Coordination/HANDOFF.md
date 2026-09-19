@@ -8,7 +8,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 ## Current truth
 
-- main and origin/main are clean and aligned at 833a4a7, which includes the Astra-accepted Planning Storage Packet A and Packet B publication journal plus the Packet C design.
+- main and origin/main are clean and aligned at 5dae724, which includes the Astra-accepted Planning Storage Packet A, Packet B publication journal, and Packet C filesystem publication adapter.
 - Windows disposable staging is separate from canonical install/recovery. Canonical LifeOSAPI is stopped, LifeOSGateway is absent, no LifeOS listener is bound, the legacy sync task is Ready, Tailscale is running, and BitLocker is on C:/D:.
 - No generic advisor, conversational AI, or demo fallback is allowed. Calorie-photo tracking is the only in-app AI flow. Usage keeps Claude and provider-neutral/manual Gemini boundary rows without fabricated quota.
 - Native SwiftUI/WidgetKit, SF Pro/system typography, brand palette, compact hierarchy, truthful unavailable states, green estimates, and interruptible motion remain product authority.
@@ -18,6 +18,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 - Planning Storage Packet A repair: additive optional-key decoding; strict required/type/semantic validation; bounded payload validation before allocation/hash; NUL-safe explicit-length SQLite text binding. Astra Medium ACCEPT.
 - Packet A source files and focused tests are recorded in artifacts/final/planning-core/packet-a-repair-20260919.md. Storage guard PASS with 40.6 GiB free; Mac build-for-testing PASS; focused Mac durability 19/19; generic iOS device SDK build PASS. Simulator and physical iPhone remain unverified.
 - Packet B publication journal is Astra Medium ACCEPTED and pushed at 25e6135. Its receipt records 57/57 focused Mac durability tests, independent xcresult validation, generic iOS SDK build, storage guard and diff checks, including retry/reopen and repeated-continuation replay.
+- Packet C filesystem publication adapter is Astra Medium ACCEPTED and pushed at 5dae724. Its receipt records 84/84 focused Mac tests, 21/21 crash-recovery probe cases, adversarial path/identity checks, generic iOS device-SDK build success, and clean diff checks. Signed app, iCloud provider, physical-device, Windows, and whole-app visual gates remain separate.
 - Obsidian Canvas/Markdown codec and value binding are pushed at f53c77c; focused codec tests 31/31, independent smoke pass, Mac logic 193/193. Durable store, conflict journal, graph/UI, gateway route, and sync remain open.
 - Mac Home repair d2ece98 passed geometry 2/2 and dark snapshot acceptance 1/1. Stability receipt records focused 1/1 while an isolated manual build stayed alive; old XCTest crashes were not reproduced in the normal fixture.
 - Finance detector/import, mapping, recurring management, investment/Robinhood validation, and bounded live readback are source-reviewed and locally tested; live provider reconciliation remains open.
@@ -27,7 +28,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 ## Open gates
 
-- Dispatch the next durable vault store/publication journal/conflict idempotency packet, then graph/spatial index, native views, gateway route, and Mac→Obsidian→iPhone round trip.
+- Dispatch graph/spatial index and native Canvas interaction from the now-accepted local filesystem adapter, then bounded gateway wiring and the Mac→Obsidian→iPhone round trip.
 - Canonical Windows candidate verification, supervised recovery/install, service/ACL/Serve/health/readiness/listener checks, and rollback receipt.
 - Live Enable Banking consent/readback, recurring reconciliation, Trade Republic import, Robinhood/net-worth separation, and offline outage behavior.
 - LifeOS-owned workouts plus physical Zepp/HealthKit provenance; proprietary Zepp readiness/load/PAI/Training Effect stays unavailable without evidence.
@@ -37,7 +38,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 ## Next action
 
-Use `artifacts/final/planning-core/packet-c-design-20260919.md` for the exact filesystem publication/bookmark/iCloud dispatch. Luna may implement only its allowlist after Astra reviews the actual diff; keep actual-vault writes, graph/UI, gateway and device proof behind their own reviewed packets.
+Use `artifacts/final/planning-core/packet-c-publication-20260919.md` for the accepted local adapter evidence. The next Luna packet is graph/spatial index and native views; keep real-vault provider behavior, gateway wiring, and device proof behind their own reviewed packets.
 
 ## Validation discipline
 

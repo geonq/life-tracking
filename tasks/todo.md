@@ -1,8 +1,8 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-19 Europe/Berlin. Release: **NO-GO**. Current pushed
-checkpoint: `833a4a7`; Packet A and Packet B are Astra-accepted and included,
-and Packet C's design is committed.
+checkpoint: `5dae724`; Packet A, Packet B, and Packet C are Astra-accepted and
+included.
 Do not publish guessed
 percentages; use the evidence
 ledger and the classifications in `tasks/final-execution-plan.md`.
@@ -25,6 +25,10 @@ ledger and the classifications in `tasks/final-execution-plan.md`.
 - Planning Storage Packet A: additive-key validation, pre-allocation payload
   bounds, NUL-safe SQLite text binding, and adversarial durability coverage.
   Astra accepted; receipt: `artifacts/final/planning-core/packet-a-repair-20260919.md`.
+- Planning filesystem Packet C: descriptor-relative vault access, bounded
+  atomic publication, recovery/cancellation/cleanup evidence, capacity and
+  cursor guards, native picker handling, and adversarial probes. Astra accepted
+  at `5dae724`; receipt: `artifacts/final/planning-core/packet-c-publication-20260919.md`.
 
 ## Ordered execution
 
@@ -59,10 +63,10 @@ ledger and the classifications in `tasks/final-execution-plan.md`.
    lossless Canvas/Markdown codecs; implement vault binding, atomic store, mutation
    journal and conflict copies; graph projection, spatial index and native Mac/
    iPhone interaction; bounded Windows mirror/proposal transport and wiring.
-   Packet B publication journal is accepted at `25e6135`. Packet C's exact
-   filesystem publication/bookmark/iCloud plan is at
-   `artifacts/final/planning-core/packet-c-design-20260919.md`. Do not write a
-   real vault until authority and conflict policy are selected.
+   Packet B publication journal is accepted at `25e6135`, and Packet C's local
+   filesystem publication adapter is accepted at `5dae724`. Continue with the
+   graph/spatial index and native views; iCloud provider behavior and real-vault
+   round trip remain separate gates.
 8. **Widgets, Shortcuts, signing** — verify the existing widget catalog plus
    the requested lock-screen widget against dark/tinted/transparent grey
    wallpaper states. Provide honest Morning Sync and USB Refresh Shortcuts;

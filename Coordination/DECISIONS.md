@@ -1,6 +1,6 @@
 # LifeOS decisions
 
-Updated 2026-09-17 Europe/Berlin.
+Updated 2026-09-19 Europe/Berlin.
 
 ## Product boundary
 
@@ -41,8 +41,10 @@ Updated 2026-09-17 Europe/Berlin.
   Unsupported fields stay unavailable until evidence exists.
 - Obsidian Canvas uses Markdown/YAML links as semantic authority and Canvas
   coordinates as presentation metadata. The bounded value-only codecs and
-  Markdown/Canvas round-trip proof are committed at `f53c77c`; durable vault
-  authority, conflict policy, and live writes remain separate decisions.
+  Markdown/Canvas round-trip proof are committed at `f53c77c`; the bounded
+  filesystem publication adapter is Astra-accepted at `5dae724`. Provider
+  behavior, conflict policy at the real-vault boundary, and live writes remain
+  separate gates.
 
 ## Security and operations
 
