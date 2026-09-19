@@ -5,17 +5,17 @@ Updated 2026-09-19 Europe/Berlin.
 ## Release state
 
 - Release: NO-GO.
-- main and origin/main are aligned at e9a2a2c, including the accepted Packet A checkpoint.
+- main and origin/main are aligned at d1e66f6, including the accepted Packet A checkpoint and Packet B design. The worktree is dirty with the uncommitted Packet B repair.
 - The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0 formally accepted leaves; it is an evidence ledger, not a percentage.
 - The old worker/t11a-shared-visual-foundation branch remains patch-equivalent to main.
 
 ## Current accepted packet
 
-- Planning Storage Packet A repair is Astra Medium ACCEPTED and ready to checkpoint.
+- Planning Storage Packet A repair is Astra Medium ACCEPTED, committed and pushed at e9a2a2c.
 - Source behavior: additive optional-key decoding with required/type/semantic validation; payload SQLite type/count/ceiling/length checks before Data allocation/hash; all persisted text rejects embedded NULs and binds explicit UTF-8 lengths.
 - Evidence: storage guard PASS with 40.6 GiB free; serial Mac build-for-testing PASS; focused elevated Mac durability 19/19; generic iOS device SDK build-for-testing PASS. CoreSimulator and physical iPhone runtime remain unavailable.
 - Receipt: artifacts/final/planning-core/packet-a-repair-20260919.md.
-- Packet B design is READY FOR LUNA at artifacts/final/planning-core/packet-b-design-20260919.md; it excludes filesystem writes, bookmarks, UI, gateway and entitlements.
+- Packet B is implemented locally within its approved scope and remains uncommitted. Its receipt records 57/57 focused Mac tests, independent result validation, generic iOS SDK build and storage guard PASS; Astra's latest review found two retry/repeated-continuation reopen blockers. The design excludes filesystem writes, bookmarks, UI, gateway and entitlements.
 
 ## Verified source and local evidence
 
@@ -26,7 +26,7 @@ Updated 2026-09-19 Europe/Berlin.
 - The current committed Mac logic receipt is 193/193 with independent validation. The isolated LifeOSMac stability lane is 1/1; the manual fixture remained alive and no new normal-launch crash appeared.
 - Mac Home d2ece98 passed geometry 2/2 and dark snapshot acceptance 1/1. Obsidian Canvas codec/value binding f53c77c passed focused 31/31 and an independent smoke harness; durable storage/UI/graph/transport remain open.
 - Tax parser security f62ef9e and UsageHistory locking dfeab04 are pushed and Astra-accepted. Usage lock evidence is 55 focused/160 full API tests.
-- Canonical Windows preflight is STOP/NO-GO; receipt artifacts/final/windows/preflight-4db1eaa.md. SSH/local gates pass; journal/progress, ACL/reparse, writer provenance and source-bound candidate identity remain unverified.
+- Canonical Windows preflight is STOP/NO-GO; receipt artifacts/final/windows/preflight-4db1eaa-20260918.md. SSH/local gates pass; journal/progress, ACL/reparse, writer provenance and source-bound candidate identity remain unverified.
 
 ## Backend state
 

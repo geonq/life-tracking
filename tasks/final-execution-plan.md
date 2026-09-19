@@ -1,9 +1,9 @@
 # LifeOS final execution plan
 Prepared by Astra Medium from the Luna Max audit on 2026-09-18. Baseline:
-`e9a2a2c`, clean `main`, aligned with
-`origin/main` after the accepted Packet A checkpoint. Release is **NO-GO**. The 258-leaf registry has 0 accepted
+`d1e66f6`, aligned `main` and `origin/main` after the accepted Packet A
+checkpoint and Packet B design; the worktree contains an uncommitted Packet B
+repair. Release is **NO-GO**. The 258-leaf registry has 0 accepted
 leaves; it is an acceptance ledger, not a completion percentage.
-
 ## Rules for every tranche
 1. One Luna Max implementation worker at a time. Astra Medium reviews the
    actual diff and evidence in batches. Close each worker after its report.
@@ -194,6 +194,7 @@ expected/observed result, remediation and retest.
 
 ## Immediate next dispatch
 
-Dispatch Packet B from e9a2a2c using artifacts/final/planning-core/packet-b-design-20260919.md. Astra must specify exact files, symbols, invariants, failure states
-and evidence before Luna edits. Keep Windows/workouts/live finance disjoint;
-every packet ends with review, commit, push and handoff update.
+Finish the local Packet B repair from d1e66f6, obtain Astra acceptance for the
+reopen/replay lineage cases, then commit and push it. Keep
+Windows/workouts/live finance disjoint; every packet ends with review, commit,
+push and handoff update.

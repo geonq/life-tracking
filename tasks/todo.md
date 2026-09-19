@@ -1,8 +1,9 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-19 Europe/Berlin. Release: **NO-GO**. Current pushed
-checkpoint: `e9a2a2c`; Packet A is Astra-accepted and included.
-checkpoint. Do not publish completion percentages; use the evidence
+checkpoint: `d1e66f6`; Packet A is Astra-accepted and included. Packet B is
+local, uncommitted and awaiting repair/re-review. Do not publish guessed
+percentages; use the evidence
 ledger and the classifications in `tasks/final-execution-plan.md`.
 
 ## Completed checkpoints
@@ -27,7 +28,7 @@ ledger and the classifications in `tasks/final-execution-plan.md`.
 ## Ordered execution
 
 1. **Truth and stability** — keep the current handoff files under 200 lines,
-   remove stale checkpoint/percentage claims from active plans, and preserve
+   reconcile checkpoint claims after every accepted packet, and preserve
    the focused crash receipt. Do not change app lifecycle code without a new
    reproduced, symbolicated failure.
 2. **Canonical Windows deployment** — inspect the marker, transaction,
@@ -57,8 +58,8 @@ ledger and the classifications in `tasks/final-execution-plan.md`.
    lossless Canvas/Markdown codecs; implement vault binding, atomic store, mutation
    journal and conflict copies; graph projection, spatial index and native Mac/
    iPhone interaction; bounded Windows mirror/proposal transport and wiring.
-   Packet B publication design is recorded at
-   `artifacts/final/planning-core/packet-b-design-20260919.md`. Do not write a
+   Packet B publication is implemented locally but Astra found reopen/replay
+   lineage blockers; repair and accept it before committing. Do not write a
    real vault until authority and conflict policy are selected.
 8. **Widgets, Shortcuts, signing** — verify the existing widget catalog plus
    the requested lock-screen widget against dark/tinted/transparent grey
