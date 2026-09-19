@@ -5,7 +5,7 @@ Updated 2026-09-19 Europe/Berlin.
 ## Release state
 
 - Release: NO-GO.
-- main and origin/main are clean and aligned at 25e6135, including the accepted Packet A checkpoint and Packet B publication journal.
+- main and origin/main are clean and aligned at 833a4a7, including the accepted Packet A checkpoint, Packet B publication journal and Packet C design.
 - The acceptance registry remains frozen at 258 leaves, 7 aliases, and 0 formally accepted leaves; it is an evidence ledger, not a percentage.
 - The old worker/t11a-shared-visual-foundation branch remains patch-equivalent to main.
 

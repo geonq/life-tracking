@@ -1,7 +1,8 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-19 Europe/Berlin. Release: **NO-GO**. Current pushed
-checkpoint: `25e6135`; Packet A and Packet B are Astra-accepted and included.
+checkpoint: `833a4a7`; Packet A and Packet B are Astra-accepted and included,
+and Packet C's design is committed.
 Do not publish guessed
 percentages; use the evidence
 ledger and the classifications in `tasks/final-execution-plan.md`.

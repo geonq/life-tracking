@@ -2,7 +2,7 @@
 
 Status: IN PROGRESS — updated 2026-09-19 Europe/Berlin.
 
-main and origin/main are clean and aligned at 25e6135, including the accepted Planning Storage Packet A checkpoint and Packet B publication journal. Release remains NO-GO. The 258-leaf registry is acceptance evidence, not an implementation percentage.
+main and origin/main are clean and aligned at 833a4a7, including the accepted Planning Storage Packet A checkpoint, Packet B publication journal and Packet C design. Release remains NO-GO. The 258-leaf registry is acceptance evidence, not an implementation percentage.
 
 ## Product authority
 

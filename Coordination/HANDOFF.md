@@ -8,7 +8,7 @@ Continue the strict release-gate workflow. Release remains NO-GO; use accepted e
 
 ## Current truth
 
-- main and origin/main are clean and aligned at 25e6135, which includes the Astra-accepted Planning Storage Packet A and Packet B publication journal.
+- main and origin/main are clean and aligned at 833a4a7, which includes the Astra-accepted Planning Storage Packet A and Packet B publication journal plus the Packet C design.
 - Windows disposable staging is separate from canonical install/recovery. Canonical LifeOSAPI is stopped, LifeOSGateway is absent, no LifeOS listener is bound, the legacy sync task is Ready, Tailscale is running, and BitLocker is on C:/D:.
 - No generic advisor, conversational AI, or demo fallback is allowed. Calorie-photo tracking is the only in-app AI flow. Usage keeps Claude and provider-neutral/manual Gemini boundary rows without fabricated quota.
 - Native SwiftUI/WidgetKit, SF Pro/system typography, brand palette, compact hierarchy, truthful unavailable states, green estimates, and interruptible motion remain product authority.
