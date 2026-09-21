@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-21 Europe/Berlin. Release: NO-GO.
-Current checkpoint: 83365b1.
+Current checkpoint: 038cd37.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -26,19 +26,22 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   Focused relay tests: 5 passed.
 - P02 strict Swift-compatible signed-frame verification: 83365b1. Focused
   replication tests: 8 passed, one crypto-dependent skip on this Mac.
+- P02 authenticated gateway exchange: 038cd37. Nested operation/ack signatures,
+  pinned membership, dependency-aware byte-bounded paging, contiguous device
+  frontiers, separate acknowledgement cursor progression, stream-head/index
+  migration, and original-schema regression are covered. Focused suite: 21
+  passed, one cryptography-dependent skip.
 
 ## Ordered implementation
 
-1. Finish P02 authenticated gateway routes against the committed store/relay;
-   keep Windows deployment separate while that host is unavailable.
-2. P03 adapts calendar/finance stores; P04 adapts fitness, nutrition,
+1. P03 adapts calendar/finance stores; P04 adapts fitness, nutrition,
    supplements and lifestyle stores with local durability before acknowledgement.
-4. P05 reviews the eight D1 candidates against their exact design packet; P06
+2. P05 reviews the eight D1 candidates against their exact design packet; P06
    adds native Canvas/inspector/vault integration only after P01/P05.
-5. P07 shared visual/motion primitives; P08 calendar; P09 finance; P10 fitness;
+3. P07 shared visual/motion primitives; P08 calendar; P09 finance; P10 fitness;
    P11 HealthKit/Zepp provenance; P12 usage; P13 tax; P14 widgets/intents.
-6. P15 security/dead-path hardening; P16 composition and target membership.
-7. P18 receipt/archive authority and final Mac/simulator evidence; P17 Windows
+4. P15 security/dead-path hardening; P16 composition and target membership.
+5. P18 receipt/archive authority and final Mac/simulator evidence; P17 Windows
    deployment/live providers when the PC returns; P18-E final release evidence.
 
 ## Release gates still open

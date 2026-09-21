@@ -62,3 +62,17 @@ Updated 2026-09-21 Europe/Berlin.
   tokens, invalid routes, body-hash mismatches, and unauthenticated frames
   before route composition; durable sender authorization remains a gateway
   integration obligation.
+
+## P02 authenticated exchange checkpoint
+
+- Checkpoint 038cd37 is pushed on main and origin/main. It adds authenticated
+  gateway exchange integration, nested operation/ack signature verification
+  against the pinned member roster, contiguous device frontiers, and a
+  separate gateway acknowledgement cursor.
+- Dependency paging is FIFO/de-duplicated, byte-bounded, restart-safe, and
+  never advertises an unresolved or noncontiguous device sequence as delivered.
+- A durable stream-head table and sequence index bound frontier reads. The
+  composite index is created only after legacy-column migration; an original
+  schema regression covers this ordering.
+- Focused Python evidence is 21 passing tests with one cryptography-dependent
+  skip on this Mac. Xcode remains license-gated; Windows is unavailable.
