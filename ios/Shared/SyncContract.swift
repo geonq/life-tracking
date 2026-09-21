@@ -7,6 +7,9 @@ public enum SyncContractConstants {
     public static let maxInlinePayloadBytes = 65_536
     public static let maxBlobBytes: UInt64 = 33_554_432
     public static let maxBlobChunkBytes = 262_144
+    public static let maxAdministrativeSegmentBytes: UInt64 = 33_554_432
+    public static let maxAdministrativeBundleBytes: UInt64 = 536_870_929
+    public static let maxAdministrativeManifestBytes: UInt64 = 268_435_456
     public static let maxFrontierPositions = 256
     public static let maxCausalParents = 8
     public static let maxMembers = 8
@@ -1129,19 +1132,110 @@ public struct RemoteRestoreRelease20: Codable, Equatable, Sendable {
     public let signature: String
 }
 
+private enum SyncCanonicalUnsigned {
+    static func decode<T: FixedWidthInteger & UnsignedInteger, K: CodingKey>(
+        _ type: T.Type,
+        from container: KeyedDecodingContainer<K>,
+        forKey key: K,
+        maximum: UInt64,
+        positive: Bool = false
+    ) throws -> T {
+        let raw = try container.decode(String.self, forKey: key)
+        guard !raw.isEmpty,
+              raw == "0" || !raw.hasPrefix("0"),
+              raw.unicodeScalars.allSatisfy({ $0.value >= 48 && $0.value <= 57 }),
+              let value = UInt64(raw),
+              value <= maximum,
+              (!positive || value > 0),
+              let converted = T(exactly: value) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: key,
+                in: container,
+                debugDescription: "canonical unsigned decimal outside the permitted range"
+            )
+        }
+        return converted
+    }
+
+    static func encode<K: CodingKey>(
+        _ value: UInt64,
+        into container: inout KeyedEncodingContainer<K>,
+        forKey key: K,
+        maximum: UInt64,
+        positive: Bool = false
+    ) throws {
+        guard value <= maximum, !positive || value > 0 else {
+            throw EncodingError.invalidValue(
+                value,
+                EncodingError.Context(
+                    codingPath: container.codingPath + [key],
+                    debugDescription: "unsigned decimal is outside the permitted range"
+                )
+            )
+        }
+        try container.encode(String(value), forKey: key)
+    }
+}
+
+public enum AdminDataStoreID20: String, Codable, Equatable, Sendable {
+    case usageLocal
+    case clipperLocal
+}
+
 public struct AdminScope20: Codable, Equatable, Sendable {
     public let namespace: String
     public let datasetID: String
     public let operationID: String
     public let fenceID: String
     public let targetHostID: String
-    public let storeID: LifeOSDataStoreID
+    public let storeID: AdminDataStoreID20
+
+    public init(namespace: String, datasetID: String, operationID: String, fenceID: String, targetHostID: String, storeID: AdminDataStoreID20) {
+        self.namespace = namespace
+        self.datasetID = datasetID
+        self.operationID = operationID
+        self.fenceID = fenceID
+        self.targetHostID = targetHostID
+        self.storeID = storeID
+    }
 }
 
 public struct AdminBlobRef20: Codable, Equatable, Sendable {
     public let index: UInt16
     public let blobHash: String
     public let byteCount: UInt64
+
+    public init(index: UInt16, blobHash: String, byteCount: UInt64) {
+        self.index = index
+        self.blobHash = blobHash
+        self.byteCount = byteCount
+    }
+
+    private enum CodingKeys: String, CodingKey { case index, blobHash, byteCount }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        index = try container.decode(UInt16.self, forKey: .index)
+        blobHash = try container.decode(String.self, forKey: .blobHash)
+        byteCount = try SyncCanonicalUnsigned.decode(
+            UInt64.self,
+            from: container,
+            forKey: .byteCount,
+            maximum: SyncContractConstants.maxAdministrativeSegmentBytes
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(index, forKey: .index)
+        try container.encode(blobHash, forKey: .blobHash)
+        try SyncCanonicalUnsigned.encode(
+            byteCount,
+            into: &container,
+            forKey: .byteCount,
+            maximum: SyncContractConstants.maxAdministrativeSegmentBytes
+        )
+    }
 }
 
 public struct RemotePackSource20: Codable, Equatable, Sendable {
@@ -1151,7 +1245,7 @@ public struct RemotePackSource20: Codable, Equatable, Sendable {
     public let operationID: String
     public let fenceID: String
     public let targetHostID: String
-    public let storeID: LifeOSDataStoreID
+    public let storeID: AdminDataStoreID20
     public let packHash: String
     public let sourceHash: String
     public let manifestFormat: String
@@ -1160,6 +1254,116 @@ public struct RemotePackSource20: Codable, Equatable, Sendable {
     public let bundleHash: String
     public let byteCount: UInt64
     public let segments: [AdminBlobRef20]
+
+    public init(
+        schemaVersion: Int,
+        namespace: String,
+        datasetID: String,
+        operationID: String,
+        fenceID: String,
+        targetHostID: String,
+        storeID: AdminDataStoreID20,
+        packHash: String,
+        sourceHash: String,
+        manifestFormat: String,
+        manifestHash: String,
+        manifestByteCount: UInt64,
+        bundleHash: String,
+        byteCount: UInt64,
+        segments: [AdminBlobRef20]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.namespace = namespace
+        self.datasetID = datasetID
+        self.operationID = operationID
+        self.fenceID = fenceID
+        self.targetHostID = targetHostID
+        self.storeID = storeID
+        self.packHash = packHash
+        self.sourceHash = sourceHash
+        self.manifestFormat = manifestFormat
+        self.manifestHash = manifestHash
+        self.manifestByteCount = manifestByteCount
+        self.bundleHash = bundleHash
+        self.byteCount = byteCount
+        self.segments = segments
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, namespace, datasetID, operationID, fenceID, targetHostID, storeID
+        case packHash, sourceHash, manifestFormat, manifestHash, manifestByteCount, bundleHash, byteCount, segments
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        namespace = try container.decode(String.self, forKey: .namespace)
+        datasetID = try container.decode(String.self, forKey: .datasetID)
+        operationID = try container.decode(String.self, forKey: .operationID)
+        fenceID = try container.decode(String.self, forKey: .fenceID)
+        targetHostID = try container.decode(String.self, forKey: .targetHostID)
+        storeID = try container.decode(AdminDataStoreID20.self, forKey: .storeID)
+        packHash = try container.decode(String.self, forKey: .packHash)
+        sourceHash = try container.decode(String.self, forKey: .sourceHash)
+        manifestFormat = try container.decode(String.self, forKey: .manifestFormat)
+        manifestHash = try container.decode(String.self, forKey: .manifestHash)
+        manifestByteCount = try SyncCanonicalUnsigned.decode(
+            UInt64.self,
+            from: container,
+            forKey: .manifestByteCount,
+            maximum: SyncContractConstants.maxAdministrativeManifestBytes
+        )
+        bundleHash = try container.decode(String.self, forKey: .bundleHash)
+        byteCount = try SyncCanonicalUnsigned.decode(
+            UInt64.self,
+            from: container,
+            forKey: .byteCount,
+            maximum: SyncContractConstants.maxAdministrativeBundleBytes
+        )
+        segments = try container.decode([AdminBlobRef20].self, forKey: .segments)
+        guard !segments.isEmpty, segments.count <= 17 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .segments,
+                in: container,
+                debugDescription: "administrative source requires one through seventeen segments"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        guard !segments.isEmpty, segments.count <= 17 else {
+            throw EncodingError.invalidValue(
+                segments,
+                EncodingError.Context(codingPath: encoder.codingPath, debugDescription: "administrative source requires one through seventeen segments")
+            )
+        }
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(namespace, forKey: .namespace)
+        try container.encode(datasetID, forKey: .datasetID)
+        try container.encode(operationID, forKey: .operationID)
+        try container.encode(fenceID, forKey: .fenceID)
+        try container.encode(targetHostID, forKey: .targetHostID)
+        try container.encode(storeID, forKey: .storeID)
+        try container.encode(packHash, forKey: .packHash)
+        try container.encode(sourceHash, forKey: .sourceHash)
+        try container.encode(manifestFormat, forKey: .manifestFormat)
+        try container.encode(manifestHash, forKey: .manifestHash)
+        try SyncCanonicalUnsigned.encode(
+            manifestByteCount,
+            into: &container,
+            forKey: .manifestByteCount,
+            maximum: SyncContractConstants.maxAdministrativeManifestBytes
+        )
+        try container.encode(bundleHash, forKey: .bundleHash)
+        try SyncCanonicalUnsigned.encode(
+            byteCount,
+            into: &container,
+            forKey: .byteCount,
+            maximum: SyncContractConstants.maxAdministrativeBundleBytes
+        )
+        try container.encode(segments, forKey: .segments)
+    }
 }
 
 public struct AdminBlobPut20: Codable, Equatable, Sendable {
@@ -1171,6 +1375,43 @@ public struct AdminBlobPut20: Codable, Equatable, Sendable {
     public let chunkHash: String
     public let bytesBase64URL: String
     public let isFinal: Bool
+
+    public init(schemaVersion: Int, scope: AdminScope20, blobHash: String, totalBytes: UInt64, offset: UInt64, chunkHash: String, bytesBase64URL: String, isFinal: Bool) {
+        self.schemaVersion = schemaVersion
+        self.scope = scope
+        self.blobHash = blobHash
+        self.totalBytes = totalBytes
+        self.offset = offset
+        self.chunkHash = chunkHash
+        self.bytesBase64URL = bytesBase64URL
+        self.isFinal = isFinal
+    }
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, scope, blobHash, totalBytes, offset, chunkHash, bytesBase64URL, isFinal }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        scope = try container.decode(AdminScope20.self, forKey: .scope)
+        blobHash = try container.decode(String.self, forKey: .blobHash)
+        totalBytes = try SyncCanonicalUnsigned.decode(UInt64.self, from: container, forKey: .totalBytes, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        offset = try SyncCanonicalUnsigned.decode(UInt64.self, from: container, forKey: .offset, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        chunkHash = try container.decode(String.self, forKey: .chunkHash)
+        bytesBase64URL = try container.decode(String.self, forKey: .bytesBase64URL)
+        isFinal = try container.decode(Bool.self, forKey: .isFinal)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(scope, forKey: .scope)
+        try container.encode(blobHash, forKey: .blobHash)
+        try SyncCanonicalUnsigned.encode(totalBytes, into: &container, forKey: .totalBytes, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        try SyncCanonicalUnsigned.encode(offset, into: &container, forKey: .offset, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        try container.encode(chunkHash, forKey: .chunkHash)
+        try container.encode(bytesBase64URL, forKey: .bytesBase64URL)
+        try container.encode(isFinal, forKey: .isFinal)
+    }
 }
 
 public struct AdminBlobPutResult20: Codable, Equatable, Sendable {
@@ -1178,6 +1419,31 @@ public struct AdminBlobPutResult20: Codable, Equatable, Sendable {
     public let blobHash: String
     public let nextOffset: UInt64
     public let complete: Bool
+
+    public init(schemaVersion: Int, blobHash: String, nextOffset: UInt64, complete: Bool) {
+        self.schemaVersion = schemaVersion
+        self.blobHash = blobHash
+        self.nextOffset = nextOffset
+        self.complete = complete
+    }
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, blobHash, nextOffset, complete }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        blobHash = try container.decode(String.self, forKey: .blobHash)
+        nextOffset = try SyncCanonicalUnsigned.decode(UInt64.self, from: container, forKey: .nextOffset, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        complete = try container.decode(Bool.self, forKey: .complete)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(blobHash, forKey: .blobHash)
+        try SyncCanonicalUnsigned.encode(nextOffset, into: &container, forKey: .nextOffset, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        try container.encode(complete, forKey: .complete)
+    }
 }
 
 public struct AdminBlobRead20: Codable, Equatable, Sendable {
@@ -1186,6 +1452,34 @@ public struct AdminBlobRead20: Codable, Equatable, Sendable {
     public let blobHash: String
     public let offset: UInt64
     public let limit: UInt32
+
+    public init(schemaVersion: Int, scope: AdminScope20, blobHash: String, offset: UInt64, limit: UInt32) {
+        self.schemaVersion = schemaVersion
+        self.scope = scope
+        self.blobHash = blobHash
+        self.offset = offset
+        self.limit = limit
+    }
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, scope, blobHash, offset, limit }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        scope = try container.decode(AdminScope20.self, forKey: .scope)
+        blobHash = try container.decode(String.self, forKey: .blobHash)
+        offset = try SyncCanonicalUnsigned.decode(UInt64.self, from: container, forKey: .offset, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        limit = try SyncCanonicalUnsigned.decode(UInt32.self, from: container, forKey: .limit, maximum: UInt64(SyncContractConstants.maxBlobChunkBytes), positive: true)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(scope, forKey: .scope)
+        try container.encode(blobHash, forKey: .blobHash)
+        try SyncCanonicalUnsigned.encode(offset, into: &container, forKey: .offset, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        try SyncCanonicalUnsigned.encode(UInt64(limit), into: &container, forKey: .limit, maximum: UInt64(SyncContractConstants.maxBlobChunkBytes), positive: true)
+    }
 }
 
 public struct AdminBlobReadResult20: Codable, Equatable, Sendable {
@@ -1196,6 +1490,40 @@ public struct AdminBlobReadResult20: Codable, Equatable, Sendable {
     public let bytesBase64URL: String
     public let chunkHash: String
     public let isFinal: Bool
+
+    public init(schemaVersion: Int, blobHash: String, totalBytes: UInt64, offset: UInt64, bytesBase64URL: String, chunkHash: String, isFinal: Bool) {
+        self.schemaVersion = schemaVersion
+        self.blobHash = blobHash
+        self.totalBytes = totalBytes
+        self.offset = offset
+        self.bytesBase64URL = bytesBase64URL
+        self.chunkHash = chunkHash
+        self.isFinal = isFinal
+    }
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, blobHash, totalBytes, offset, bytesBase64URL, chunkHash, isFinal }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        blobHash = try container.decode(String.self, forKey: .blobHash)
+        totalBytes = try SyncCanonicalUnsigned.decode(UInt64.self, from: container, forKey: .totalBytes, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        offset = try SyncCanonicalUnsigned.decode(UInt64.self, from: container, forKey: .offset, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        bytesBase64URL = try container.decode(String.self, forKey: .bytesBase64URL)
+        chunkHash = try container.decode(String.self, forKey: .chunkHash)
+        isFinal = try container.decode(Bool.self, forKey: .isFinal)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(blobHash, forKey: .blobHash)
+        try SyncCanonicalUnsigned.encode(totalBytes, into: &container, forKey: .totalBytes, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        try SyncCanonicalUnsigned.encode(offset, into: &container, forKey: .offset, maximum: SyncContractConstants.maxAdministrativeSegmentBytes)
+        try container.encode(bytesBase64URL, forKey: .bytesBase64URL)
+        try container.encode(chunkHash, forKey: .chunkHash)
+        try container.encode(isFinal, forKey: .isFinal)
+    }
 }
 
 public struct ObservationAccess20: Codable, Equatable, Sendable {
@@ -1207,6 +1535,43 @@ public struct ObservationAccess20: Codable, Equatable, Sendable {
     public let readerKeyIDs: [String]
     public let ownerKeyID: String
     public let signature: String
+
+    public init(schemaVersion: Int, datasetID: String, epoch: UInt64, originID: String, originKeyID: String, readerKeyIDs: [String], ownerKeyID: String, signature: String) {
+        self.schemaVersion = schemaVersion
+        self.datasetID = datasetID
+        self.epoch = epoch
+        self.originID = originID
+        self.originKeyID = originKeyID
+        self.readerKeyIDs = readerKeyIDs
+        self.ownerKeyID = ownerKeyID
+        self.signature = signature
+    }
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, datasetID, epoch, originID, originKeyID, readerKeyIDs, ownerKeyID, signature }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        datasetID = try container.decode(String.self, forKey: .datasetID)
+        epoch = try SyncCanonicalUnsigned.decode(UInt64.self, from: container, forKey: .epoch, maximum: UInt64.max, positive: true)
+        originID = try container.decode(String.self, forKey: .originID)
+        originKeyID = try container.decode(String.self, forKey: .originKeyID)
+        readerKeyIDs = try container.decode([String].self, forKey: .readerKeyIDs)
+        ownerKeyID = try container.decode(String.self, forKey: .ownerKeyID)
+        signature = try container.decode(String.self, forKey: .signature)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(datasetID, forKey: .datasetID)
+        try SyncCanonicalUnsigned.encode(epoch, into: &container, forKey: .epoch, maximum: UInt64.max, positive: true)
+        try container.encode(originID, forKey: .originID)
+        try container.encode(originKeyID, forKey: .originKeyID)
+        try container.encode(readerKeyIDs, forKey: .readerKeyIDs)
+        try container.encode(ownerKeyID, forKey: .ownerKeyID)
+        try container.encode(signature, forKey: .signature)
+    }
 }
 
 public struct SignedHealthObservation: Codable, Equatable, Sendable {

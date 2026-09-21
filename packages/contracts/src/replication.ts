@@ -7,6 +7,9 @@ export const MAX_BODY_BYTES = 1_048_576;
 export const MAX_INLINE_PAYLOAD_BYTES = 65_536;
 export const MAX_BLOB_BYTES = 33_554_432;
 export const MAX_BLOB_CHUNK_BYTES = 262_144;
+export const MAX_ADMINISTRATIVE_SEGMENT_BYTES = 33_554_432;
+export const MAX_ADMINISTRATIVE_BUNDLE_BYTES = 536_870_929;
+export const MAX_ADMINISTRATIVE_MANIFEST_BYTES = 268_435_456;
 
 const canonicalUUID = z.string().regex(
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
@@ -15,6 +18,26 @@ const canonicalUUID = z.string().regex(
 const hash = z.string().regex(/^[0-9a-f]{64}$/, 'lowercase SHA-256 required');
 const unsigned = z.string().regex(/^(0|[1-9][0-9]*)$/, 'canonical unsigned decimal required');
 const positiveUnsigned = unsigned.refine(value => value !== '0', 'positive unsigned decimal required');
+const uint64Unsigned = unsigned.refine(
+  value => BigInt(value) <= 18_446_744_073_709_551_615n,
+  'unsigned decimal exceeds UInt64 range',
+);
+const positiveUInt64 = uint64Unsigned.refine(value => value !== '0', 'positive unsigned decimal required');
+const administrativeSegmentBytes = uint64Unsigned.refine(
+  value => BigInt(value) <= BigInt(MAX_ADMINISTRATIVE_SEGMENT_BYTES),
+  'administrative segment exceeds cap',
+);
+const administrativeBundleBytes = uint64Unsigned.refine(
+  value => BigInt(value) <= BigInt(MAX_ADMINISTRATIVE_BUNDLE_BYTES),
+  'administrative bundle exceeds cap',
+);
+const administrativeManifestBytes = uint64Unsigned.refine(
+  value => BigInt(value) <= BigInt(MAX_ADMINISTRATIVE_MANIFEST_BYTES),
+  'administrative manifest exceeds cap',
+);
+const administrativeChunkLimit = z.string()
+  .regex(/^(?:[1-9][0-9]{0,5})$/, 'positive canonical decimal required')
+  .refine(value => BigInt(value) <= BigInt(MAX_BLOB_CHUNK_BYTES), 'chunk limit exceeds cap');
 const base64URL = z.string().regex(/^(?:[A-Za-z0-9_-]{2,}|)$/, 'unpadded base64url required');
 const publicKey = base64URL.refine(value => {
   try { return decodeBase64URL(value).byteLength === 32; } catch { return false; }
@@ -253,13 +276,16 @@ export const LifeOSDataStoreID = z.enum([
 ]);
 export type LifeOSDataStoreID = z.infer<typeof LifeOSDataStoreID>;
 
+export const AdminDataStoreID20 = z.enum(['usageLocal', 'clipperLocal']);
+export type AdminDataStoreID20 = z.infer<typeof AdminDataStoreID20>;
+
 export const AdminScope20 = z.object({
   namespace: z.literal('data.restore.v20'),
   datasetID: canonicalUUID,
   operationID: canonicalUUID,
   fenceID: canonicalUUID,
   targetHostID: canonicalUUID,
-  storeID: z.enum(['usageLocal', 'clipperLocal']),
+  storeID: AdminDataStoreID20,
 }).strict();
 export type AdminScope20 = z.infer<typeof AdminScope20>;
 
@@ -267,8 +293,8 @@ export const AdminBlobPut20 = z.object({
   schemaVersion: z.literal(20),
   scope: AdminScope20,
   blobHash: hash,
-  totalBytes: unsigned,
-  offset: unsigned,
+  totalBytes: administrativeSegmentBytes,
+  offset: administrativeSegmentBytes,
   chunkHash: hash,
   bytesBase64URL: base64URL,
   isFinal: z.boolean(),
@@ -278,7 +304,7 @@ export type AdminBlobPut20 = z.infer<typeof AdminBlobPut20>;
 export const AdminBlobPutResult20 = z.object({
   schemaVersion: z.literal(20),
   blobHash: hash,
-  nextOffset: unsigned,
+  nextOffset: administrativeSegmentBytes,
   complete: z.boolean(),
 }).strict();
 export type AdminBlobPutResult20 = z.infer<typeof AdminBlobPutResult20>;
@@ -287,20 +313,16 @@ export const AdminBlobRead20 = z.object({
   schemaVersion: z.literal(20),
   scope: AdminScope20,
   blobHash: hash,
-  offset: unsigned,
-  limit: z.string().regex(/^(?:[1-9][0-9]{0,5})$/),
-}).strict().superRefine((value, context) => {
-  if (Number(value.limit) > MAX_BLOB_CHUNK_BYTES) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ['limit'], message: 'chunk limit exceeds cap' });
-  }
-});
+  offset: administrativeSegmentBytes,
+  limit: administrativeChunkLimit,
+}).strict();
 export type AdminBlobRead20 = z.infer<typeof AdminBlobRead20>;
 
 export const AdminBlobReadResult20 = z.object({
   schemaVersion: z.literal(20),
   blobHash: hash,
-  totalBytes: unsigned,
-  offset: unsigned,
+  totalBytes: administrativeSegmentBytes,
+  offset: administrativeSegmentBytes,
   bytesBase64URL: base64URL,
   chunkHash: hash,
   isFinal: z.boolean(),
@@ -314,18 +336,18 @@ export const RemotePackSource20 = z.object({
   operationID: canonicalUUID,
   fenceID: canonicalUUID,
   targetHostID: canonicalUUID,
-  storeID: z.enum(['usageLocal', 'clipperLocal']),
+  storeID: AdminDataStoreID20,
   packHash: hash,
   sourceHash: hash,
   manifestFormat: z.enum(['packObjectV7', 'legacyPackV2']),
   manifestHash: hash,
-  manifestByteCount: unsigned,
+  manifestByteCount: administrativeManifestBytes,
   bundleHash: hash,
-  byteCount: unsigned,
+  byteCount: administrativeBundleBytes,
   segments: z.array(z.object({
     index: z.number().int().min(0).max(65_535),
     blobHash: hash,
-    byteCount: unsigned,
+    byteCount: administrativeSegmentBytes,
   }).strict()).min(1).max(17),
 }).strict();
 export type RemotePackSource20 = z.infer<typeof RemotePackSource20>;
@@ -333,7 +355,7 @@ export type RemotePackSource20 = z.infer<typeof RemotePackSource20>;
 export const ObservationAccess20 = z.object({
   schemaVersion: z.literal(20),
   datasetID: canonicalUUID,
-  epoch: unsigned,
+  epoch: positiveUInt64,
   originID: canonicalUUID,
   originKeyID: hash,
   readerKeyIDs: z.array(hash).max(8),

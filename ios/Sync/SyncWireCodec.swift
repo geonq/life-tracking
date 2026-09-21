@@ -101,10 +101,18 @@ private struct SyncJSONParser {
             index += 1
             if byte == 34 && !escaped {
                 let raw = Data(bytes[start..<index])
-                guard let value = try? JSONSerialization.jsonObject(with: raw) as? String else {
+                let decoded: Any
+                do {
+                    decoded = try JSONSerialization.jsonObject(with: raw, options: [.fragmentsAllowed])
+                } catch {
                     throw SyncFailure.invalidInput
                 }
-                guard value.precomposedStringWithCanonicalMapping == value else {
+                guard let value = decoded as? String else {
+                    throw SyncFailure.invalidInput
+                }
+                let sourceValue = try decodeStringPreservingNormalization(raw)
+                let normalizedSource = sourceValue.precomposedStringWithCanonicalMapping
+                guard Array(normalizedSource.utf8) == Array(sourceValue.utf8) else {
                     throw SyncFailure.invalidInput
                 }
                 return value
@@ -117,6 +125,95 @@ private struct SyncJSONParser {
             }
         }
         throw SyncFailure.invalidInput
+    }
+
+    private func decodeStringPreservingNormalization(_ raw: Data) throws -> String {
+        let bytes = Array(raw)
+        guard bytes.count >= 2, bytes.first == 34, bytes.last == 34 else {
+            throw SyncFailure.invalidInput
+        }
+
+        let end = bytes.count - 1
+        var cursor = 1
+        var output = Data()
+        output.reserveCapacity(raw.count)
+
+        while cursor < end {
+            let byte = bytes[cursor]
+            cursor += 1
+            if byte != 92 {
+                guard byte >= 0x20, byte != 34 else { throw SyncFailure.invalidInput }
+                output.append(byte)
+                continue
+            }
+
+            guard cursor < end else { throw SyncFailure.invalidInput }
+            let escape = bytes[cursor]
+            cursor += 1
+            switch escape {
+            case 34, 47, 92:
+                output.append(escape)
+            case 98:
+                output.append(8)
+            case 102:
+                output.append(12)
+            case 110:
+                output.append(10)
+            case 114:
+                output.append(13)
+            case 116:
+                output.append(9)
+            case 117:
+                let first = try parseHexQuad(bytes, at: cursor, end: end)
+                cursor += 4
+                if (0xD800...0xDBFF).contains(first) {
+                    guard cursor + 1 < end, bytes[cursor] == 92, bytes[cursor + 1] == 117 else {
+                        throw SyncFailure.invalidInput
+                    }
+                    cursor += 2
+                    let second = try parseHexQuad(bytes, at: cursor, end: end)
+                    cursor += 4
+                    guard (0xDC00...0xDFFF).contains(second) else { throw SyncFailure.invalidInput }
+                    let scalar = 0x10000 + ((UInt32(first) - 0xD800) << 10) + (UInt32(second) - 0xDC00)
+                    guard let unicodeScalar = UnicodeScalar(scalar) else { throw SyncFailure.invalidInput }
+                    output.append(contentsOf: String(unicodeScalar).utf8)
+                } else {
+                    guard !(0xDC00...0xDFFF).contains(first),
+                          let unicodeScalar = UnicodeScalar(UInt32(first)) else {
+                        throw SyncFailure.invalidInput
+                    }
+                    output.append(contentsOf: String(unicodeScalar).utf8)
+                }
+            default:
+                throw SyncFailure.invalidInput
+            }
+        }
+
+        guard let value = String(data: output, encoding: .utf8) else {
+            throw SyncFailure.invalidInput
+        }
+        return value
+    }
+
+    private func parseHexQuad(_ bytes: [UInt8], at start: Int, end: Int) throws -> UInt16 {
+        guard start >= 0, start + 4 <= end else { throw SyncFailure.invalidInput }
+        var value: UInt16 = 0
+        for offset in 0..<4 {
+            let byte = bytes[start + offset]
+            let nibble: UInt16
+            switch byte {
+            case 48...57:
+                nibble = UInt16(byte - 48)
+            case 65...70:
+                nibble = UInt16(byte - 55)
+            case 97...102:
+                nibble = UInt16(byte - 87)
+            default:
+                throw SyncFailure.invalidInput
+            }
+            value = (value << 4) | nibble
+        }
+        return value
     }
 
     private mutating func parseUnsignedNumber() throws -> String {

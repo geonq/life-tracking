@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AdminBlobRead20,
   AdminBlobPut20,
+  ObservationAccess20,
+  RemotePackSource20,
   MAX_INLINE_PAYLOAD_BYTES,
   SyncOperation,
   canonicalJSON,
@@ -65,7 +68,7 @@ describe('replication contract', () => {
   });
 
   it('keeps administrative blobs in the closed restore namespace', () => {
-    expect(AdminBlobPut20.parse({
+    const value = {
       schemaVersion: 20,
       scope: {
         namespace: 'data.restore.v20',
@@ -81,7 +84,82 @@ describe('replication contract', () => {
       chunkHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       bytesBase64URL: '',
       isFinal: true,
-    }).scope.storeID).toBe('usageLocal');
+    };
+    expect(AdminBlobPut20.parse(value).scope.storeID).toBe('usageLocal');
+    expect(canonicalJSON(AdminBlobPut20.parse(value))).toContain('"totalBytes":"0"');
+    expect(() => AdminBlobPut20.parse({ ...value, totalBytes: 0 })).toThrow();
+    expect(() => AdminBlobPut20.parse({
+      ...value,
+      scope: { ...value.scope, storeID: 'calendar' },
+    })).toThrow();
+  });
+
+  it('keeps administrative and observation counters as bounded decimal strings', () => {
+    const scope = {
+      namespace: 'data.restore.v20' as const,
+      datasetID: '11111111-1111-4111-8111-111111111111',
+      operationID: '22222222-2222-4222-8222-222222222222',
+      fenceID: '33333333-3333-4333-8333-333333333333',
+      targetHostID: '44444444-4444-4444-8444-444444444444',
+      storeID: 'usageLocal' as const,
+    };
+    const read = {
+      schemaVersion: 20 as const,
+      scope,
+      blobHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      offset: '33554432',
+      limit: '262144',
+    };
+    expect(AdminBlobRead20.parse(read).limit).toBe('262144');
+    expect(canonicalJSON(AdminBlobRead20.parse(read))).toContain('"limit":"262144"');
+    expect(() => AdminBlobRead20.parse({ ...read, limit: 262144 })).toThrow();
+    expect(() => AdminBlobRead20.parse({ ...read, limit: '262145' })).toThrow();
+
+    const observation = {
+      schemaVersion: 20 as const,
+      datasetID: scope.datasetID,
+      epoch: '1',
+      originID: scope.operationID,
+      originKeyID: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      readerKeyIDs: [],
+      ownerKeyID: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      signature: 'A'.repeat(86),
+    };
+    expect(ObservationAccess20.parse(observation).epoch).toBe('1');
+    expect(() => ObservationAccess20.parse({ ...observation, epoch: 1 })).toThrow();
+    expect(() => ObservationAccess20.parse({ ...observation, epoch: '0' })).toThrow();
+    expect(() => ObservationAccess20.parse({ ...observation, epoch: '01' })).toThrow();
+  });
+
+  it('enforces administrative bundle and segment ceilings', () => {
+    const source = {
+      schemaVersion: 20 as const,
+      namespace: 'data.restore.v20' as const,
+      datasetID: '11111111-1111-4111-8111-111111111111',
+      operationID: '22222222-2222-4222-8222-222222222222',
+      fenceID: '33333333-3333-4333-8333-333333333333',
+      targetHostID: '44444444-4444-4444-8444-444444444444',
+      storeID: 'clipperLocal' as const,
+      packHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      sourceHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      manifestFormat: 'packObjectV7' as const,
+      manifestHash: 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+      manifestByteCount: '268435456',
+      bundleHash: 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+      byteCount: '536870929',
+      segments: [{
+        index: 0,
+        blobHash: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+        byteCount: '33554432',
+      }],
+    };
+    expect(RemotePackSource20.parse(source).byteCount).toBe('536870929');
+    expect(() => RemotePackSource20.parse({ ...source, byteCount: '536870930' })).toThrow();
+    expect(() => RemotePackSource20.parse({ ...source, manifestByteCount: '268435457' })).toThrow();
+    expect(() => RemotePackSource20.parse({
+      ...source,
+      segments: [{ ...source.segments[0], byteCount: '33554433' }],
+    })).toThrow();
   });
 
   it('rejects payloads above the inline cap before accepting them', () => {
