@@ -1,198 +1,81 @@
 # LifeOS final execution plan
-Prepared by Astra Medium from the Luna Max audit on 2026-09-18. Baseline:
-`5dae724`, clean `main` and `origin/main` after the accepted Packet A, Packet B,
-and Packet C checkpoints. Release is **NO-GO**. The 258-leaf registry has 0 accepted
-leaves; it is an acceptance ledger, not a completion percentage.
-## Rules for every tranche
-1. One Luna Max implementation worker at a time. Astra Medium reviews the
-   actual diff and evidence in batches. Close each worker after its report.
-2. Dispatch from the current SHA with exact file paths, symbols, invariants,
-   prohibited changes, focused tests, evidence path, and stop conditions.
-3. Shared integration owners are exclusive for `ios/project.yml`, generated
-   Xcode changes, app entry points, `ModuleNavigation.swift`, `Settings.swift`,
-   `TailscaleSyncClient.swift`, gateway `main.py`, and contract exports.
-4. Each tranche ends with focused verification, Astra review, a commit, push,
-   and local/remote SHA parity. Unexpected scope, destructive migration,
-   security-boundary change, or reproducible crash stops that tranche.
-5. Real data is authoritative. Fixtures are explicit and labelled. Missing
-   data stays unavailable. No generic advisor or conversational AI; calorie
-   photo tracking is the only in-app AI.
-6. Apple lanes use `-jobs 1 -parallel-testing-enabled NO`, a fresh owned
-   result/DerivedData path, the storage guard, and independent xcresult
-   validation. A quiet compile is not a hang; an interruption is unverified.
 
-## 1. Stability and truth ledger — L/S (Mac Home, tax parser, usage lock accepted)
-The three historical `EXC_BAD_ACCESS` reports are real crashes in temporary
-XCTest hosts. The stability receipt shows a separate manual LifeOSMac build
-survived a focused serial 1/1 test and no new crash report appeared. Do not
-change lifecycle code, suppress reporting, or disable tests without a new
-symbolicated reproduction.
+Updated 2026-09-21 Europe/Berlin. Authoritative design remains in
+artifacts/blueprint/20260921, with R20-06-DISPATCH as the latest contract
+precedence. Current base is 328b18e16bcbb5856db40b0ffd3f90101a051096.
+Release is NO-GO.
 
-Diagnostic scope: `ios/LifeOSMac/LifeOSMacApp.swift`,
-`ios/LifeOSMacSnapshotTests/LifeOSMacSnapshotTests.swift`,
-`ios/LifeOSMacUITests/LifeOSMacUITests.swift`,
-`ios/TestPlans/LifeOSMacLogic.xctestplan`, `ios/project.yml`, and
-`scripts/run_prerelease_lanes.sh`. Record PID/parent/path/arguments, crash
-UUID/exception/stack, explicit UI-test termination, and manual-app behavior.
-Keep manual and temporary builds separate; never use broad `killall`.
+## Rules
 
-Reconcile `Coordination/{HANDOFF,PHASE_STATUS,DECISIONS}.md`,
-`tasks/{ACTIVE,todo,final-execution-plan}.md`, and `README.md`. Every
-requirement row is `requirement → owner → source status → verification →
-SHA/evidence → next action`, classified S (source), L (local), W (Windows), P
-(physical/provider), or U (unsupported).
+- One Luna worker at a time, one exact disjoint ownership set.
+- Astra reviews the actual diff and focused evidence after each cohesive batch.
+- No worker invents shared DTOs, signatures, migrations, route payloads or
+  persistence boundaries. Escalate exact conflicts.
+- Real data is authoritative; fixtures are explicit and never product data.
+- Keep local durability before showing Saved. Preserve pending operations until
+  acknowledged. Never silently merge by wall-clock time.
+- Commit and push each accepted tranche from its observed base; update
+  HANDOFF, PHASE_STATUS and ACTIVE with the resulting SHA.
+- Apple lanes use the storage guard, serial xcodebuild, owned result paths and
+  explicit result validation. Stop targeted disposable processes only.
 
-## 2. Canonical Windows backend — W/S
+## Packet sequence
 
-Owner: `services/windows-service-host/deploy/`, `services/windows-service-host/src/`,
-`services/windows-service-host/tests/`, `scripts/build_windows_release.sh`,
-`scripts/tests/test_windows_release_builder.py`, and
-`scripts/tests/test_windows_deployment_source.py`.
+P00 is complete and documentation-only. Its ledger is the sole current
+requirement/evidence inventory.
 
-Read actual roots, service state, marker, transaction, manifest, journal,
-progress identity, protected configuration, and staging candidate. Resolve
-the 31,401-unit history into one current receipt. Run candidate verification
-and read-only preflight; Astra reviews the exact cutover packet; then perform
-the already-authorized transaction-bound recovery/install. Never clear a
-marker to bypass recovery.
+P01 -> P02 -> P03/P04. P01 owns shared replication declarations, canonical
+encoding, identity/key custody, transport and R20 validators. P02 owns the
+signed local relay/gateway and does not deploy while Windows is unavailable.
+P03 owns calendar and finance durable adapters. P04 owns fitness, nutrition,
+supplements and lifestyle durable adapters.
 
-Verify `LifeOSAPI`/`LifeOSGateway` service accounts, dependencies, ACL/SID and
-reparse protections, loopback-only children, Tailscale Serve identity and
-capability policy, direct-listener rejection, `/health`, `/ready`, restart,
-reboot, and rollback. Preserve secrets out of command lines and receipts.
-Use disposable failure injection before canonical mutation. Stop on identity
-mismatch, unexplained journal state, missing rollback material, or preflight
-failure. Evidence goes under `artifacts/final/windows/`.
+P05 depends on P00/P01 and reviews the eight untracked D1 files. P06 depends on
+P01/P05 and owns native planning Canvas, inspector, viewport, gesture bridge,
+vault observer/project coordinator and planning transport seam.
 
-## 3. Live finance and wealth — S/L/W/P
+P07 establishes the shared visual/motion/orb primitives. P08 repairs calendar
+interaction. P09 integrates finance and live-readback boundaries. P10 owns
+fitness/training/nutrition product behavior. P11 owns HealthKit export,
+reconciliation and source-qualified Zepp handling. P12 owns provider-neutral
+usage and manual Gemini boundaries. P13 owns tax retention and sanitized sync.
+P14 owns widgets, lock-screen catalog, App Intents and personal install flow.
 
-Connector owner: `services/gateway/{enablebanking,test_enablebanking,test_gateway}.py`,
-`ios/Shared/{FinanceDomain,FinanceCoordinator,FinanceReadback}.swift`, and
-the existing consent/settings tests. Recover the existing Enable Banking
-configuration first. Compare provider → gateway → Mac/iPhone account identity,
-exact amount/currency, transaction identity, timestamps, freshness, consent,
-revoke, expiry, pagination, partial failure, retry and offline cache behavior.
+P15 performs independent security/dead-path hardening. P16 composes app targets,
+stores, navigation and startup fences. P18-I owns receipt/archive/data
+authority. P17 verifies Windows deployment only when the host is available.
+P18-E performs final evidence, visual, device, provider and adversarial gates.
 
-Import/wealth owner: `FinanceStatementImporter.swift`,
-`FinanceInstitutionDetector.swift`, `FinanceImportMapping.swift`,
-`FinanceImportedTransaction*.swift`, `FinanceRecurringPayment*.swift`,
-`FinanceRobinhoodImporter.swift`, `FinanceInvestment*.swift`,
-`FinanceWealthProjection.swift`, `FinanceBankCashProjection.swift`, Finance
-views, and matching tests. Run real Trade Republic/Robinhood preview → confirm
-→ relaunch → reimport/correction → net-worth reconciliation. Preserve exact
-money, source/account/period/provenance, stable IDs, and correction lineage;
-keep investments separate from spending and reject incomplete valuations.
-Recurring candidates must remain suggestions until explicit weekly/monthly/
-yearly management. NextSemis is the last optional gate.
+## Worker handoff contract
 
-## 4. Offline durability — S/L/W/P
+Each dispatch includes base SHA, exact allowlist, contract file order, symbols,
+invariants, migration rules, focused tests, evidence path, complexity and
+stop conditions. The worker reports changed paths, source hashes, command exits,
+result paths, skipped/unknown gates, cleanup and unresolved conflicts.
 
-Each owner proves local-first persistence before acknowledgement, mutation IDs,
-bounded replay, conflict/deletion semantics, stale-versus-failed state,
-restart during writes, disk-full recovery, expired authorization, and a
-clock-controlled eight-day Windows outage. Preserve pending mutations until
-acknowledged and never let a stale server snapshot overwrite a newer local
-edit. Use existing domain authorities; do not add a universal competing store.
+## Completion evidence
 
-## 5. Fitness, Zepp, and nutrition — S/L/P/U
+Use classes S source, L local, M Mac runtime, I simulator, W Windows,
+P physical/provider, and U unsupported. A requirement is not accepted because
+its source exists or a test fixture renders. Windows and physical-device gates
+remain separate from Mac/simulator evidence. Unknown is not denied; unsupported
+is not a hidden failure.
 
-Workout owner: `ios/Shared/FitnessTraining{Domain,Store,Projection}.swift`,
-`FitnessStrengthDomain.swift`, `ios/LifeOS/FitnessTrainingCoordinator.swift`,
-`ios/LifeOS/Modules/Fitness/FitnessTraining{View,SessionView}.swift`, and
-existing training tests. LifeOS owns exercises, templates, sets, reps, load,
-rest, completion, history and reports. HealthKit/Zepp observations are
-read-only, source-qualified, timestamped, unit-safe and deletion-aware.
+Required final journeys include local/offline sync and replay, calendar gestures,
+finance live readback/import/reconciliation, workouts/HealthKit/Zepp provenance,
+nutrition confirmation, tax privacy, usage/Codex/Claude/manual Gemini,
+Obsidian Mac-to-vault-to-iPhone round trip, widgets/lock screen/Shortcuts,
+Windows outage/rejoin, storage bounds, visual/motion review and adversarial
+security.
 
-Health owner: `HealthKit{Adapter,Domain,Reconciliation,AnchorStore}.swift`,
-`ios/LifeOS/HealthKit{FitnessComposition,FitnessProjection,FitnessRepository,
-Integration,ProductionBridge}.swift`. Match records only with explicit
-confidence and ambiguity handling. Physical proof compares Zepp, Apple Health,
-and LifeOS fields; never claim proprietary Zepp readiness/load/PAI/Training
-Effect or exact strength parity without a legitimate source. Calorie-photo
-AI remains an editable proposal and confirmed values only enter totals.
+## Current external blockers
 
-## 6. Obsidian Canvas — S/L/W/P
+The Windows host was not contacted by P00 and remains unavailable by task
+constraint. Xcode 27 and SDK settings are installed, but the Xcode license is
+not accepted; no valid signing identity or provisioning profile is present.
+Simulator and physical runtime evidence is therefore unknown. Banking consent,
+provider quotas, iCloud vault choice, HealthKit/Zepp permissions, App Group
+registration and personal-device signing are also unknown.
 
-Build four disjoint packets. **Codec/binding:** committed and reviewed at
-`f53c77c`; focused tests are 31/31, an independent smoke harness passed, and
-the post-commit Mac logic lane is 193/193. It adds
-`ios/Planning/{PlanningDomain,PlanningVaultBinding,PlanningCanvasCodec,
-PlanningMarkdownCodec}.swift` and codec tests. Read/write standard `.canvas`
-and Markdown while preserving node IDs, edges, coordinates, groups, colors,
-supported node types, unknown JSON fields and untouched Markdown/frontmatter.
-Reject traversal, escaping symlinks, case collisions, duplicate IDs, oversized
-inputs and invalid coordinates. Do not promise arbitrary shape parity beyond
-the standard format.
-
-**Durability:** new `PlanningVaultStore.swift`,
-`PlanningMutationJournal.swift`, `PlanningConflictResolver.swift` and tests.
-Use expected content versions, same-directory atomic replacement, recoverable
-journal entries and conflict copies. Preferred topology is a selected
-non-Uni iCloud vault under `LifeOS/`; do not select a vault by guessing and do
-not silently overwrite Obsidian edits. Packet A’s mutation journal/domain
-   core is implemented and Astra-accepted; Packet C adds the bounded
-   filesystem publication/bookmark/cancellation/recovery adapter and is pushed
-   at `5dae724` with receipt
-   `artifacts/final/planning-core/packet-c-publication-20260919.md`. Provider
-   behavior, real-vault round trip, graph/UI and gateway remain separate gates.
-
-**Interaction:** new `PlanningGraphProjection.swift`, `PlanningSpatialIndex.swift`,
-`ios/LifeOS/Modules/Planning/{PlanningCanvasView,PlanningNodeInspector}.swift`
-and tests. Implement pan, focal zoom, selection, node drag, edge editing,
-color/type controls, Markdown detail, undo/redo and keyboard actions with
-unambiguous Mac/iPhone gesture ownership. Rebuild O(V+E); target spatial
-queries O(log V+k); persist committed edits, not every drag frame.
-
-**Transport/wiring:** new `services/gateway/{planning,test_planning}.py` and
-`packages/contracts/src/{planning.ts,planning.test.ts}`. Accept only bounded
-project-relative operations with identity, expected revision, mutation ID and
-explicit conflicts. Add Calendar/project registration only after isolated
-codec/store/view tests pass. Prove Mac → Obsidian → iPhone → Mac round trip
-before live vault writes.
-
-## 7. Widgets, signing and Shortcuts — S/L/P
-
-Owners: `scripts/install_personal_device{,_checks.py}.sh` (resolve exact
-current name), installer tests, `ios/Shared/SigningStatus.swift`,
-`ios/LifeOS/Modules/Automation/LifeOSAppIntents.swift`, widget publisher/
-snapshot files, `ios/LifeOSWidget/`, `ios/LifeOSMacWidget/`, and the project/
-entitlement integration owner. Run capability preflight early.
-
-Provide an honest Morning Sync Shortcut: open Zepp, use an officially exposed
-sync action if one exists or show the manual step, then refresh LifeOS and show
-observed freshness. Provide USB Refresh: call the reviewed Mac installer,
-verify the connected device/profile/App Group, and report expiry/failure.
-Opening Zepp is not proof of synchronization; AppIntents cannot renew an
-Apple signature. Verify existing widgets plus the lock-screen calendar widget
-in dark/tinted/transparent modes on the grey wallpaper, with stale/locked/
-deep-link states. Physical signing, App Group, HealthKit, widget, background
-refresh and seven-day renewal remain P gates.
-
-## 8. Visual/motion acceptance — S/L/P
-
-Apply the current design coordination docs route by route. Use SF Pro/system
-typography, one consistent icon abstraction, compact Mac hierarchy, readable
-phone sizing, distinct brand palette, green estimates, truthful unavailable
-states, and no generic AI. Calendar must own vertical scrolling and focal
-trackpad pinch; navigation/chart motion must be interruptible, avoid jumps and
-retired callbacks, and settle correctly under Reduce Motion. Use actual
-captures/interaction recordings at Mac widths, light/dark, loading/stale/live,
-rapid reversals, and reduced motion. Static snapshots alone cannot certify
-motion or whole-app quality.
-
-## 9. Final security/release gate — L/W/P
-
-Astra reviews the final actual diff and deployed evidence for peer admission,
-pairing/replay/timestamps/duplicate IDs/deletions, Tailscale identity/header/
-Host/redirect/body bounds, secret handling, tax protection/migration/regex/CSV,
-atomic writes/symlinks/path traversal, usage cross-process races, offline
-restore/retention, executable resolution, dependencies/CI and canonical
-deployment. Use disposable data and owned endpoints only; do not attack bank,
-Apple, Google or Zepp infrastructure. Every finding names SHA, payload,
-expected/observed result, remediation and retest.
-
-## Immediate next dispatch
-
-Dispatch the graph/spatial-index packet from `5dae724`. Keep
-Windows/workouts/live finance disjoint; every packet ends with review, commit,
-push and handoff update.
+Never label the application complete, secure, flawless, or runtime-accepted
+until the ledger rows and required S/L/M/I/W/P gates are actually closed.
