@@ -208,6 +208,8 @@ public struct PlanningFilesystemCapabilities: Codable, Equatable, Sendable {
 public struct PlanningVaultReadResult: Sendable, Equatable {
     public let snapshot: PlanningDocumentSnapshot?
     public let version: PlanningContentVersion
+    public let vaultID: UUID?
+    public let selectionGeneration: UUID?
     public let stale: Bool
     public let accessState: PlanningVaultAccessState
     public let fromCache: Bool
@@ -215,12 +217,16 @@ public struct PlanningVaultReadResult: Sendable, Equatable {
     public init(
         snapshot: PlanningDocumentSnapshot?,
         version: PlanningContentVersion,
+        vaultID: UUID? = nil,
+        selectionGeneration: UUID? = nil,
         stale: Bool,
         accessState: PlanningVaultAccessState,
         fromCache: Bool
     ) {
         self.snapshot = snapshot
         self.version = version
+        self.vaultID = vaultID
+        self.selectionGeneration = selectionGeneration
         self.stale = stale
         self.accessState = accessState
         self.fromCache = fromCache

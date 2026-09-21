@@ -115,6 +115,8 @@ public actor PlanningVaultStore {
                 return PlanningVaultReadResult(
                     snapshot: absent,
                     version: .absent,
+                    vaultID: vaultID,
+                    selectionGeneration: generation,
                     stale: false,
                     accessState: .ready,
                     fromCache: false
@@ -138,6 +140,8 @@ public actor PlanningVaultStore {
                 return PlanningVaultReadResult(
                     snapshot: snapshot,
                     version: version,
+                    vaultID: vaultID,
+                    selectionGeneration: generation,
                     stale: false,
                     accessState: .ready,
                     fromCache: false
@@ -151,6 +155,8 @@ public actor PlanningVaultStore {
                     return PlanningVaultReadResult(
                         snapshot: cached,
                         version: cached.version,
+                        vaultID: vaultID,
+                        selectionGeneration: generation,
                         stale: true,
                         accessState: .temporarilyUnavailable,
                         fromCache: true
@@ -169,6 +175,8 @@ public actor PlanningVaultStore {
                     return PlanningVaultReadResult(
                         snapshot: cached,
                         version: cached.version,
+                        vaultID: vaultID,
+                        selectionGeneration: generation,
                         stale: true,
                         accessState: .temporarilyUnavailable,
                         fromCache: true
@@ -184,18 +192,40 @@ public actor PlanningVaultStore {
     }
 
     @discardableResult
-    public func stage(_ request: PlanningMutationRequest) throws -> PlanningMutationReceipt {
-        guard access.snapshot.state == .ready else { throw PlanningFilesystemError.unselected }
+    public func stage(
+        _ request: PlanningMutationRequest,
+        expectedContext: PlanningCanvasAccessContext? = nil
+    ) throws -> PlanningMutationReceipt {
+        let snapshot = access.snapshot
+        guard snapshot.state == .ready else { throw PlanningFilesystemError.unselected }
+        try validate(expectedContext: expectedContext, against: snapshot)
         guard let journal else { throw PlanningFilesystemError.unselected }
         return try journal.stageMutation(request)
     }
 
-    public func publish(_ request: PlanningMutationRequest) throws -> PlanningFilesystemPublishResult {
+    public func publish(
+        _ request: PlanningMutationRequest,
+        expectedContext: PlanningCanvasAccessContext? = nil
+    ) throws -> PlanningFilesystemPublishResult {
+        let snapshot = access.snapshot
+        try validate(expectedContext: expectedContext, against: snapshot)
         guard let publication else { throw PlanningFilesystemError.unselected }
-        guard access.snapshot.capabilities.canPublish else {
+        guard snapshot.capabilities.canPublish else {
             throw PlanningFilesystemError.unsupportedFilesystem
         }
         return try publication.publish(request)
+    }
+
+    private func validate(
+        expectedContext: PlanningCanvasAccessContext?,
+        against snapshot: PlanningVaultAccessSnapshot
+    ) throws {
+        guard let expectedContext else { return }
+        guard snapshot.vaultID == expectedContext.vaultID,
+              snapshot.selectionGeneration == expectedContext.selectionGeneration,
+              snapshot.state == .ready else {
+            throw PlanningFilesystemError.needsReselection
+        }
     }
 
     public func publishPendingPage(
@@ -317,6 +347,18 @@ public actor PlanningVaultStore {
             retainedPayloadBytes: stored.retainedPayloadBytes,
             databaseBytes: stored.databaseBytes,
             lastErrorCode: stored.lastErrorCode
+        )
+    }
+
+    public func currentCanvasAccessContext() throws -> PlanningCanvasAccessContext {
+        let snapshot = access.snapshot
+        guard let vaultID = snapshot.vaultID,
+              let selectionGeneration = snapshot.selectionGeneration else {
+            throw PlanningFilesystemError.unselected
+        }
+        return PlanningCanvasAccessContext(
+            vaultID: vaultID,
+            selectionGeneration: selectionGeneration
         )
     }
 
