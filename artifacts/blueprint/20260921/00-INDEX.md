@@ -1,50 +1,26 @@
-# LifeOS completion blueprint — 2026-09-21
-Status: PLANNING DELIVERABLE; implementation requires geonq's final go.
-Repository: /Users/georgdomke/Developer/life-tracking
-Baseline: d3e62b7d265259dd3954c719365d161328aa32dd plus eight untracked D1 candidates.
-Author: sole architecture planner, synthesizing three supplied read-only research reports and source inspection.
-No completion percentage, new runtime evidence, or error-free implementation guarantee is implied.
+# LifeOS completion blueprint — revision20
 
-## Read order
-1. [Baseline and decisions](01-BASELINE.md)
-2. [Architecture and outage protocol](02-SYNC-ARCHITECTURE.md)
-3. [Design and motion contract](03-DESIGN.md)
-4. [Screen compositions](04-SCREENS.md)
-5. [Apple API matrix](05-APPLE-APIS.md)
-6. [Domain contracts](06-DOMAINS.md)
-7. [Core implementation packets](07-CORE-PACKETS.md)
-8. [Product implementation packets](08-PRODUCT-PACKETS.md)
-9. [Integration, security and operations packets](09-INTEGRATION-PACKETS.md)
-10. [Verification and release gates](10-RELEASE.md)
-11. [Worker dispatch instructions](11-WORKER-PROMPTS.md)
-12. [Sources and reference policy](12-REFERENCES.md)
-13. [Source anchors](13-SOURCE-ANCHORS.md)
-14. [Ownership manifest](14-OWNERSHIP.json)
-15. [Protocol algorithms](15-PROTOCOL-ALGORITHMS.md)
+Planning-only response to five independent-review blockers. Start with [editor readiness](R20-READINESS.md),
+[manifest](R20-MANIFEST.md), [changelog](R20-CHANGELOG.md) and [dispatch/precedence](R20-06-DISPATCH.md).
+Every packet follows its ordered contractFiles in [14-OWNERSHIP.json](14-OWNERSHIP.json).
+Editor readiness is not independent acceptance, application completion or a guarantee of error-free execution.
 
-## How to execute after approval
-Use P00 first. Read the packet plus its referenced contracts, then send its generated prompt.
-14-OWNERSHIP.json is the exact file allowlist; N denotes new files, E existing.
-Workers receive current SHA and fingerprints, not stale line numbers as edit instructions.
-13-SOURCE-ANCHORS.md records present line anchors; search the named symbol before editing.
-New names in packets are proposed APIs, not claims that they already exist.
-Each file has one owner. Integration requests are returned to that owner rather than edited by another worker.
-One Luna implementation worker at a time; one Apple build lane; no idle workers or polling services.
-Astra reviews at cohesive wave boundaries defined in 10-RELEASE.md.
-Plan before implementation does not eliminate the need to verify concurrency, security or visual behavior.
-Run no builds, source edits, deployment, commits or pushes as part of this planning delivery.
+1. [Restore fences](R20-01-RESTORE-FENCES.md): admission, durable journals, settlement/release and restart rules.
+2. [Administrative blobs](R20-02-ADMIN-BLOBS.md): scoped authorization, canonical encoding, matching export/restore bounds.
+3. [Deletion closure](R20-03-DELETION-CLOSURE.md): complete authenticated remote records before credential retirement.
+4. [Bootstrap signing](R20-04-BOOTSTRAP-SIGNING.md): typed sequence-zero capability, durable reservation and activation.
+5. [Observation transport](R20-05-OBSERVATION-HTTP.md): authoritative route union, payloads, signatures and nonces.
+6. [Dispatch](R20-06-DISPATCH.md): exact supersession, allowed symbol locations and producer/consumer read maps.
 
-## Scope preserved
-Home, calendar/planning, finance/imports/wealth, fitness/training/nutrition/supplements/lifestyle,
-tax/documents, usage providers, Clipper observations, settings, widgets, automation and offline recovery.
-Retain existing feature/reference requirements; do not close an unavailable feature by hiding it.
-No generic AI or advisor. Calorie-photo proposal generation is the sole in-app AI operation.
-NextSemis, EventKit mirroring, ActivityKit and Spotlight are explicitly optional, outside required completion.
-Unavailable proprietary Zepp values and unsupported provider quotas are capability limits, not invented data.
-These limits require visible honest states and must not masquerade as implemented automatic integrations.
+[Worker prompts](11-WORKER-PROMPTS.md) retain P18 implementation separately from later release evidence.
+203 unique allowed paths and19 packet dependency arrays remain unchanged; source dependency graph remains acyclic.
+R19 and historical sheets retain authority only where not explicitly superseded. Original signed bytes keep their codecs.
 
-## Planning limits
-Source and existing receipts were inspected; no tests/builds ran in this phase.
-Historical Windows state is not current proof: Windows is unavailable for at least a week.
-Git origin/main here is the locally stored remote-tracking ref; no fresh remote fetch was performed.
-The requested result is detailed instructions for completion; release remains gated on execution evidence.
+## Product requirements remain in force
+
+[Design](03-DESIGN.md), [OS27 matrix](17-OS27-MATRIX.md), [interactions](20-DESIGN-INTERACTIONS.md),
+[screen composition](27-SCREEN-COMPOSITION.md) and existing feature packets remain mandatory.
+Native SwiftUI/WidgetKit, SF Pro/SF Symbols, compact hierarchy, interruptible motion, graph/workouts/banking/widgets/outage flows.
+No advisor, fabricated provider data, JS animation runtime, unsupported Zepp metrics or automatic Gemini quota claims.
+[Release evidence](10-RELEASE.md) remains distinct from planning readiness, including real host/device/provider/security/visual checks.
+This revision performs no source/test/project/dependency edits, builds, xcodegen, commits or pushes.
