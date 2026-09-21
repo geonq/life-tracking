@@ -58,3 +58,7 @@ Updated 2026-09-21 Europe/Berlin.
 - Astra review found and the controller fixed chunk retry/progress,
   transaction rollback, SQLite integer, HTTP framing, response media-type,
   IPv6 binding, and Python-runtime issues before the 1f65326 push.
+- The 83365b1 verifier rejects malformed/unknown fields, non-canonical integer
+  tokens, invalid routes, body-hash mismatches, and unauthenticated frames
+  before route composition; durable sender authorization remains a gateway
+  integration obligation.

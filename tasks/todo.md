@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-21 Europe/Berlin. Release: NO-GO.
-Current checkpoint: 1f65326.
+Current checkpoint: 83365b1.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -24,6 +24,8 @@ Use artifacts/final/completion/requirements.json instead of percentages.
 - P02 durable replication core: a629ad3. Focused Python tests: 5 passed.
 - P02 loopback relay and Astra-reviewed bounds/security corrections: 1f65326.
   Focused relay tests: 5 passed.
+- P02 strict Swift-compatible signed-frame verification: 83365b1. Focused
+  replication tests: 8 passed, one crypto-dependent skip on this Mac.
 
 ## Ordered implementation
 

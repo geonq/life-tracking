@@ -5,7 +5,7 @@ release NO-GO, updated 2026-09-21.
 
 ## Current checkpoint
 
-main and local origin/main match at 1f65326.
+main and local origin/main match at 83365b1.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
 The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
 75 missing states. It is evidence-led, not a completion percentage.
@@ -17,8 +17,9 @@ ownership manifest. They have no execution acceptance receipt. Do not stage,
 edit, delete, or treat them as production until P05 reviews them.
 
 P01 is pushed at a21ccf3 with the shared contract correction at 673dc0a. P02
-foundations are pushed at a629ad3 and 1f65326; the gateway authenticated route
-layer is not accepted yet. Focused Python evidence is green.
+foundations are pushed at a629ad3, 1f65326, and 83365b1; the gateway
+authenticated route layer is not accepted yet. Focused Python evidence is
+green, with one crypto-dependent verifier skip on this Mac.
 
 ## Next execution
 
