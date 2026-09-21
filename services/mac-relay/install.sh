@@ -8,14 +8,28 @@ if [ "${1:-}" != "--print-template" ]; then
   exit 2
 fi
 
-cat <<'PLIST'
+PYTHON_BIN=${LIFEOS_RELAY_PYTHON:-}
+if [ -z "$PYTHON_BIN" ]; then
+  echo "set LIFEOS_RELAY_PYTHON to a verified Python 3.10+ interpreter" >&2
+  exit 2
+fi
+PYTHON_PATH=$(command -v "$PYTHON_BIN" 2>/dev/null || true)
+if [ -z "$PYTHON_PATH" ] || ! "$PYTHON_PATH" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+  echo "LIFEOS_RELAY_PYTHON must resolve to Python 3.10+" >&2
+  exit 2
+fi
+case "$PYTHON_PATH" in
+  *[!A-Za-z0-9_./-]*) echo "interpreter path contains unsupported plist characters" >&2; exit 2 ;;
+esac
+
+cat <<PLIST
 <!-- Review and customize paths before installing this per-user LaunchAgent. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.geonq.lifeos.relay</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
+    <string>$PYTHON_PATH</string>
     <string>/ABSOLUTE/PATH/TO/LifeOS/services/mac-relay/main.py</string>
     <string>--host</string><string>127.0.0.1</string>
     <string>--port</string><string>8788</string>

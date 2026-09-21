@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import unittest
@@ -64,8 +65,17 @@ class RelayTests(unittest.TestCase):
 
     def test_install_script_only_renders_template(self) -> None:
         script = Path(__file__).with_name("install.sh")
-        result = subprocess.run([str(script), "--print-template"], check=True, capture_output=True, text=True)
+        environment = os.environ.copy()
+        environment["LIFEOS_RELAY_PYTHON"] = "python3"
+        result = subprocess.run(
+            [str(script), "--print-template"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
         self.assertIn("com.geonq.lifeos.relay", result.stdout)
+        self.assertIn("python", result.stdout.casefold())
         self.assertNotIn("launchctl", result.stdout)
         self.assertNotIn("launchctl", script.read_text())
 

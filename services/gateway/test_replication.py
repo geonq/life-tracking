@@ -97,6 +97,17 @@ class ReplicationStoreTests(unittest.TestCase):
             self.store.read_page("dataset", "stream", limit=257)
         with self.assertRaisesRegex(ReplicationError, "capacity"):
             self.store.stage_blob("b" * 64, 33_554_433, 0, "c" * 64)
+        blob_hash = "e" * 64
+        chunk_hash = "f" * 64
+        self.assertEqual(self.store.stage_blob(blob_hash, 4, 0, chunk_hash, 2), 2)
+        self.assertEqual(self.store.stage_blob(blob_hash, 4, 0, chunk_hash, 2), 2)
+        self.assertEqual(self.store.stage_blob(blob_hash, 4, 2, chunk_hash, 2), 4)
+        with self.assertRaisesRegex(ReplicationError, "invalidOffset"):
+            self.store.stage_blob(blob_hash, 4, 1, chunk_hash, 1)
+        with self.assertRaisesRegex(ReplicationError, "invalidOffset"):
+            self.store.stage_blob("1" * 64, 4, 1, chunk_hash, 1)
+        with self.assertRaisesRegex(ReplicationError, "invalidAfter"):
+            self.store.read_page("dataset", "stream", after=2**63)
         body = b"observation"
         body_hash = hashlib.sha256(body).hexdigest()
         self.assertTrue(self.store.put_observation("dataset", "origin", 1, body_hash, body))

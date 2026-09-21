@@ -11,8 +11,10 @@ return a content-free `503 handlerUnavailable`. Health is the only unsigned
 route. Windows administration and administrative blob operations are always
 denied by this relay.
 
-`install.sh --print-template` prints a LaunchAgent template for review. It does
-not write files, call `launchctl`, start the relay, or modify Tailscale Serve.
+`install.sh --print-template` prints a LaunchAgent template for review. Set
+`LIFEOS_RELAY_PYTHON` to a verified Python 3.10+ interpreter before running
+the renderer. It does not write files, call `launchctl`, start the relay, or
+modify Tailscale Serve.
 Before any installation, snapshot the current Serve configuration and merge
 only the owned route; Windows deployment remains a separate reviewed step.
 

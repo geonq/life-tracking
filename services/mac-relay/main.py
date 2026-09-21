@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
+import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Mapping, Sequence
@@ -18,6 +20,9 @@ from urllib.parse import urlsplit
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_CONCURRENT_REQUESTS = 4
+READ_TIMEOUT_SECONDS = 5.0
+SAFE_RESPONSE_CONTENT_TYPES = frozenset({"application/json", "application/json; charset=utf-8"})
 ALLOWED_PATHS = frozenset(
     {
         "/replication/v1/challenge",
@@ -53,6 +58,8 @@ class RelayConfig:
     port: int = 0
     max_request_bytes: int = MAX_REQUEST_BYTES
     max_response_bytes: int = MAX_RESPONSE_BYTES
+    max_concurrent_requests: int = MAX_CONCURRENT_REQUESTS
+    read_timeout_seconds: float = READ_TIMEOUT_SECONDS
     allow_non_loopback: bool = False
 
 
@@ -87,6 +94,10 @@ def _valid_content_type(value: str | None) -> bool:
     return value.casefold() in {"application/json", "application/json; charset=utf-8"}
 
 
+def _valid_response_content_type(value: object) -> bool:
+    return isinstance(value, str) and value.casefold() in SAFE_RESPONSE_CONTENT_TYPES
+
+
 def _is_admin_blob(path: str, body: bytes) -> bool:
     if path in ADMIN_PATHS:
         return True
@@ -109,6 +120,10 @@ class RelayApplication:
             raise ValueError("invalid request cap")
         if self.config.max_response_bytes < 1 or self.config.max_response_bytes > MAX_RESPONSE_BYTES:
             raise ValueError("invalid response cap")
+        if not 1 <= self.config.max_concurrent_requests <= MAX_CONCURRENT_REQUESTS:
+            raise ValueError("invalid concurrency cap")
+        if not 0.1 <= self.config.read_timeout_seconds <= 30.0:
+            raise ValueError("invalid read timeout")
         self.handler = handler
 
     def dispatch(
@@ -154,6 +169,7 @@ class RelayApplication:
             or not isinstance(response.status, int)
             or not 100 <= response.status <= 599
             or not isinstance(response.body, bytes)
+            or not _valid_response_content_type(response.content_type)
             or len(response.body) > self.config.max_response_bytes
         ):
             return _json(502, "responseInvalid")
@@ -166,6 +182,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def _application(self) -> RelayApplication:
         return self.server.lifeos_application  # type: ignore[attr-defined]
+
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(self._application().config.read_timeout_seconds)
 
     def _write(self, response: RelayResponse) -> None:
         self.send_response(response.status)
@@ -181,13 +201,24 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _headers(self) -> list[tuple[str, str]]:
         return [(str(name), str(value)) for name, value in self.headers.raw_items()]
 
+    def _raw_header_values(self, name: str) -> list[str]:
+        wanted = name.casefold()
+        return [str(value) for header, value in self.headers.raw_items() if str(header).casefold() == wanted]
+
     def _body(self) -> bytes | None:
-        raw_length = self.headers.get("Content-Length")
-        if raw_length is None:
+        transfer_encodings = self._raw_header_values("Transfer-Encoding")
+        if transfer_encodings:
+            self._write(_json(400, "transferEncodingUnsupported"))
+            return None
+        lengths = self._raw_header_values("Content-Length")
+        if len(lengths) > 1:
+            self._write(_json(400, "ambiguousContentLength"))
+            return None
+        if not lengths:
             self._write(_json(411, "contentLengthRequired"))
             return None
         try:
-            length = int(raw_length, 10)
+            length = int(lengths[0], 10)
         except ValueError:
             self._write(_json(400, "invalidContentLength"))
             return None
@@ -216,12 +247,41 @@ class _RelayServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def __init__(self, server_address, handler_class, max_workers: int):
+        self._request_slots = threading.BoundedSemaphore(max_workers)
+        super().__init__(server_address, handler_class)
+
+    def process_request(self, request, client_address):  # noqa: N802
+        if not self._request_slots.acquire(blocking=False):
+            request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):  # noqa: N802
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+
+class _RelayIPv6Server(_RelayServer):
+    address_family = socket.AF_INET6
+
 
 def create_server(config: RelayConfig | None = None, handler: RouteHandler | None = None) -> _RelayServer:
     application = RelayApplication(config, handler)
     if application.config.host not in {"127.0.0.1", "::1"} and not application.config.allow_non_loopback:
         raise ValueError("non-loopback relay binding requires explicit override")
-    server = _RelayServer((application.config.host, application.config.port), _RequestHandler)
+    server_type = _RelayIPv6Server if application.config.host == "::1" else _RelayServer
+    server = server_type(
+        (application.config.host, application.config.port),
+        _RequestHandler,
+        application.config.max_concurrent_requests,
+    )
     server.lifeos_application = application  # type: ignore[attr-defined]
     return server
 

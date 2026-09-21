@@ -26,6 +26,7 @@ MAX_BLOB_BYTES: Final = 33_554_432
 MAX_BLOB_CHUNK_BYTES: Final = 262_144
 MAX_OBSERVATION_BYTES: Final = 131_072
 MAX_IDENTIFIER_BYTES: Final = 256
+SQLITE_MAX_INTEGER: Final = 2**63 - 1
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 
@@ -126,7 +127,7 @@ def _hash(value: str, field: str = "hash") -> str:
 
 
 def _nonnegative(value: int, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > SQLITE_MAX_INTEGER:
         raise ReplicationError(f"invalid{field[:1].upper()}{field[1:]}")
     return value
 
@@ -171,7 +172,7 @@ class ReplicationStore:
     as the effect they describe.
     """
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 2
 
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -261,6 +262,8 @@ class ReplicationStore:
                         blob_hash TEXT PRIMARY KEY,
                         total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),
                         next_offset INTEGER NOT NULL CHECK (next_offset >= 0),
+                        last_chunk_offset INTEGER NOT NULL CHECK (last_chunk_offset >= 0),
+                        last_chunk_length INTEGER NOT NULL CHECK (last_chunk_length >= 0),
                         last_chunk_hash TEXT NOT NULL,
                         updated_at INTEGER NOT NULL
                     )
@@ -283,10 +286,28 @@ class ReplicationStore:
                 )
                 for statement in schema_statements:
                     self._connection.execute(statement)
+                blob_columns = {
+                    str(row[1])
+                    for row in self._connection.execute("PRAGMA table_info(lifeos_replication_blobs)")
+                }
+                if "last_chunk_offset" not in blob_columns:
+                    self._connection.execute(
+                        "ALTER TABLE lifeos_replication_blobs ADD COLUMN last_chunk_offset INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "last_chunk_length" not in blob_columns:
+                    self._connection.execute(
+                        "ALTER TABLE lifeos_replication_blobs ADD COLUMN last_chunk_length INTEGER NOT NULL DEFAULT 0"
+                    )
+                if version < 2:
+                    self._connection.execute(
+                        "UPDATE lifeos_replication_blobs SET last_chunk_length = next_offset "
+                        "WHERE last_chunk_length = 0 AND next_offset > 0"
+                    )
                 self._connection.execute(f"PRAGMA user_version = {self._SCHEMA_VERSION}")
                 self._connection.execute("COMMIT")
             except BaseException:
-                self._connection.execute("ROLLBACK")
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
                 raise
 
     def _transaction(self):
@@ -304,8 +325,21 @@ class ReplicationStore:
                 return inner.outer._connection
 
             def __exit__(inner, exc_type, exc, tb):
+                if exc_type is not None:
+                    try:
+                        inner.outer._connection.execute("ROLLBACK")
+                    finally:
+                        inner.outer._lock.release()
+                    return False
                 try:
-                    inner.outer._connection.execute("ROLLBACK" if exc_type else "COMMIT")
+                    inner.outer._connection.execute("COMMIT")
+                except BaseException:
+                    if inner.outer._connection.in_transaction:
+                        try:
+                            inner.outer._connection.execute("ROLLBACK")
+                        except sqlite3.Error:
+                            pass
+                    raise
                 finally:
                     inner.outer._lock.release()
                 return False
@@ -536,20 +570,30 @@ class ReplicationStore:
             raise ReplicationError("capacity")
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT total_bytes, next_offset, last_chunk_hash FROM lifeos_replication_blobs WHERE blob_hash = ?",
+                "SELECT total_bytes, next_offset, last_chunk_offset, last_chunk_length, last_chunk_hash "
+                "FROM lifeos_replication_blobs WHERE blob_hash = ?",
                 (blob_hash,),
             ).fetchone()
+            if row is None and offset != 0:
+                raise ReplicationError("invalidOffset")
             if row is not None:
-                if int(row[0]) != total_bytes or int(row[1]) != offset:
+                if int(row[0]) != total_bytes:
                     raise ReplicationError("idCollision")
-                if str(row[2]) == chunk_hash:
-                    return int(row[1])
+                if offset == int(row[2]):
+                    if int(row[3]) == chunk_bytes and str(row[4]) == chunk_hash:
+                        return int(row[1])
+                    raise ReplicationError("idCollision")
+                if offset != int(row[1]):
+                    raise ReplicationError("invalidOffset")
             next_offset = offset + chunk_bytes
             connection.execute(
-                "INSERT INTO lifeos_replication_blobs(blob_hash, total_bytes, next_offset, last_chunk_hash, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(blob_hash) DO UPDATE SET "
-                "next_offset=excluded.next_offset, last_chunk_hash=excluded.last_chunk_hash, updated_at=excluded.updated_at",
-                (blob_hash, total_bytes, next_offset, chunk_hash, time.time_ns()),
+                "INSERT INTO lifeos_replication_blobs "
+                "(blob_hash, total_bytes, next_offset, last_chunk_offset, last_chunk_length, last_chunk_hash, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(blob_hash) DO UPDATE SET "
+                "next_offset=excluded.next_offset, last_chunk_offset=excluded.last_chunk_offset, "
+                "last_chunk_length=excluded.last_chunk_length, last_chunk_hash=excluded.last_chunk_hash, "
+                "updated_at=excluded.updated_at",
+                (blob_hash, total_bytes, next_offset, offset, chunk_bytes, chunk_hash, time.time_ns()),
             )
             return next_offset
 
