@@ -30,6 +30,9 @@ physical-device comparison, and final UI/security evidence remain open.
   bounded canonical JSON, NFC wire normalization, finite/fractional numeric
   handling, and focused parser/domain regressions. It is serialization only;
   durable fitness store adapters are still open. Astra static review passed.
+- P04 adapter dispatch is blocked at CP-B: the current source has no sealed
+  `SyncStoreKind`, replication coding map, command-to-wire identity row, or
+  training tombstone contract. Do not let a worker invent these boundaries.
 - The eight D1 graph files remain untracked candidate bytes. Do not stage,
   edit, delete, or treat them as production until P05 reviews them.
 
@@ -50,7 +53,7 @@ physical-device comparison, and final UI/security evidence remain open.
 
 ## Next action
 
-Continue P04 durable domain adapters and P05/P06 graph/vault review. Keep one
-worker and one Apple lane at a time; preserve gradual commits, pushes, compact
-handoffs, and evidence-led gates. Windows remains unavailable and must not be
-treated as validated.
+Resolve CP-B or keep the adapter lane paused while P05/P06 graph/vault review
+advances. Keep one worker and one Apple lane at a time; preserve gradual
+commits, pushes, compact handoffs, and evidence-led gates. Windows remains
+unavailable and must not be treated as validated.

@@ -93,6 +93,6 @@ Updated 2026-09-21 Europe/Berlin.
 
 ## P04 fitness payload checkpoint
 
-- `b0e52e1` adds strict training serialization, bounded canonical JSON, NFC wire normalization, finite/fractional numeric handling, and parser/domain regressions; it is serialization only and durable store adapters remain open.
+- `b0e52e1` adds strict training serialization, bounded canonical JSON, NFC wire normalization, finite/fractional numeric handling, and parser/domain regressions; it is serialization only and CP-B still blocks durable store adapters.
 - Astra static review passed; native Swift runtime evidence remains unavailable
   behind the Xcode license gate.

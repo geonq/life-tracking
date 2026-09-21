@@ -15,7 +15,8 @@ Updated 2026-09-21 Europe/Berlin. Release: NO-GO.
   9d222ac.
 - P04: strict training payload serialization and focused parser/domain
   regressions are pushed at b0e52e1. Durable fitness/nutrition/journal/
-  lifestyle adapters remain open; this checkpoint is source-only.
+  lifestyle adapters remain open; this checkpoint is source-only. Training
+  adapter dispatch is blocked by the unsealed CP-B persistence bridge.
 - Evidence: API typecheck and 160 tests pass; focused gateway suite is 23
   passed with one cryptography-dependent skip; `git diff --check` passes and
   Astra gave the calendar tranche a static PASS. Swift build/tests are blocked
@@ -26,6 +27,6 @@ Updated 2026-09-21 Europe/Berlin. Release: NO-GO.
   unknown.
 - Windows: not contacted and currently unavailable.
 
-Next: P04 local domain adapters, P05 D1 review, P06 native graph/vault UI,
+Next: resolve CP-B or pause the adapter lane, then P05 D1 review and P06 native graph/vault UI,
 then visual/motion, widgets, provider, Windows, physical-device, and final
 security evidence gates in the dependency plan.

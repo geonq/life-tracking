@@ -45,6 +45,8 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   finite/fractional numeric handling, and direct parser/domain regressions.
   Durable store adapters are not included in this checkpoint; Astra static
   review passed and native Swift evidence remains pending the license gate.
+  CP-B must seal the replication envelope migration, command/wire identity,
+  sequence/signing ownership and tombstone contract before adapter code.
 
 ## Ordered implementation
 

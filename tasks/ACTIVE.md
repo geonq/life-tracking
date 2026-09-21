@@ -32,6 +32,10 @@ P04 training payload serialization, bounded local canonical JSON, NFC and
 numeric/domain/parser regressions are pushed at b0e52e1 after Astra static PASS.
 No durable fitness store adapter is claimed yet; native Swift execution remains
 blocked by the Xcode license gate.
+The next adapter attempt is blocked by CP-B: SyncStoreKind, replication
+metadata migration, command-to-wire identity persistence, signing/sequence
+ownership, and training tombstone semantics are absent or unsealed. P05 graph
+review may advance independently; no worker may guess these interfaces.
 
 ## Next execution
 
