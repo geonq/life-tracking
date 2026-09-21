@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-21 Europe/Berlin. Release: NO-GO.
-Current checkpoint: 328b18e16bcbb5856db40b0ffd3f90101a051096.
+Current checkpoint: 1f65326.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -17,13 +17,19 @@ Use artifacts/final/completion/requirements.json instead of percentages.
 - Wrote compact coordination state. No source, blueprint, build, install,
   fetch, SSH, provider, vault, or physical-device operation was performed.
 
+## Completed execution checkpoints
+
+- P01 shared sync foundation and cross-language R20 contract correction:
+  a21ccf3, 673dc0a. TypeScript contract tests: 219 passed.
+- P02 durable replication core: a629ad3. Focused Python tests: 5 passed.
+- P02 loopback relay and Astra-reviewed bounds/security corrections: 1f65326.
+  Focused relay tests: 5 passed.
+
 ## Ordered implementation
 
-1. P01 seals cross-platform replication types, canonical bytes, identity/key
-   custody, validators, transport bounds, and R20 restore/deletion contracts.
-2. P02 implements the signed local relay/gateway against P01 and keeps Windows
-   deployment separate while that host is unavailable.
-3. P03 adapts calendar/finance stores; P04 adapts fitness, nutrition,
+1. Finish P02 authenticated gateway routes against the committed store/relay;
+   keep Windows deployment separate while that host is unavailable.
+2. P03 adapts calendar/finance stores; P04 adapts fitness, nutrition,
    supplements and lifestyle stores with local durability before acknowledgement.
 4. P05 reviews the eight D1 candidates against their exact design packet; P06
    adds native Canvas/inspector/vault integration only after P01/P05.
