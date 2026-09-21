@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-21 Europe/Berlin. Release: NO-GO.
-Current checkpoint: 9d222ac.
+Current checkpoint: b0e52e1.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -40,6 +40,11 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   regressions are reviewed and pushed. API tests are 160/160; gateway is 23
   passed with one crypto-dependent skip. Native Swift evidence is pending the
   Xcode license gate.
+- P04 fitness payload boundary: b0e52e1. Training payload serialization uses a
+  strict tagged root, bounded local canonical JSON, NFC wire normalization,
+  finite/fractional numeric handling, and direct parser/domain regressions.
+  Durable store adapters are not included in this checkpoint; Astra static
+  review passed and native Swift evidence remains pending the license gate.
 
 ## Ordered implementation
 

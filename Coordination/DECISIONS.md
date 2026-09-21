@@ -24,8 +24,8 @@ Updated 2026-09-21 Europe/Berlin.
 - Source existence never equals runtime acceptance. Unavailable, unsupported,
   unknown, failed, and pending remain separate.
 - Every accepted tranche records exact files, hashes, evidence, complexity,
-  cleanup, commit, push, and local/origin parity. P00 itself intentionally did
-  not commit or push; the current P03 implementation checkpoint is `9d222ac`.
+  cleanup, commit, push, and local/origin parity. The current code checkpoint
+  is P04 `b0e52e1`.
 - Apple lanes are serialized, use owned result paths, and are not claimed from
   an interrupted or silent command.
 
@@ -66,35 +66,33 @@ Updated 2026-09-21 Europe/Berlin.
 ## P02 authenticated exchange checkpoint
 
 - Checkpoint 038cd37 is pushed on main and origin/main. It adds authenticated
-  gateway exchange integration, nested operation/ack signature verification
-  against the pinned member roster, contiguous device frontiers, and a
-  separate gateway acknowledgement cursor.
+  exchange, nested signature verification against the pinned roster, contiguous
+  device frontiers, and a separate gateway acknowledgement cursor.
 - Dependency paging is FIFO/de-duplicated, byte-bounded, restart-safe, and
   never advertises an unresolved or noncontiguous device sequence as delivered.
 - A durable stream-head table and sequence index bound frontier reads. The
   composite index is created only after legacy-column migration; an original
   schema regression covers this ordering.
 - Focused Python evidence is 21 passing tests with one cryptography-dependent
-  skip on this Mac. Xcode remains license-gated; Windows is unavailable.
+  skip on this Mac.
 
 ## P03 calendar checkpoint
 
-- `e76be67` is the pushed source checkpoint. The app targets include the
-  existing Sync source directory; widget targets remain isolated from it.
-- Calendar wire data uses a strict version-1 `calendarSeries` payload with
-  lowercase UUID series IDs, deterministic item ordering, bounded canonical
-  JSON, NFC normalization only at the wire boundary, and icon content-hash
-  verification before image construction.
+- `e76be67` is the pushed source checkpoint. The app targets include Sync;
+  widget targets remain isolated from it.
+- Calendar wire data uses strict version-1 `calendarSeries`, lowercase UUID
+  IDs, deterministic ordering, bounded canonical JSON, NFC wire normalization,
+  and icon hash-before-image verification.
 - Durable calendar replication must use the current `SyncDomainAdapter` and
   embedded `SyncAdapterEnvelope`; no sidecar ledger or later R7 API is allowed.
-- `9d222ac` is the pushed durable calendar checkpoint. It keeps local outbound
-  ACKs separate from authenticated received ACK evidence, retains compacted
-  replay anchors atomically, rejects forged default-path remote ACKs, retains
-  stale edits as conflicts when context exists, and omits unsupported zero
-  frontiers until contiguous operation evidence exists.
+- `9d222ac` is the durable calendar checkpoint. It separates local outbound
+  ACKs from authenticated evidence, retains replay anchors atomically, rejects
+  forged ACKs, retains stale conflicts, and omits unsupported zero frontiers.
 - API evidence is typecheck plus 160 passing tests; gateway replication is 23
-  passing tests with one crypto-dependent skip. Astra static review passed the
-  tranche. Native Swift runtime evidence remains unavailable behind Xcode’s
-  license gate.
-- Xcode license/runtime evidence is still unavailable, so source/static review
-  does not count as Apple runtime acceptance.
+  passing tests with one crypto-dependent skip. Astra static review passed.
+
+## P04 fitness payload checkpoint
+
+- `b0e52e1` adds strict training serialization, bounded canonical JSON, NFC wire normalization, finite/fractional numeric handling, and parser/domain regressions; it is serialization only and durable store adapters remain open.
+- Astra static review passed; native Swift runtime evidence remains unavailable
+  behind the Xcode license gate.

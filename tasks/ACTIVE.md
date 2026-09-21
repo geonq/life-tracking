@@ -1,11 +1,12 @@
 # Active LifeOS execution
 
-Status: IN PROGRESS — P00/P01/P02/P03 calendar replication checkpoint complete;
+Status: IN PROGRESS — P00/P01/P02/P03 calendar and P04 training payload
+checkpoint complete;
 P04 domain adapters active; release NO-GO, updated 2026-09-21.
 
 ## Current checkpoint
 
-main and local origin/main match at 9d222ac.
+main and local origin/main match at b0e52e1.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
 The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
 75 missing states. It is evidence-led, not a completion percentage.
@@ -27,6 +28,10 @@ calendar wire codec. Durable calendar wrapper, adapter, composition, ACK
 separation, compaction/frontier hardening, and focused regressions are pushed
 at 9d222ac; Swift tests/build remain license-gated. API evidence is 160/160
 tests and focused gateway evidence is 23 passed with one crypto-dependent skip.
+P04 training payload serialization, bounded local canonical JSON, NFC and
+numeric/domain/parser regressions are pushed at b0e52e1 after Astra static PASS.
+No durable fitness store adapter is claimed yet; native Swift execution remains
+blocked by the Xcode license gate.
 
 ## Next execution
 

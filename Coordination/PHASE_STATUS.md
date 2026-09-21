@@ -2,7 +2,7 @@
 
 Updated 2026-09-21 Europe/Berlin. Release: NO-GO.
 
-- Current checkpoint: 9d222ac; local origin/main matches.
+- Current checkpoint: b0e52e1; local origin/main matches.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
 - P01: shared sync contract/codec complete at a21ccf3 + 673dc0a.
@@ -13,6 +13,9 @@ Updated 2026-09-21 Europe/Berlin. Release: NO-GO.
   e76be67. Durable calendar store/adapter/composition, authenticated ACK
   handling, compaction, frontier safety, and focused regressions are pushed at
   9d222ac.
+- P04: strict training payload serialization and focused parser/domain
+  regressions are pushed at b0e52e1. Durable fitness/nutrition/journal/
+  lifestyle adapters remain open; this checkpoint is source-only.
 - Evidence: API typecheck and 160 tests pass; focused gateway suite is 23
   passed with one cryptography-dependent skip; `git diff --check` passes and
   Astra gave the calendar tranche a static PASS. Swift build/tests are blocked
