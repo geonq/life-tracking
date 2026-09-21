@@ -240,11 +240,16 @@ struct TasksWidgetData {
     static func readSnapshot(at url: URL) throws -> CalendarSnapshot {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
-        let bytes = try handle.read(upToCount: CalendarSnapshot.maximumEncodedBytes + 1) ?? Data()
-        guard bytes.count <= CalendarSnapshot.maximumEncodedBytes else {
+        let bytes = try handle.read(upToCount: CalendarStoreEnvelope.maximumEncodedBytes + 1) ?? Data()
+        guard bytes.count <= CalendarStoreEnvelope.maximumEncodedBytes else {
             throw CalendarSnapshotError.payloadTooLarge
         }
-        return try JSONDecoder.calendar.decode(CalendarSnapshot.self, from: bytes)
+        let snapshot = try JSONDecoder.calendar.decode(CalendarSnapshot.self, from: bytes)
+        let snapshotBytes = try JSONEncoder.calendar.encode(snapshot)
+        guard snapshotBytes.count <= CalendarSnapshot.maximumEncodedBytes else {
+            throw CalendarSnapshotError.payloadTooLarge
+        }
+        return snapshot
     }
 
     static func project(_ snapshot: CalendarSnapshot?, savedAt: Date?,
@@ -346,7 +351,7 @@ struct FutureModuleTimelineProvider: TimelineProvider {
            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
            let savedAt = attributes[.modificationDate] as? Date,
            let size = attributes[.size] as? NSNumber,
-           size.intValue <= CalendarSnapshot.maximumEncodedBytes,
+           size.intValue <= CalendarStoreEnvelope.maximumEncodedBytes,
            let stored = try? TasksWidgetData.readSnapshot(at: url) {
             tasks = .project(stored, savedAt: savedAt, privacy: snapshot.privacyMode, at: date)
         }

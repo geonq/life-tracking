@@ -941,19 +941,59 @@ public struct CalendarSnapshot: Codable, Equatable, Sendable {
         case schemaVersion, items
     }
 
+    private struct RootCodingKey: CodingKey {
+        let stringValue: String
+        let intValue: Int? = nil
+
+        init(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
+
+        static let snapshot = RootCodingKey(stringValue: "snapshot")
+    }
+
     public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let version = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? Self.currentSchemaVersion
+        let root = try decoder.container(keyedBy: RootCodingKey.self)
+        let rootKeys = Set(root.allKeys.map(\.stringValue))
+        let wrapperKeys: Set<String> = ["schemaVersion", "snapshot", "seriesMembership", "replication"]
+        let isWrapper = rootKeys.contains("snapshot")
+            || rootKeys.contains("seriesMembership")
+            || rootKeys.contains("replication")
+        if isWrapper {
+            guard rootKeys == wrapperKeys.subtracting(["replication"])
+                    || rootKeys == wrapperKeys,
+                  root.contains(.snapshot) else {
+                throw CalendarSnapshotError.unsupportedSchemaVersion(-1)
+            }
+            let wrapperVersion = try root.decode(Int.self, forKey: RootCodingKey(stringValue: "schemaVersion"))
+            guard wrapperVersion == CalendarStoreEnvelope.currentSchemaVersion else {
+                throw CalendarSnapshotError.unsupportedSchemaVersion(wrapperVersion)
+            }
+            let snapshotDecoder = try root.superDecoder(forKey: .snapshot)
+            self = try Self.decodeRawSnapshot(from: snapshotDecoder)
+            return
+        }
+        self = try Self.decodeRawSnapshot(from: decoder)
+    }
+
+    static func decodeRawSnapshot(from decoder: Decoder) throws -> CalendarSnapshot {
+        let container = try decoder.container(keyedBy: RootCodingKey.self)
+        let keys = Set(container.allKeys.map(\.stringValue))
+        guard keys.isSubset(of: ["schemaVersion", "items"]) else {
+            throw CalendarSnapshotError.unsupportedSchemaVersion(-1)
+        }
+        let schemaVersionKey = RootCodingKey(stringValue: "schemaVersion")
+        let itemsKey = RootCodingKey(stringValue: "items")
+        let version = try container.decodeIfPresent(Int.self, forKey: schemaVersionKey) ?? Self.currentSchemaVersion
         guard version == Self.currentSchemaVersion else {
             throw CalendarSnapshotError.unsupportedSchemaVersion(version)
         }
         let decodedItems: [CalendarItem]
-        if !container.contains(.items) {
+        if !container.contains(itemsKey) {
             decodedItems = []
-        } else if try container.decodeNil(forKey: .items) {
+        } else if try container.decodeNil(forKey: itemsKey) {
             decodedItems = []
         } else {
-            var itemContainer = try container.nestedUnkeyedContainer(forKey: .items)
+            var itemContainer = try container.nestedUnkeyedContainer(forKey: itemsKey)
             var boundedItems: [CalendarItem] = []
             boundedItems.reserveCapacity(min(itemContainer.count ?? Self.maximumItemCount, Self.maximumItemCount))
             while !itemContainer.isAtEnd {
@@ -971,9 +1011,10 @@ public struct CalendarSnapshot: Codable, Equatable, Sendable {
                 throw CalendarSnapshotError.duplicateItemID
             }
         }
-        schemaVersion = version
-        items = Self.sortedItems(decodedItems)
-        try validatedForPersistence()
+        var snapshot = Self(items: decodedItems)
+        snapshot.schemaVersion = version
+        try snapshot.validatedForPersistence()
+        return snapshot
     }
 
     private static func sortedItems(_ items: [CalendarItem]) -> [CalendarItem] {

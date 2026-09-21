@@ -1942,12 +1942,23 @@ class ReplicationStore:
             )
             selected_rows: list[tuple[object, ...]] = []
             selected_ids: set[str] = set()
+            selected_through: dict[str, int] = {
+                str(origin_id): int(through)
+                for origin_id, through in received.items()
+                if origin_id != ack_cursor_id
+            }
+            for row in all_rows:
+                selected_through.setdefault(str(row[2]), 0)
             remaining_ids = set(rows_by_operation_id)
             while len(selected_rows) < limit:
                 made_progress = False
                 for row in all_rows:
                     operation_id = str(row[1])
                     if operation_id not in remaining_ids:
+                        continue
+                    origin_id = str(row[2])
+                    sequence = int(row[3])
+                    if sequence != selected_through[origin_id] + 1:
                         continue
                     record = records_by_operation_id[operation_id]
                     if all(
@@ -1957,6 +1968,7 @@ class ReplicationStore:
                         selected_rows.append(row)
                         selected_ids.add(operation_id)
                         remaining_ids.remove(operation_id)
+                        selected_through[origin_id] = sequence
                         made_progress = True
                         break
                 if not made_progress:
@@ -1972,22 +1984,46 @@ class ReplicationStore:
             ).fetchone()
             ack_snapshot_upper = int(ack_snapshot_row[0])
             ack_rows = connection.execute(
-                "SELECT delivery_id, body FROM lifeos_replication_exchange_acks "
-                "WHERE dataset_id = ? AND store_id = ? AND delivery_id > ? AND delivery_id <= ? "
+                "SELECT a.delivery_id, a.mutation_id, a.operation_hash, a.body, "
+                "o.member_id, o.sequence, o.operation_hash "
+                "FROM lifeos_replication_exchange_acks a "
+                "LEFT JOIN lifeos_replication_operations o "
+                "ON o.operation_id = a.mutation_id "
+                "AND o.dataset_id = a.dataset_id "
+                "AND o.stream_id = a.store_id "
+                "WHERE a.dataset_id = ? AND a.store_id = ? AND a.delivery_id > ? AND a.delivery_id <= ? "
                 "ORDER BY delivery_id LIMIT ?",
                 (dataset_id, store_id, durable_cursor, ack_snapshot_upper, MAX_ACKNOWLEDGEMENTS_PER_PAGE + 1),
             ).fetchall()
             ack_more = len(ack_rows) > MAX_ACKNOWLEDGEMENTS_PER_PAGE
             ack_rows = ack_rows[:MAX_ACKNOWLEDGEMENTS_PER_PAGE]
             candidate_ack_records: list[dict[str, object]] = []
+            candidate_ack_operations: list[tuple[str, str, int]] = []
             for row in ack_rows:
+                if row[4] is None or row[5] is None or row[6] is None:
+                    raise ReplicationError("corruptStore")
+                if str(row[2]) != str(row[6]):
+                    raise ReplicationError("corruptStore")
                 try:
-                    record = json.loads(bytes(row[1]).decode("utf-8"))
+                    record = json.loads(bytes(row[3]).decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise ReplicationError("corruptStore") from exc
-                if not isinstance(record, dict):
+                if not isinstance(record, dict) or record.get("mutationID") != str(row[1]):
                     raise ReplicationError("corruptStore")
                 candidate_ack_records.append(record)
+                candidate_ack_operations.append((str(row[1]), str(row[4]), int(row[5])))
+
+            def safe_acknowledgement_count(operation_count: int) -> int:
+                selected_operation_ids = {
+                    str(row[1]) for row in candidate_rows[:operation_count]
+                }
+                safe_count = 0
+                for mutation_id, origin_id, sequence in candidate_ack_operations:
+                    if sequence <= int(received.get(origin_id, 0)) or mutation_id in selected_operation_ids:
+                        safe_count += 1
+                        continue
+                    break
+                return safe_count
 
             def build_response(operation_count: int, acknowledgement_count: int) -> bytes:
                 chosen_rows = candidate_rows[:operation_count]
@@ -2038,7 +2074,8 @@ class ReplicationStore:
                     break
                 operation_count = index + 1
             acknowledgement_count = 0
-            for index in range(len(candidate_ack_records)):
+            safe_ack_count = safe_acknowledgement_count(operation_count)
+            for index in range(safe_ack_count):
                 tentative = build_response(operation_count, index + 1)
                 if len(tentative) > MAX_PAYLOAD_BYTES:
                     if index == 0 and operation_count == 0:

@@ -498,6 +498,167 @@ class ReplicationStoreTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(response)["acknowledgements"][0]["level"], "applied")
 
+    def test_exchange_defers_ack_until_referenced_operation_is_covered(self) -> None:
+        dataset_id = FRAME_DATASET
+        sender_id = FRAME_SENDER
+        store_id = FRAME_ENDPOINT
+        ack_cursor_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        replica_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        self.store.register_member(sender_id, 7, hashlib.sha256(b"k" * 32).hexdigest(), b"k" * 32)
+
+        def operation(sequence: int) -> ExchangeOperationInput:
+            operation_id = f"00000000-0000-4000-8000-{sequence:012d}"
+            record = {
+                "mutationID": operation_id,
+                "datasetID": dataset_id,
+                "storeID": store_id,
+                "originID": sender_id,
+                "epoch": "7",
+                "sequence": str(sequence),
+                "parents": [],
+            }
+            payload = json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            return ExchangeOperationInput(
+                operation_id=operation_id,
+                dataset_id=dataset_id,
+                store_id=store_id,
+                origin_id=sender_id,
+                epoch=7,
+                sequence=sequence,
+                operation_hash=hashlib.sha256(f"operation-{sequence}".encode()).hexdigest(),
+                payload=payload,
+                body_hash=hashlib.sha256(payload).hexdigest(),
+                record=record,
+            )
+
+        operations = tuple(operation(sequence) for sequence in range(1, 130))
+        self.store.exchange(
+            "cccccccc-cccc-4ccc-8ccc-cccccccccc01",
+            "a" * 64,
+            dataset_id,
+            sender_id,
+            7,
+            store_id,
+            operations[:128],
+            (),
+            {},
+            None,
+            128,
+            ack_cursor_id,
+        )
+
+        final_operation = operations[-1]
+        acknowledgement_record = {
+            "mutationID": final_operation.operation_id,
+            "level": "stored",
+            "resultHash": "c" * 64,
+        }
+        acknowledgement_payload = json.dumps(
+            acknowledgement_record,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        acknowledgement = ExchangeAcknowledgementInput(
+            mutation_id=final_operation.operation_id,
+            dataset_id=dataset_id,
+            store_id=store_id,
+            replica_id=replica_id,
+            operation_hash=final_operation.operation_hash,
+            payload=acknowledgement_payload,
+            body_hash=hashlib.sha256(acknowledgement_payload).hexdigest(),
+            record=acknowledgement_record,
+        )
+        self.store.exchange(
+            "cccccccc-cccc-4ccc-8ccc-cccccccccc02",
+            "b" * 64,
+            dataset_id,
+            sender_id,
+            7,
+            store_id,
+            (final_operation,),
+            (acknowledgement,),
+            {},
+            None,
+            128,
+            ack_cursor_id,
+        )
+
+        first = json.loads(self.store.exchange(
+            "cccccccc-cccc-4ccc-8ccc-cccccccccc03",
+            "d" * 64,
+            dataset_id,
+            sender_id,
+            7,
+            store_id,
+            (),
+            (),
+            {},
+            None,
+            128,
+            ack_cursor_id,
+        ))
+        self.assertEqual(len(first["operations"]), 128)
+        self.assertEqual(first["acknowledgements"], [])
+        self.assertTrue(first["more"])
+        first_ack_cursor = next(
+            item["through"]
+            for item in first["upper"]["positions"]
+            if item["stream"]["originID"] == ack_cursor_id
+        )
+        self.assertEqual(first_ack_cursor, "0")
+        first_operation_frontier = next(
+            item["through"]
+            for item in first["upper"]["positions"]
+            if item["stream"]["originID"] == sender_id
+        )
+        self.assertEqual(first_operation_frontier, "128")
+
+        second = json.loads(self.store.exchange(
+            "cccccccc-cccc-4ccc-8ccc-cccccccccc04",
+            "e" * 64,
+            dataset_id,
+            sender_id,
+            7,
+            store_id,
+            (),
+            (),
+            {sender_id: int(first_operation_frontier), ack_cursor_id: int(first_ack_cursor)},
+            None,
+            128,
+            ack_cursor_id,
+        ))
+        self.assertEqual(
+            [record["mutationID"] for record in second["operations"]],
+            [final_operation.operation_id],
+        )
+        self.assertEqual(
+            [record["mutationID"] for record in second["acknowledgements"]],
+            [final_operation.operation_id],
+        )
+        second_ack_cursor = next(
+            item["through"]
+            for item in second["upper"]["positions"]
+            if item["stream"]["originID"] == ack_cursor_id
+        )
+        self.assertGreater(int(second_ack_cursor), int(first_ack_cursor))
+
+        acknowledged = json.loads(self.store.exchange(
+            "cccccccc-cccc-4ccc-8ccc-cccccccccc05",
+            "f" * 64,
+            dataset_id,
+            sender_id,
+            7,
+            store_id,
+            (),
+            (),
+            {sender_id: 129, ack_cursor_id: int(second_ack_cursor)},
+            None,
+            128,
+            ack_cursor_id,
+        ))
+        self.assertEqual(acknowledged["acknowledgements"], [])
+        self.assertFalse(acknowledged["more"])
+
     def test_exchange_keeps_large_pages_bounded_and_preserves_supplied_upper(self) -> None:
         dataset_id = FRAME_DATASET
         sender_id = FRAME_SENDER
@@ -623,6 +784,115 @@ class ReplicationStoreTests(unittest.TestCase):
         second_ids = [record["mutationID"] for record in second_response["operations"]]
         self.assertEqual(second_ids, [children[-1].operation_id])
 
+    def test_exchange_enforces_contiguous_frontiers_across_blocked_origins(self) -> None:
+        dataset_id = FRAME_DATASET
+        store_id = FRAME_ENDPOINT
+        child_origin = "10000000-0000-4000-8000-000000000001"
+        parent_origin = "20000000-0000-4000-8000-000000000001"
+        ack_cursor_id = "90000000-0000-4000-8000-000000000001"
+        parent_id = "30000000-0000-4000-8000-000000000001"
+        self.store.register_member(child_origin, 7, hashlib.sha256(b"c" * 32).hexdigest(), b"c" * 32)
+        self.store.register_member(parent_origin, 7, hashlib.sha256(b"p" * 32).hexdigest(), b"p" * 32)
+
+        def operation(origin_id: str, operation_id: str, sequence: int, parents: list[str]) -> ExchangeOperationInput:
+            record = {
+                "mutationID": operation_id,
+                "datasetID": dataset_id,
+                "storeID": store_id,
+                "originID": origin_id,
+                "epoch": "7",
+                "sequence": str(sequence),
+                "parents": parents,
+            }
+            payload = json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            return ExchangeOperationInput(
+                operation_id=operation_id,
+                dataset_id=dataset_id,
+                store_id=store_id,
+                origin_id=origin_id,
+                epoch=7,
+                sequence=sequence,
+                operation_hash=hashlib.sha256(operation_id.encode()).hexdigest(),
+                payload=payload,
+                body_hash=hashlib.sha256(payload).hexdigest(),
+                record=record,
+            )
+
+        parent = operation(parent_origin, parent_id, 1, [])
+        self.store.exchange(
+            "40000000-0000-4000-8000-000000000001", "a" * 64, dataset_id, parent_origin, 7, store_id,
+            (parent,), (), {}, None, 128, ack_cursor_id,
+        )
+        children = tuple(
+            operation(
+                child_origin,
+                f"50000000-0000-4000-8000-{sequence:012d}",
+                sequence,
+                [parent_id] if sequence == 1 else [],
+            )
+            for sequence in range(1, 130)
+        )
+        self.store.exchange(
+            "40000000-0000-4000-8000-000000000002", "b" * 64, dataset_id, child_origin, 7, store_id,
+            children[:128], (), {}, None, 128, ack_cursor_id,
+        )
+        self.store.exchange(
+            "40000000-0000-4000-8000-000000000003", "c" * 64, dataset_id, child_origin, 7, store_id,
+            children[128:], (), {}, None, 128, ack_cursor_id,
+        )
+
+        received: dict[str, int] = {}
+        delivered_ids: list[str] = []
+        responses: list[dict[str, object]] = []
+        for request_index in range(3):
+            response = json.loads(self.store.exchange(
+                f"40000000-0000-4000-8000-{request_index + 4:012d}",
+                chr(ord("d") + request_index) * 64,
+                dataset_id,
+                child_origin,
+                7,
+                store_id,
+                (),
+                (),
+                received,
+                None,
+                128,
+                ack_cursor_id,
+            ))
+            responses.append(response)
+            page_ids = [record["mutationID"] for record in response["operations"]]
+            self.assertTrue(page_ids)
+            self.assertTrue(set(delivered_ids).isdisjoint(page_ids))
+            delivered_ids.extend(page_ids)
+            next_received = {
+                item["stream"]["originID"]: int(item["through"])
+                for item in response["upper"]["positions"]
+            }
+            self.assertTrue(
+                any(next_received.get(origin_id, 0) > received.get(origin_id, 0) for origin_id in (child_origin, parent_origin))
+            )
+            received = next_received
+            if not response["more"]:
+                break
+        else:
+            self.fail("contiguous exchange did not reach the end of the stored streams")
+
+        self.assertEqual(len(responses), 2)
+        first_child_sequences = [
+            int(record["sequence"])
+            for record in responses[0]["operations"]
+            if record["originID"] == child_origin
+        ]
+        self.assertEqual(first_child_sequences, list(range(1, 128)))
+        self.assertIn(parent_id, [record["mutationID"] for record in responses[0]["operations"]])
+        self.assertEqual(
+            sorted(delivered_ids),
+            sorted([parent_id, *(child.operation_id for child in children)]),
+        )
+        self.assertEqual(received[child_origin], 129)
+        self.assertEqual(received[parent_origin], 1)
+        self.assertFalse(responses[-1]["more"])
+
     def test_exchange_dependency_budget_preserves_contiguous_child_progress(self) -> None:
         dataset_id = FRAME_DATASET
         store_id = FRAME_ENDPOINT
@@ -727,7 +997,7 @@ class ReplicationStoreTests(unittest.TestCase):
             "82000000-0000-4000-8000-000000000001", "c" * 64, dataset_id, sender_id, 7, store_id,
             (first, second), (), {}, None, 128, ack_cursor_id,
         ))
-        self.assertEqual([record["mutationID"] for record in response["operations"]], [second_id])
+        self.assertEqual([record["mutationID"] for record in response["operations"]], [])
         self.assertEqual(
             next(item["through"] for item in response["upper"]["positions"] if item["stream"]["originID"] == sender_id),
             "0",
@@ -737,7 +1007,8 @@ class ReplicationStoreTests(unittest.TestCase):
             "82000000-0000-4000-8000-000000000002", "d" * 64, dataset_id, sender_id, 7, store_id,
             (), (), {sender_id: 0}, None, 128, ack_cursor_id,
         ))
-        self.assertEqual([record["mutationID"] for record in replay["operations"]], [second_id])
+        self.assertEqual([record["mutationID"] for record in replay["operations"]], [])
+        self.assertTrue(replay["more"])
 
 
 class SignedFrameTests(unittest.TestCase):

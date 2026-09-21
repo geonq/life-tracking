@@ -140,6 +140,10 @@ public enum SyncDisposition: String, Codable, Sendable {
     case applied
     case retainedConflict
     case alreadyApplied
+    /// A legacy envelope contained the operation but no trustworthy receipt
+    /// evidence. It is intentionally replay-blocking until the operation is
+    /// re-established by a new authenticated exchange.
+    case ambiguous
     case blockedParent
     case rejected
 }
@@ -471,6 +475,69 @@ public struct SyncOutboxEntry: Codable, Equatable, Sendable {
     public let attempts: Int
     public let lastError: String?
     public let acknowledgements: [SyncAck]
+    /// Endpoint IDs that have durably acknowledged storing this operation.
+    /// The list is intentionally bounded by CalendarStore validation.
+    public let gatewayStoredBy: [String]
+
+    public init(
+        schemaVersion: Int,
+        operation: SyncOperation,
+        state: SyncOutboxState,
+        attempts: Int,
+        lastError: String?,
+        acknowledgements: [SyncAck],
+        gatewayStoredBy: [String] = []
+    ) {
+        self.schemaVersion = schemaVersion
+        self.operation = operation
+        self.state = state
+        self.attempts = attempts
+        self.lastError = lastError
+        self.acknowledgements = acknowledgements
+        self.gatewayStoredBy = gatewayStoredBy
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case operation
+        case state
+        case attempts
+        case lastError
+        case acknowledgements
+        case gatewayStoredBy
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            schemaVersion: try container.decode(Int.self, forKey: .schemaVersion),
+            operation: try container.decode(SyncOperation.self, forKey: .operation),
+            state: try container.decode(SyncOutboxState.self, forKey: .state),
+            attempts: try container.decode(Int.self, forKey: .attempts),
+            lastError: try container.decodeIfPresent(String.self, forKey: .lastError),
+            acknowledgements: try container.decode([SyncAck].self, forKey: .acknowledgements),
+            gatewayStoredBy: try container.decodeIfPresent([String].self, forKey: .gatewayStoredBy) ?? []
+        )
+    }
+}
+
+public struct SyncOperationReceipt: Codable, Equatable, Sendable {
+    public let operationHash: String
+    public let mutationID: String
+    public let entityVersion: String
+    public let disposition: SyncDisposition
+
+    public init(
+        operationHash: String,
+        mutationID: String,
+        entityVersion: String,
+        disposition: SyncDisposition
+    ) {
+        self.operationHash = operationHash
+        self.mutationID = mutationID
+        self.entityVersion = entityVersion
+        self.disposition = disposition
+    }
 }
 
 public struct SyncAdapterEnvelope: Codable, Equatable, Sendable {
@@ -486,7 +553,91 @@ public struct SyncAdapterEnvelope: Codable, Equatable, Sendable {
     public let inbox: [SyncOperation]
     public let entities: [SyncEntityVersion]
     public let conflicts: [SyncConflict]
+    /// ACKs authored by another replica. These are durable receipt evidence
+    /// only and must never be placed on an outbound exchange page.
+    public let receivedAcknowledgements: [SyncAck]
     public let acknowledgements: [SyncAck]
+    public let receipts: [SyncOperationReceipt]
+    /// Zero means the field was absent in the pre-receipt envelope format.
+    /// New envelopes always write version one explicitly.
+    public let receiptLedgerVersion: Int
+
+    public init(
+        schemaVersion: Int,
+        storeID: String,
+        datasetID: String,
+        localOriginID: String,
+        epoch: String,
+        nextSequence: String,
+        received: SyncFrontier,
+        applied: SyncFrontier,
+        outbox: [SyncOutboxEntry],
+        inbox: [SyncOperation],
+        entities: [SyncEntityVersion],
+        conflicts: [SyncConflict],
+        acknowledgements: [SyncAck],
+        receivedAcknowledgements: [SyncAck] = [],
+        receipts: [SyncOperationReceipt] = [],
+        receiptLedgerVersion: Int = 1
+    ) {
+        self.schemaVersion = schemaVersion
+        self.storeID = storeID
+        self.datasetID = datasetID
+        self.localOriginID = localOriginID
+        self.epoch = epoch
+        self.nextSequence = nextSequence
+        self.received = received
+        self.applied = applied
+        self.outbox = outbox
+        self.inbox = inbox
+        self.entities = entities
+        self.conflicts = conflicts
+        self.acknowledgements = acknowledgements
+        self.receivedAcknowledgements = receivedAcknowledgements
+        self.receipts = receipts
+        self.receiptLedgerVersion = receiptLedgerVersion
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case storeID
+        case datasetID
+        case localOriginID
+        case epoch
+        case nextSequence
+        case received
+        case applied
+        case outbox
+        case inbox
+        case entities
+        case conflicts
+        case acknowledgements
+        case receivedAcknowledgements
+        case receipts
+        case receiptLedgerVersion
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            schemaVersion: try container.decode(Int.self, forKey: .schemaVersion),
+            storeID: try container.decode(String.self, forKey: .storeID),
+            datasetID: try container.decode(String.self, forKey: .datasetID),
+            localOriginID: try container.decode(String.self, forKey: .localOriginID),
+            epoch: try container.decode(String.self, forKey: .epoch),
+            nextSequence: try container.decode(String.self, forKey: .nextSequence),
+            received: try container.decode(SyncFrontier.self, forKey: .received),
+            applied: try container.decode(SyncFrontier.self, forKey: .applied),
+            outbox: try container.decode([SyncOutboxEntry].self, forKey: .outbox),
+            inbox: try container.decode([SyncOperation].self, forKey: .inbox),
+            entities: try container.decode([SyncEntityVersion].self, forKey: .entities),
+            conflicts: try container.decode([SyncConflict].self, forKey: .conflicts),
+            acknowledgements: try container.decode([SyncAck].self, forKey: .acknowledgements),
+            receivedAcknowledgements: try container.decodeIfPresent([SyncAck].self, forKey: .receivedAcknowledgements) ?? [],
+            receipts: try container.decodeIfPresent([SyncOperationReceipt].self, forKey: .receipts) ?? [],
+            receiptLedgerVersion: try container.decodeIfPresent(Int.self, forKey: .receiptLedgerVersion) ?? 0
+        )
+    }
 }
 
 public struct SyncEntityVersion: Codable, Equatable, Sendable {
@@ -676,7 +827,33 @@ public protocol SyncDomainAdapter: Sendable {
     func pendingPage(after: SyncFrontier?, limit: Int) async throws -> SyncPage
     func applyRemote(_ operation: SyncOperation) async throws -> SyncCommitReceipt
     func recordAcknowledgement(_ acknowledgement: SyncAck) async throws
+    /// Called only after SyncEngine has verified the response and the
+    /// acknowledgement against the endpoint roster.
+    func recordAuthenticatedRemoteAcknowledgement(_ acknowledgement: SyncAck) async throws
+    func recordAcknowledgement(_ acknowledgement: SyncAck, for operation: SyncOperation) async throws
+    func acknowledgePageDelivered(_ acknowledgements: [SyncAck]) async throws
+    func recordGatewayAcceptance(_ mutationIDs: [String], endpointID: String) async throws
     func checkpoint(_ frontier: SyncFrontier) async throws -> SyncCheckpointReceipt
+}
+
+public extension SyncDomainAdapter {
+    func acknowledgePageDelivered(_ acknowledgements: [SyncAck]) async throws {
+        // Adapters without durable outbound acknowledgement state have
+        // nothing to retire. Calendar implements this hook transactionally.
+    }
+
+    func recordGatewayAcceptance(_ mutationIDs: [String], endpointID: String) async throws {
+        // Adapters without endpoint-scoped delivery state remain source
+        // compatible with the engine. Calendar persists this marker.
+    }
+
+    func recordAcknowledgement(_ acknowledgement: SyncAck, for operation: SyncOperation) async throws {
+        try await recordAcknowledgement(acknowledgement)
+    }
+
+    func recordAuthenticatedRemoteAcknowledgement(_ acknowledgement: SyncAck) async throws {
+        try await recordAcknowledgement(acknowledgement)
+    }
 }
 
 // MARK: - Closed data-management registry

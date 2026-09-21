@@ -537,7 +537,8 @@ public enum SyncWireCodec {
                   operation.epoch == endpoint.epoch,
                   operation.storeID == expectedStoreID,
                   let member = membersByDevice[operation.originID],
-                  member.keyID == operation.keyID else {
+                  member.keyID == operation.keyID,
+                  member.role == .applying else {
                 throw SyncFailure.membershipMismatch
             }
             try verifyOperation(operation, publicKey: try publicKey(for: member))

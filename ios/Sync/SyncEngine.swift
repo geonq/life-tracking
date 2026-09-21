@@ -1,8 +1,14 @@
 import Foundation
 
+public protocol SyncEngineTransport: Sendable {
+    func exchange(request: SyncExchangeRequest, endpoint: SyncEndpoint) async throws -> SyncExchangeResponse
+}
+
+extension SyncTransport: SyncEngineTransport {}
+
 public actor SyncEngine {
     private let adapters: [any SyncDomainAdapter]
-    private let transport: SyncTransport
+    private let transport: any SyncEngineTransport
     private let identity: SyncIdentityStore
     private let frontierStore: any SyncFrontierStore
     private let endpoint: SyncEndpoint
@@ -12,7 +18,7 @@ public actor SyncEngine {
 
     public init(
         adapters: [any SyncDomainAdapter],
-        transport: SyncTransport,
+        transport: any SyncEngineTransport,
         identity: SyncIdentityStore,
         frontierStore: any SyncFrontierStore,
         endpoint: SyncEndpoint
@@ -82,13 +88,25 @@ public actor SyncEngine {
                     let response = try await exchangeWithRetry(request)
                     try ensureCurrent(cycleGeneration)
                     endpointID = endpoint.id
-                    stored += response.results.filter { $0.disposition == "stored" || $0.disposition == "alreadyStored" }.count
                     try SyncWireCodec.verifyResponseRecords(response, endpoint: endpoint, expectedStoreID: adapter.storeID)
                     guard response.storeID == adapter.storeID,
                           response.operations.allSatisfy({ $0.storeID == adapter.storeID }),
                           response.acknowledgements.allSatisfy({ $0.storeID == adapter.storeID }) else {
                         throw SyncFailure.invalidInput
                     }
+                    let sentMutationIDs = Set(page.operations.map(\.mutationID))
+                    var acceptedMutationIDs: [String] = []
+                    var resultMutationIDs = Set<String>()
+                    for result in response.results {
+                        guard sentMutationIDs.contains(result.mutationID),
+                              resultMutationIDs.insert(result.mutationID).inserted else {
+                            throw SyncFailure.invalidInput
+                        }
+                        if result.disposition == "stored" || result.disposition == "alreadyStored" {
+                            acceptedMutationIDs.append(result.mutationID)
+                        }
+                    }
+                    stored += acceptedMutationIDs.count
                     let responseFrontier = try mergedFrontier(response.upper, into: frontier, for: adapter.storeID)
                     var successfulOperationIDs = Set<String>()
 
@@ -114,12 +132,18 @@ public actor SyncEngine {
                                         signature: ""
                                     )
                                 )
-                                try await adapter.recordAcknowledgement(acknowledgement)
+                                try await adapter.recordAcknowledgement(acknowledgement, for: operation)
                                 if receipt.disposition == .retainedConflict {
                                     conflicts += 1
                                 } else {
                                     applied += 1
                                 }
+                            case .ambiguous:
+                                // A legacy receipt without authenticated local
+                                // evidence is intentionally replay-blocking. It
+                                // must never be acknowledged or included in the
+                                // applied frontier.
+                                throw SyncFailure.receiptMigrationNeedsEvidence
                             case .blockedParent, .rejected:
                                 blocked += 1
                             }
@@ -130,10 +154,14 @@ public actor SyncEngine {
                         }
                     }
                     for acknowledgement in response.acknowledgements {
-                        try await adapter.recordAcknowledgement(acknowledgement)
+                        try await adapter.recordAuthenticatedRemoteAcknowledgement(acknowledgement)
                     }
-
-                    frontier = try frontierAfterApplying(
+                    // Validate and persist the resulting frontier before
+                    // retiring this page's outbound ACKs. A malformed or
+                    // regressing response, a cancellation, or a frontier
+                    // persistence failure must leave the ACK page durable so
+                    // the next exchange can retry it safely.
+                    let nextFrontier = try frontierAfterApplying(
                         current: frontier,
                         response: responseFrontier,
                         operations: response.operations,
@@ -141,11 +169,18 @@ public actor SyncEngine {
                         storeID: adapter.storeID,
                         acknowledgementCursorID: endpoint.id
                     )
-                    try await frontierStore.persist(frontier)
+                    try await frontierStore.persist(nextFrontier)
+                    try ensureCurrent(cycleGeneration)
+                    frontier = nextFrontier
+                    if !acceptedMutationIDs.isEmpty {
+                        try await adapter.recordGatewayAcceptance(acceptedMutationIDs, endpointID: endpoint.id)
+                    }
+                    try await adapter.acknowledgePageDelivered(page.acknowledgements)
                     pageCursor = page.cursor
                     hasMore = response.more || page.hasMore
                     exchanges += 1
-                    if page.operations.isEmpty && response.operations.isEmpty && response.acknowledgements.isEmpty {
+                    if page.operations.isEmpty && page.acknowledgements.isEmpty,
+                       response.operations.isEmpty && response.acknowledgements.isEmpty {
                         hasMore = false
                     }
                 }
@@ -251,11 +286,13 @@ public actor SyncEngine {
                 // A signed server response can advertise an upper frontier
                 // without presenting any device-signed records for it. Keep
                 // the durable client frontier unchanged until the contiguous
-                // operations have actually been verified and applied.
-                safeThrough[originID] = currentThrough[originID, default: 0]
+                // operations have actually been verified and applied. Do not
+                // materialize a new origin at zero: zero is meaningful only
+                // when that origin already exists in the durable frontier.
                 continue
             }
-            var next = safeThrough[originID, default: 0]
+            let startingThrough = currentThrough[originID, default: 0]
+            var next = startingThrough
             for operation in originOperations.sorted(by: { left, right in
                 let leftSequence = (try? SyncContractValidation.requireUnsigned(left.sequence)) ?? 0
                 let rightSequence = (try? SyncContractValidation.requireUnsigned(right.sequence)) ?? 0
@@ -269,7 +306,14 @@ public actor SyncEngine {
                 }
                 next = sequence
             }
-            safeThrough[originID] = min(target, max(safeThrough[originID, default: 0], next))
+            let verifiedThrough = min(target, next)
+            // A new origin is introduced only if at least one successful
+            // operation advanced a contiguous prefix from sequence one. An
+            // existing origin is already present in safeThrough and remains
+            // unchanged when the response is not sufficiently evidenced.
+            if verifiedThrough > startingThrough {
+                safeThrough[originID] = verifiedThrough
+            }
         }
         let foreignPositions = response.positions.filter { $0.stream.storeID != storeID }
         let storePositions = safeThrough.map { originID, through in
