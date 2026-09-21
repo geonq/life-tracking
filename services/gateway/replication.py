@@ -8,16 +8,25 @@ then makes their effects durable and idempotent.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
 import secrets
 import sqlite3
+import struct
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Iterable
+from typing import Final, Mapping
+
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+except ImportError:  # The Mac test environment may not have Windows runtime wheels.
+    Ed25519PublicKey = None  # type: ignore[assignment,misc]
 
 
 MAX_PAYLOAD_BYTES: Final = 1_048_576
@@ -27,8 +36,28 @@ MAX_BLOB_CHUNK_BYTES: Final = 262_144
 MAX_OBSERVATION_BYTES: Final = 131_072
 MAX_IDENTIFIER_BYTES: Final = 256
 SQLITE_MAX_INTEGER: Final = 2**63 - 1
+UINT64_MAX: Final = 2**64 - 1
+MAX_SIGNED_FRAME_BYTES: Final = 2_097_152
+MAX_FRAME_PATH_BYTES: Final = 64
+FRAME_PATHS: Final = frozenset(
+    {
+        "/replication/v1/challenge",
+        "/replication/v1/hello",
+        "/replication/v1/exchange",
+        "/replication/v1/ack",
+        "/replication/v1/blob",
+        "/replication/v1/blob/read",
+        "/replication/v1/data/manage",
+        "/replication/v1/observation",
+        "/replication/v1/observation/read",
+        "/replication/v1/health",
+    }
+)
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_UNSIGNED_RE = re.compile(r"^(0|[1-9][0-9]*)$")
+_BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]*$")
 
 
 class ReplicationError(Exception):
@@ -112,6 +141,206 @@ class ObservationRecord:
     sequence: int
     body_hash: str
     body: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedFrame:
+    """A structurally and cryptographically verified legacy sync frame."""
+
+    dataset_id: str
+    epoch: str
+    endpoint_id: str
+    sender_id: str
+    key_id: str
+    request_id: str
+    nonce: bytes
+    method: str
+    path: str
+    status: int
+    body: bytes
+
+
+def _frame_error(code: str = "invalidFrame") -> ReplicationError:
+    return ReplicationError(code)
+
+
+def _strict_base64url(value: object, field: str, *, exact_bytes: int | None = None, maximum_bytes: int | None = None) -> bytes:
+    if not isinstance(value, str) or "=" in value or not _BASE64URL_RE.fullmatch(value):
+        raise _frame_error(f"invalid{field[:1].upper()}{field[1:]}")
+    if len(value) % 4 == 1:
+        raise _frame_error(f"invalid{field[:1].upper()}{field[1:]}")
+    padded = value + "=" * ((4 - len(value) % 4) % 4)
+    try:
+        decoded = base64.b64decode(padded, altchars=b"-_", validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise _frame_error(f"invalid{field[:1].upper()}{field[1:]}") from exc
+    if exact_bytes is not None and len(decoded) != exact_bytes:
+        raise _frame_error(f"invalid{field[:1].upper()}{field[1:]}")
+    if maximum_bytes is not None and len(decoded) > maximum_bytes:
+        raise _frame_error("capacity")
+    if base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii") != value:
+        raise _frame_error(f"invalid{field[:1].upper()}{field[1:]}")
+    return decoded
+
+
+def _canonical_frame_value(frame: Mapping[str, object]) -> bytes:
+    try:
+        encoded = json.dumps(
+            frame,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, UnicodeEncodeError, ValueError) as exc:
+        raise _frame_error() from exc
+    return encoded
+
+
+def _frame_signing_bytes(frame: Mapping[str, object]) -> bytes:
+    unsigned = dict(frame)
+    unsigned.pop("signature", None)
+    canonical = _canonical_frame_value(unsigned)
+    if len(canonical) > MAX_SIGNED_FRAME_BYTES:
+        raise ReplicationError("capacity")
+    return b"LifeOS/frame/v1\0" + struct.pack(">I", len(canonical)) + canonical
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _frame_error("duplicateKey")
+        result[key] = value
+    return result
+
+
+class _StrictJSONInt(int):
+    def __new__(cls, token: str):
+        if len(token) > 20:
+            raise _frame_error("invalidFrame")
+        instance = int.__new__(cls, int(token))
+        instance.token = token
+        return instance
+
+
+def _parse_json_int(token: str) -> _StrictJSONInt:
+    return _StrictJSONInt(token)
+
+
+def verify_signed_frame(
+    frame_body: bytes,
+    public_key: bytes,
+    *,
+    expected_dataset_id: str | None = None,
+    expected_endpoint_id: str | None = None,
+    expected_epoch: str | None = None,
+    expected_method: str = "POST",
+    expected_path: str | None = None,
+    maximum_body_bytes: int = MAX_PAYLOAD_BYTES,
+) -> VerifiedFrame:
+    """Verify a Swift ``SyncSignedFrame`` without accepting untrusted fields.
+
+    The function performs all structural and hash checks before asking the
+    optional Ed25519 implementation to verify the signature. Callers still
+    need to authorize the resulting sender against their durable trust state.
+    """
+    if not isinstance(frame_body, bytes) or len(frame_body) > MAX_SIGNED_FRAME_BYTES:
+        raise ReplicationError("capacity")
+    if not isinstance(public_key, bytes) or len(public_key) != 32:
+        raise ReplicationError("invalidPublicKey")
+    if isinstance(maximum_body_bytes, bool) or not isinstance(maximum_body_bytes, int) or not 0 <= maximum_body_bytes <= MAX_PAYLOAD_BYTES:
+        raise ReplicationError("invalidBodyLimit")
+    try:
+        decoded = json.loads(
+            frame_body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_int=_parse_json_int,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ReplicationError) as exc:
+        if isinstance(exc, ReplicationError):
+            raise
+        raise _frame_error() from exc
+    if not isinstance(decoded, dict):
+        raise _frame_error()
+    required = {
+        "schemaVersion", "datasetID", "epoch", "endpointID", "senderID", "keyID",
+        "requestID", "nonce", "method", "path", "status", "body", "bodyHash", "signature",
+    }
+    if set(decoded) != required:
+        raise _frame_error("invalidKeys")
+    if (
+        not isinstance(decoded["schemaVersion"], int)
+        or isinstance(decoded["schemaVersion"], bool)
+        or decoded["schemaVersion"] != 1
+        or getattr(decoded["schemaVersion"], "token", "") != "1"
+        or any(
+            not isinstance(decoded[field], str)
+            for field in (
+                "datasetID", "epoch", "endpointID", "senderID", "keyID", "requestID",
+                "nonce", "method", "path", "body", "bodyHash", "signature",
+            )
+        )
+    ):
+        raise _frame_error()
+    uuid_fields = ("datasetID", "endpointID", "senderID", "requestID")
+    for field in uuid_fields:
+        value = decoded[field]
+        if not _UUID_RE.fullmatch(value) or uuid.UUID(value).urn.split(":")[-1] != value:
+            raise _frame_error(f"invalid{field[:1].upper()}{field[1:]}")
+    epoch = decoded["epoch"]
+    if len(epoch) > 20 or not _UNSIGNED_RE.fullmatch(epoch) or epoch == "0" or int(epoch) > UINT64_MAX:
+        raise _frame_error("invalidEpoch")
+    key_id = decoded["keyID"]
+    if not _HASH_RE.fullmatch(key_id):
+        raise _frame_error("invalidKeyID")
+    nonce = _strict_base64url(decoded["nonce"], "nonce", exact_bytes=32)
+    signature = _strict_base64url(decoded["signature"], "signature", exact_bytes=64)
+    method = decoded["method"]
+    path = decoded["path"]
+    status = decoded["status"]
+    if (
+        method != expected_method
+        or method != "POST"
+        or not isinstance(status, int)
+        or isinstance(status, bool)
+        or status != 0
+        or getattr(status, "token", "") != "0"
+    ):
+        raise _frame_error("invalidFrame")
+    if path not in FRAME_PATHS or len(path.encode("utf-8")) > MAX_FRAME_PATH_BYTES:
+        raise _frame_error("invalidPath")
+    body = _strict_base64url(decoded["body"], "body", maximum_bytes=maximum_body_bytes)
+    body_hash = decoded["bodyHash"]
+    if not _HASH_RE.fullmatch(body_hash) or hashlib.sha256(body).hexdigest() != body_hash:
+        raise ReplicationError("bodyHashMismatch")
+    if expected_dataset_id is not None and decoded["datasetID"] != expected_dataset_id:
+        raise ReplicationError("datasetMismatch")
+    if expected_endpoint_id is not None and decoded["endpointID"] != expected_endpoint_id:
+        raise ReplicationError("endpointMismatch")
+    if expected_epoch is not None and decoded["epoch"] != expected_epoch:
+        raise ReplicationError("staleEpoch")
+    if expected_path is not None and path != expected_path:
+        raise ReplicationError("routeMismatch")
+    if Ed25519PublicKey is None:
+        raise ReplicationError("cryptoUnavailable")
+    try:
+        Ed25519PublicKey.from_public_bytes(public_key).verify(signature, _frame_signing_bytes(decoded))
+    except Exception as exc:
+        raise ReplicationError("unauthenticated") from exc
+    return VerifiedFrame(
+        dataset_id=decoded["datasetID"],
+        epoch=epoch,
+        endpoint_id=decoded["endpointID"],
+        sender_id=decoded["senderID"],
+        key_id=key_id,
+        request_id=decoded["requestID"],
+        nonce=nonce,
+        method=method,
+        path=path,
+        status=status,
+        body=body,
+    )
 
 
 def _identifier(value: str, field: str) -> str:
