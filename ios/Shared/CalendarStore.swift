@@ -498,7 +498,7 @@ public enum CalendarStoreURL {
 }
 
 public actor CalendarStore {
-    public let url: URL
+    public nonisolated let url: URL
     private let fileManager: FileManager
     // This is an internal test seam used to make coordinator overlap
     // deterministic. It runs before the actor takes its synchronous

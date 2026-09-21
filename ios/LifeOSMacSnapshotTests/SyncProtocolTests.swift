@@ -16,7 +16,7 @@ final class SyncProtocolTests: XCTestCase {
         try SyncWireCodec.verifyOperation(signed, publicKey: key.publicKey)
 
         let encoded = try SyncWireCodec.encodeOperation(signed)
-        XCTAssertTrue(String(decoding: encoded, as: UTF8.self).hasPrefix("{\"baseHash\""))
+        XCTAssertTrue(String(decoding: encoded, as: UTF8.self).hasPrefix("{\"datasetID\""))
         let decoded = try SyncWireCodec.decodeOperation(encoded)
         XCTAssertEqual(decoded.sequence, "9007199254740993")
         XCTAssertEqual(try SyncWireCodec.operationHash(for: signed), try SyncWireCodec.operationHash(for: decoded))
@@ -56,6 +56,17 @@ final class SyncProtocolTests: XCTestCase {
         for fragment in ["01", "-1", "1.0", "1e3"] {
             XCTAssertThrowsError(try SyncWireCodec.canonicalizeJSON(Data(fragment.utf8)))
         }
+    }
+
+    func testBase64URLValidationDecodesURLSafeAlphabet() throws {
+        let bytes = Data([0xfb, 0xff, 0xef])
+        let encoded = bytes.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+
+        XCTAssertEqual(encoded, "-__v")
+        XCTAssertEqual(try SyncContractValidation.requireBase64URL(encoded), bytes)
     }
 
     func testAdministrativeAndObservationCountersUseCanonicalDecimalStrings() throws {

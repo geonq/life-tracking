@@ -1140,7 +1140,7 @@ public actor CalendarSyncAdapter: SyncDomainAdapter {
         }
         let localDevice = try await identity.identity()
         let localPublicKey = try Curve25519.Signing.PublicKey(
-            rawRepresentation: Data(syncBase64URL: localDevice.publicKey)
+            rawRepresentation: try CalendarSyncBase64URL.decode(localDevice.publicKey)
         )
         let configuredAuthorizedApplyingReplicaIDs = authorizedApplyingReplicaIDs
         _ = try await store.mutateEnvelope { current in
@@ -1889,7 +1889,9 @@ public actor CalendarSyncAdapter: SyncDomainAdapter {
         // enough to recover that outcome. Everything else is explicitly
         // ambiguous and therefore replay-blocking.
         let candidates = envelope.inbox + envelope.conflicts.flatMap(\.branches)
-        let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: Data(syncBase64URL: device.publicKey))
+        let publicKey = try Curve25519.Signing.PublicKey(
+            rawRepresentation: try CalendarSyncBase64URL.decode(device.publicKey)
+        )
         var seen = Set<String>()
         var receipts: [SyncOperationReceipt] = []
         receipts.reserveCapacity(candidates.count)

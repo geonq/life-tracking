@@ -214,6 +214,8 @@ public enum SyncContractValidation {
             throw SyncFailure.invalidInput
         }
         var padded = value
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
         switch padded.count % 4 {
         case 0: break
         case 2: padded += "=="
