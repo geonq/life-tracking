@@ -1,32 +1,28 @@
 # PHASE STATUS — LifeOS
 
-Updated 2026-09-21 Europe/Berlin. Release: NO-GO.
+Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
 
-- Current checkpoint: b0e52e1; local origin/main matches.
+- Current checkpoint: `0451afb`; local `main` and `origin/main` match.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
-- P01: shared sync contract/codec complete at a21ccf3 + 673dc0a.
+- P01: shared sync contract/codec complete at `a21ccf3` + `673dc0a`.
 - P02: durable store, relay, authenticated gateway exchange, bounded
   dependency paging, contiguous frontiers, stream-head migration, and nested
-  device-signature verification complete at 038cd37.
-- P03: app Sync sources and the strict calendar wire codec are complete at
-  e76be67. Durable calendar store/adapter/composition, authenticated ACK
-  handling, compaction, frontier safety, and focused regressions are pushed at
-  9d222ac.
-- P04: strict training payload serialization and focused parser/domain
-  regressions are pushed at b0e52e1. Durable fitness/nutrition/journal/
-  lifestyle adapters remain open; this checkpoint is source-only. Training
-  adapter dispatch is blocked by the unsealed CP-B persistence bridge.
-- Evidence: API typecheck and 160 tests pass; focused gateway suite is 23
-  passed with one cryptography-dependent skip; `git diff --check` passes and
-  Astra gave the calendar tranche a static PASS. Swift build/tests are blocked
-  by the unaccepted local Xcode license (exit 69).
-- D1: eight graph files remain untracked and unaccepted.
-- Host: macOS 26.6.2 arm64; Xcode/SDK 27 settings are present, but license,
-  signing identities, profiles, simulator/device queries remain blocked or
-  unknown.
-- Windows: not contacted and currently unavailable.
+  device-signature verification complete at `038cd37`.
+- P03: strict calendar codec and durable store/adapter/composition are complete
+  at `e76be67` and `9d222ac`.
+- P04: strict training payload serialization is pushed at `b0e52e1`; durable
+  fitness/nutrition/journal/lifestyle adapters remain open behind CP-B.
+- P05 D1: bounded graph/parser/spatial/session/vault work is pushed at `ca2caf1`.
+- `0451afb` restores URL-safe Base64 decoding, Xcode 27 public-key compatibility,
+  and the actor-safe store URL surface.
+- Evidence: API typecheck and 160 tests pass; gateway replication is 23 passed
+  with one cryptography-dependent skip; `LifeOSMacLogic` passed 379/379 tests
+  on Xcode 27/macOS 26.6.2.
+- Host: Xcode 27.0, macOS 26.6.2 arm64, and the iOS 27 runtime/iPhone 17
+  simulator are available. Signing, physical iPhone, Windows, and live-provider
+  evidence remain unknown or unavailable.
 
-Next: resolve CP-B or pause the adapter lane, then P05 D1 review and P06 native graph/vault UI,
-then visual/motion, widgets, provider, Windows, physical-device, and final
-security evidence gates in the dependency plan.
+Next: resolve CP-B or keep the adapter lane paused, then P06 native graph/vault
+UI, visual/motion, widgets, providers, Windows, physical-device, and final
+security evidence gates.

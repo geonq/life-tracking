@@ -1,6 +1,6 @@
 # LifeOS decisions
 
-Updated 2026-09-21 Europe/Berlin.
+Updated 2026-09-22 Europe/Berlin.
 
 ## Product authority
 
@@ -25,7 +25,7 @@ Updated 2026-09-21 Europe/Berlin.
   unknown, failed, and pending remain separate.
 - Every accepted tranche records exact files, hashes, evidence, complexity,
   cleanup, commit, push, and local/origin parity. The current code checkpoint
-  is P04 `b0e52e1`.
+  is Xcode-27 compatibility `0451afb` after P05 D1 `ca2caf1`.
 - Apple lanes are serialized, use owned result paths, and are not claimed from
   an interrupted or silent command.
 
@@ -37,10 +37,11 @@ Updated 2026-09-21 Europe/Berlin.
 - P00 retains every old registry/reference locator as pending source evidence.
   It rejects duplicate IDs, duplicate aliases, alias collisions, and
   nonexistent claimed receipt paths.
-- The eight D1 files are candidate source bytes, not accepted implementation.
-- Xcode/SDK 27.0 is installed by file observation, but xcrun runtime queries
-  are unknown until the license gate is resolved. Signing is denied for the
-  observed account because no valid identity/profile was present.
+- P05 D1 is accepted at `ca2caf1`; Canvas edits are invalid for Markdown-backed
+  sessions, while Markdown source replacement remains the supported edit.
+- Xcode 27.0, the iOS 27 runtime, and the iPhone 17 simulator are available;
+  the license is accepted. Signing/profile and physical-device evidence remain
+  unknown because no valid identity/profile was observed.
 - Windows remains unknown/unavailable by task constraint; P00 did not connect.
 - Proprietary Zepp readiness/load/PAI/Training Effect parity remains unsupported
   without a legitimate source. Physical HealthKit/Zepp provenance is pending.
@@ -94,5 +95,5 @@ Updated 2026-09-21 Europe/Berlin.
 ## P04 fitness payload checkpoint
 
 - `b0e52e1` adds strict training serialization, bounded canonical JSON, NFC wire normalization, finite/fractional numeric handling, and parser/domain regressions; it is serialization only and CP-B still blocks durable store adapters.
-- Astra static review passed; native Swift runtime evidence remains unavailable
-  behind the Xcode license gate.
+- Astra static review passed. The Xcode 27 Mac lane now passes 379/379 native
+  tests; iOS simulator and physical-device evidence remain open.

@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-21 Europe/Berlin. Release: NO-GO.
-Current checkpoint: b0e52e1.
+Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
+Current checkpoint: 0451afb.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -38,22 +38,33 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   authenticated ACK separation, replay-anchor durability, safe compaction,
   missing-parent conflict retention, frontier pagination safety, and focused
   regressions are reviewed and pushed. API tests are 160/160; gateway is 23
-  passed with one crypto-dependent skip. Native Swift evidence is pending the
-  Xcode license gate.
+  passed with one crypto-dependent skip.
 - P04 fitness payload boundary: b0e52e1. Training payload serialization uses a
   strict tagged root, bounded local canonical JSON, NFC wire normalization,
   finite/fractional numeric handling, and direct parser/domain regressions.
   Durable store adapters are not included in this checkpoint; Astra static
-  review passed and native Swift evidence remains pending the license gate.
+  review passed. The native Mac lane is green; iOS and physical-device
+  evidence remain open.
   CP-B must seal the replication envelope migration, command/wire identity,
   sequence/signing ownership and tombstone contract before adapter code.
+- P05 D1 graph/session checkpoint: ca2caf1. Bounded Markdown link scanning,
+  graph projection, spatial indexing, Canvas reducer/session state, atomic vault
+  access-context validation, and focused regressions are reviewed and pushed.
+  Markdown Canvas edits are rejected before mutation; source replacement remains
+  supported. Xcode 27 native Mac evidence is 379/379 tests passed; iOS
+  simulator, signing, physical-device, and external-provider evidence remain
+  open.
+
+- Xcode 27 compatibility checkpoint: 0451afb. URL-safe Base64 decoding, actor
+  isolation compatibility, and focused protocol regressions are pushed. The
+  full LifeOSMacLogic suite passes 379/379.
 
 ## Ordered implementation
 
 1. P04 adapts finance, fitness, nutrition,
    supplements and lifestyle stores with local durability before acknowledgement.
-2. P05 reviews the eight D1 candidates against their exact design packet; P06
-   adds native Canvas/inspector/vault integration only after P01/P05.
+2. P06 adds native Canvas/inspector/vault integration after accepted P01/P05
+   contracts; no worker may guess CP-B adapter identities.
 3. P07 shared visual/motion primitives; P08 calendar; P09 finance; P10 fitness;
    P11 HealthKit/Zepp provenance; P12 usage; P13 tax; P14 widgets/intents.
 4. P15 security/dead-path hardening; P16 composition and target membership.
@@ -62,7 +73,7 @@ Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## Release gates still open
 
-- OS27 compile/runtime, signing, App Group, widgets, Shortcuts and physical
+- iOS 27 simulator/runtime UI, signing, App Group, Shortcuts, and physical
   iPhone behavior.
 - Windows identity/ACL/service/Serve/health/readiness/restart/rollback.
 - Enable Banking, Trade Republic, Robinhood/net-worth, outage/rejoin and live
