@@ -35,12 +35,14 @@ import mimetypes
 import os
 import re
 import stat
+import sqlite3
 import tempfile
+import threading
 import uuid
 import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import BinaryIO, Callable
+from typing import BinaryIO, Callable, Mapping
 from urllib.parse import urlsplit
 
 import httpx
@@ -61,6 +63,33 @@ from enablebanking import (
     validate_windows_acl_sddl,
 )
 from supplement_catalog import SupplementCatalogInvalidQuery, SupplementCatalogService, SupplementCatalogUnavailable
+
+try:
+    from .replication import (
+        MAX_PAYLOAD_BYTES,
+        ReplicationError,
+        ReplicationStore,
+        ReplicationTrust,
+        _strict_json_object,
+        _uuid,
+        load_replication_trust,
+        parse_exchange_request,
+        sign_frame_response,
+        verify_signed_frame,
+    )
+except ImportError:
+    from replication import (
+        MAX_PAYLOAD_BYTES,
+        ReplicationError,
+        ReplicationStore,
+        ReplicationTrust,
+        _strict_json_object,
+        _uuid,
+        load_replication_trust,
+        parse_exchange_request,
+        sign_frame_response,
+        verify_signed_frame,
+    )
 
 
 def _is_allowed_upstream(value: str, expected_path: str) -> bool:
@@ -424,6 +453,15 @@ DOCUMENTS_DIR = DATA_DIR / "documents"
 SUPPLEMENT_CATALOG_PATH = Path(os.environ.get("LIFEOS_SUPPLEMENT_CATALOG_PATH", DATA_DIR / "supplements.sqlite3"))
 supplement_catalog = SupplementCatalogService(SUPPLEMENT_CATALOG_PATH)
 
+REPLICATION_TRUST_PATH_ENV = "LIFEOS_REPLICATION_TRUST_PATH"
+REPLICATION_SERVER_SEED_PATH_ENV = "LIFEOS_REPLICATION_SERVER_SEED_PATH"
+REPLICATION_DATABASE_FILENAME = "replication.sqlite3"
+REPLICATION_TRUST_MAX_BYTES = 64 * 1024
+REPLICATION_SEED_MAX_BYTES = 32
+REPLICATION_BODY_TIMEOUT = 8.0
+_replication_runtime_state: tuple[ReplicationTrust, ReplicationStore] | None = None
+_replication_runtime_lock = threading.Lock()
+
 FITNESS_OBSERVATION_SCHEMA_VERSION = 1
 FITNESS_OBSERVATION_MAX_BODY_SIZE = 128 * 1024
 FITNESS_OBSERVATION_MAX_RESPONSE_SIZE = 128 * 1024
@@ -765,6 +803,131 @@ async def _run_gateway_storage(operation: Callable[..., object], /, *args, **kwa
 
 app = FastAPI(title="LifeOS Sync Server")
 app.router.redirect_slashes = False
+
+
+def _read_replication_file(path: Path, maximum: int) -> bytes:
+    """Read one regular, non-symlink, owner-only replication secret/config."""
+    if not path.is_absolute() or maximum < 0:
+        raise ReplicationError("configurationUnavailable")
+    descriptor: int | None = None
+    try:
+        if os.name == "nt":
+            assert_protected_storage_path(path)
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or before.st_size > maximum:
+            raise ReplicationError("configurationUnavailable")
+        if os.name == "posix":
+            current_uid = os.getuid()
+            parent = os.lstat(path.parent)
+            if (
+                before.st_uid != current_uid
+                or not stat.S_ISDIR(parent.st_mode)
+                or stat.S_ISLNK(parent.st_mode)
+                or parent.st_uid != current_uid
+                or stat.S_IMODE(before.st_mode) & 0o077
+                or stat.S_IMODE(parent.st_mode) & 0o022
+            ):
+                raise ReplicationError("configurationUnavailable")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        after = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or stat.S_ISLNK(after.st_mode)
+            or after.st_size > maximum
+            or (after.st_dev, after.st_ino, after.st_size) != (before.st_dev, before.st_ino, before.st_size)
+        ):
+            raise ReplicationError("configurationUnavailable")
+        value = os.read(descriptor, maximum + 1)
+        if len(value) != after.st_size or _read_replication_file_identity(path) != (before.st_dev, before.st_ino, before.st_size):
+            raise ReplicationError("configurationUnavailable")
+        return value
+    except ReplicationError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ReplicationError("configurationUnavailable") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _read_replication_file_identity(path: Path) -> tuple[int, int, int] | None:
+    try:
+        value = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat.S_ISREG(value.st_mode) or stat.S_ISLNK(value.st_mode):
+        return None
+    return value.st_dev, value.st_ino, value.st_size
+
+
+def _load_replication_runtime() -> tuple[ReplicationTrust, ReplicationStore]:
+    global _replication_runtime_state
+    with _replication_runtime_lock:
+        if _replication_runtime_state is not None:
+            return _replication_runtime_state
+        trust_path_value = os.environ.get(REPLICATION_TRUST_PATH_ENV)
+        seed_path_value = os.environ.get(REPLICATION_SERVER_SEED_PATH_ENV)
+        if not trust_path_value or not seed_path_value:
+            raise ReplicationError("configurationUnavailable")
+        trust_path = Path(trust_path_value)
+        seed_path = Path(seed_path_value)
+        config_body = _read_replication_file(trust_path, REPLICATION_TRUST_MAX_BYTES)
+        seed = _read_replication_file(seed_path, REPLICATION_SEED_MAX_BYTES)
+        trust = load_replication_trust(config_body, seed)
+        try:
+            DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if DATA_DIR.is_symlink() or not DATA_DIR.is_dir():
+                raise ReplicationError("configurationUnavailable")
+            database_path = DATA_DIR / REPLICATION_DATABASE_FILENAME
+            if database_path.is_symlink():
+                raise ReplicationError("configurationUnavailable")
+            store = ReplicationStore(database_path)
+            if store.has_unmigrated_legacy_operations() or store.has_recovery_required():
+                store.close()
+                raise ReplicationError("migrationRequired")
+            for member in trust.members:
+                store.register_member(
+                    member.member_id,
+                    int(trust.epoch),
+                    member.key_id,
+                    member.public_key,
+                    member.active,
+                )
+            store.reconcile_members({member.member_id for member in trust.members})
+        except ReplicationError:
+            raise
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            raise ReplicationError("configurationUnavailable") from exc
+        _replication_runtime_state = (trust, store)
+        return _replication_runtime_state
+
+
+def _replication_json(body: Mapping[str, object], *, status_code: int = 200) -> Response:
+    try:
+        encoded = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError):
+        encoded = b'{"error":"replication_unavailable"}'
+        status_code = 503
+    return Response(content=encoded, status_code=status_code, media_type="application/json", headers={"Cache-Control": "no-store"})
+
+
+def _replication_error_status(code: str) -> int:
+    if code in {"unauthenticated", "authorizationDenied", "staleEpoch", "datasetMismatch", "endpointMismatch"}:
+        return 403
+    if code in {"capacity"}:
+        return 413
+    if code in {"replay", "idCollision", "nonceExpired", "nonceMismatch"}:
+        return 409
+    if code in {"configurationUnavailable", "cryptoUnavailable", "corruptStore", "diskFull", "migrationRequired"}:
+        return 503
+    return 400
+
+
+def _replication_error_response(code: str) -> Response:
+    return _replication_json({"error": "replication_request_rejected"}, status_code=_replication_error_status(code))
 
 
 @app.exception_handler(ProtectedStorageOverloaded)
@@ -5444,6 +5607,156 @@ def _read_document_file_storage(safe_id: str) -> tuple[bytes, str]:
     if body is None:
         raise HTTPException(status_code=404, detail="Original file missing")
     return body, selected.name
+
+
+async def _read_replication_body(request: Request, maximum: int) -> bytes:
+    return await _read_bounded_request_body(
+        request,
+        maximum=maximum,
+        timeout=REPLICATION_BODY_TIMEOUT,
+        error_factory=lambda status_code: _bounded_http_error(
+            status_code,
+            too_large_detail="replication request too large",
+            timeout_detail="replication request timeout",
+        ),
+    )
+
+
+def _replication_request_is_json(request: Request) -> bool:
+    values = _raw_header_values(request, "content-type")
+    if len(values) != 1:
+        return False
+    try:
+        return values[0].decode("ascii").split(";", 1)[0].strip().casefold() == "application/json"
+    except UnicodeDecodeError:
+        return False
+
+
+@app.post("/replication/v1/challenge")
+async def replication_challenge(request: Request) -> Response:
+    if not _replication_request_is_json(request):
+        return _replication_error_response("invalidContentType")
+    try:
+        trust, store = _load_replication_runtime()
+        body = await _read_replication_body(request, 1_024)
+        decoded = _strict_json_object(body, 1_024)
+        if set(decoded) == {"schemaVersion", "datasetID", "senderID"}:
+            schema = decoded["schemaVersion"]
+            if not isinstance(schema, int) or isinstance(schema, bool) or schema != 1 or getattr(schema, "token", "") != "1":
+                raise ReplicationError("unsupportedSchema")
+            sender_id = _uuid(decoded["senderID"], "senderID")
+        elif set(decoded) == {"datasetID", "originID"}:
+            sender_id = _uuid(decoded["originID"], "originID")
+        else:
+            raise ReplicationError("invalidChallenge")
+        dataset_id = _uuid(decoded["datasetID"], "datasetID")
+        if dataset_id != trust.dataset_id:
+            raise ReplicationError("datasetMismatch")
+        lease = await _run_gateway_storage(store.issue_challenge, dataset_id, sender_id)
+        if set(decoded) == {"schemaVersion", "datasetID", "senderID"}:
+            return _replication_json(
+                {
+                    "schemaVersion": 1,
+                    "nonce": base64.urlsafe_b64encode(lease.nonce).rstrip(b"=").decode("ascii"),
+                    "expiresInSeconds": 120,
+                }
+            )
+        return _replication_json(
+            {
+                "sessionID": lease.session_id,
+                "nonce": base64.urlsafe_b64encode(lease.nonce).rstrip(b"=").decode("ascii"),
+                "expiresAt": lease.expires_at,
+            }
+        )
+    except HTTPException as exc:
+        return _replication_error_response("requestTooLarge" if exc.status_code == 413 else "requestInvalid")
+    except ReplicationError as exc:
+        return _replication_error_response(exc.code)
+
+
+@app.post("/replication/v1/exchange")
+async def replication_exchange(request: Request) -> Response:
+    if not _replication_request_is_json(request):
+        return _replication_error_response("invalidContentType")
+    verified = None
+    trust = None
+    try:
+        trust, store = _load_replication_runtime()
+        frame_body = await _read_replication_body(request, 2_097_152)
+        raw_frame = _strict_json_object(frame_body, 2_097_152)
+        sender_id = raw_frame.get("senderID")
+        key_id = raw_frame.get("keyID")
+        if not isinstance(sender_id, str) or not isinstance(key_id, str):
+            raise ReplicationError("unauthenticated")
+        member = trust.members_by_id.get(sender_id)
+        if member is None or not member.active or key_id != member.key_id:
+            raise ReplicationError("authorizationDenied")
+        verified = verify_signed_frame(
+            frame_body,
+            member.public_key,
+            expected_dataset_id=trust.dataset_id,
+            expected_endpoint_id=trust.endpoint_id,
+            expected_epoch=trust.epoch,
+            expected_path="/replication/v1/exchange",
+            maximum_body_bytes=MAX_PAYLOAD_BYTES,
+        )
+        if verified.sender_id != member.member_id or verified.key_id != member.key_id:
+            raise ReplicationError("authorizationDenied")
+        await _run_gateway_storage(
+            store.consume_challenge,
+            verified.dataset_id,
+            verified.sender_id,
+            verified.nonce,
+            verified.request_id,
+            hashlib.sha256(verified.body).hexdigest(),
+        )
+        store_id, operations, acknowledgements, received, upper, limit = parse_exchange_request(
+            verified.body,
+            trust,
+            sender_id=verified.sender_id,
+        )
+        response_body = await _run_gateway_storage(
+            store.exchange,
+            verified.request_id,
+            hashlib.sha256(verified.body).hexdigest(),
+            verified.dataset_id,
+            verified.sender_id,
+            int(trust.epoch),
+            store_id,
+            operations,
+            acknowledgements,
+            received,
+            upper,
+            limit,
+            trust.endpoint_id,
+        )
+        signed_response = sign_frame_response(verified, 200, response_body, trust)
+        return Response(content=signed_response, media_type="application/json", headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        code = "requestTooLarge" if exc.status_code == 413 else "requestInvalid"
+        if verified is not None and trust is not None:
+            return Response(
+                content=sign_frame_response(verified, exc.status_code, b'{"error":"replication_request_rejected"}', trust),
+                status_code=exc.status_code,
+                media_type="application/json",
+                headers={"Cache-Control": "no-store"},
+            )
+        return _replication_error_response(code)
+    except ReplicationError as exc:
+        if verified is not None and trust is not None:
+            status_code = _replication_error_status(exc.code)
+            return Response(
+                content=sign_frame_response(verified, status_code, b'{"error":"replication_request_rejected"}', trust),
+                status_code=status_code,
+                media_type="application/json",
+                headers={"Cache-Control": "no-store"},
+            )
+        return _replication_error_response(exc.code)
+
+
+@app.get("/replication/v1/health")
+async def replication_health() -> Response:
+    return _replication_json({"schemaVersion": 1, "status": "ok"})
 
 
 @app.get("/health")

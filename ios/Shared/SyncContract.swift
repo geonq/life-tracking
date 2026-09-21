@@ -585,7 +585,21 @@ public struct SyncEndpoint: Codable, Equatable, Sendable {
     public let serverKeyID: String
     public let serverPublicKey: String
     public let approvedHost: String
-    public init(id: String, origin: URL, datasetID: String, epoch: String, serverKeyID: String, serverPublicKey: String, approvedHost: String) {
+    /// The pinned device roster used to authenticate nested replication records.
+    /// An empty roster is permitted for health-only/empty exchanges, but any
+    /// operation or acknowledgement response fails closed without it.
+    public let members: [SyncMember]
+
+    public init(
+        id: String,
+        origin: URL,
+        datasetID: String,
+        epoch: String,
+        serverKeyID: String,
+        serverPublicKey: String,
+        approvedHost: String,
+        members: [SyncMember] = []
+    ) {
         self.id = id
         self.origin = origin
         self.datasetID = datasetID
@@ -593,6 +607,23 @@ public struct SyncEndpoint: Codable, Equatable, Sendable {
         self.serverKeyID = serverKeyID
         self.serverPublicKey = serverPublicKey
         self.approvedHost = approvedHost
+        self.members = members
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, origin, datasetID, epoch, serverKeyID, serverPublicKey, approvedHost, members
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        origin = try container.decode(URL.self, forKey: .origin)
+        datasetID = try container.decode(String.self, forKey: .datasetID)
+        epoch = try container.decode(String.self, forKey: .epoch)
+        serverKeyID = try container.decode(String.self, forKey: .serverKeyID)
+        serverPublicKey = try container.decode(String.self, forKey: .serverPublicKey)
+        approvedHost = try container.decode(String.self, forKey: .approvedHost)
+        members = try container.decodeIfPresent([SyncMember].self, forKey: .members) ?? []
     }
 }
 

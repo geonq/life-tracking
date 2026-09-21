@@ -344,13 +344,18 @@ public enum SyncWireCodec {
         from data: Data,
         maximumBytes: Int = SyncContractConstants.maxBodyBytes,
         requiredKeys: Set<String>,
+        optionalKeys: Set<String> = [],
         validate: (T) throws -> Void
     ) throws -> T {
         guard data.count <= maximumBytes else { throw SyncFailure.capacity }
         var parser = SyncJSONParser(data: data)
         let tree = try parser.parse()
-        guard case .object(let fields) = tree,
-              Set(fields.map { $0.0 }) == requiredKeys else {
+        guard case .object(let fields) = tree else {
+            throw SyncFailure.invalidInput
+        }
+        let keys = Set(fields.map { $0.0 })
+        guard requiredKeys.isSubset(of: keys),
+              keys.isSubset(of: requiredKeys.union(optionalKeys)) else {
             throw SyncFailure.invalidInput
         }
         let value: T
@@ -478,6 +483,78 @@ public enum SyncWireCodec {
         }
     }
 
+    public static func publicKey(for member: SyncMember) throws -> Curve25519.Signing.PublicKey {
+        try SyncContractValidation.requireUUID(member.deviceID)
+        try SyncContractValidation.requireHash(member.keyID)
+        let raw: Data
+        do {
+            raw = try Data(syncBase64URL: member.publicKey)
+        } catch {
+            throw SyncFailure.membershipMismatch
+        }
+        guard raw.count == 32, sha256(raw) == member.keyID else {
+            throw SyncFailure.membershipMismatch
+        }
+        do {
+            return try Curve25519.Signing.PublicKey(rawRepresentation: raw)
+        } catch {
+            throw SyncFailure.membershipMismatch
+        }
+    }
+
+    /// Verify the device-signed records inside a server-authenticated response.
+    /// The outer response signature authenticates the gateway only; every
+    /// nested record still needs its enrolled device signature checked here.
+    public static func verifyResponseRecords(
+        _ response: SyncExchangeResponse,
+        endpoint: SyncEndpoint,
+        expectedStoreID: String
+    ) throws {
+        try SyncContractValidation.requireSchema(response.schemaVersion)
+        try SyncContractValidation.requireUUID(response.storeID)
+        try SyncContractValidation.requireUUID(expectedStoreID)
+        guard response.storeID == expectedStoreID,
+              response.operations.count <= SyncContractConstants.maxPageOperations,
+              response.acknowledgements.count <= SyncContractConstants.maxPageOperations else {
+            throw SyncFailure.membershipMismatch
+        }
+        var membersByDevice: [String: SyncMember] = [:]
+        var keyIDs = Set<String>()
+        for member in endpoint.members {
+            guard membersByDevice[member.deviceID] == nil,
+                  keyIDs.insert(member.keyID).inserted else {
+                throw SyncFailure.membershipMismatch
+            }
+            _ = try publicKey(for: member)
+            membersByDevice[member.deviceID] = member
+        }
+        guard response.operations.isEmpty && response.acknowledgements.isEmpty || !membersByDevice.isEmpty else {
+            throw SyncFailure.membershipMismatch
+        }
+        for operation in response.operations {
+            try validate(operation)
+            guard operation.datasetID == endpoint.datasetID,
+                  operation.epoch == endpoint.epoch,
+                  operation.storeID == expectedStoreID,
+                  let member = membersByDevice[operation.originID],
+                  member.keyID == operation.keyID else {
+                throw SyncFailure.membershipMismatch
+            }
+            try verifyOperation(operation, publicKey: try publicKey(for: member))
+        }
+        for acknowledgement in response.acknowledgements {
+            try validate(acknowledgement)
+            guard acknowledgement.datasetID == endpoint.datasetID,
+                  acknowledgement.epoch == endpoint.epoch,
+                  acknowledgement.storeID == expectedStoreID,
+                  let member = membersByDevice[acknowledgement.replicaID],
+                  member.keyID == acknowledgement.keyID else {
+                throw SyncFailure.membershipMismatch
+            }
+            try verifyAcknowledgement(acknowledgement, publicKey: try publicKey(for: member))
+        }
+    }
+
     public static func observationSigningBytes(for observation: SignedHealthObservation) throws -> Data {
         try validate(observation, signatureMayBeEmpty: true)
         let unsigned = SignedHealthObservation(
@@ -525,7 +602,8 @@ public enum SyncWireCodec {
             SyncOperation.self,
             from: data,
             maximumBytes: SyncContractConstants.maxOperationBytes,
-            requiredKeys: ["schemaVersion", "datasetID", "epoch", "storeID", "domain", "originID", "keyID", "sequence", "mutationID", "entityID", "parents", "baseHash", "kind", "payload", "signature"],
+            requiredKeys: ["schemaVersion", "datasetID", "epoch", "storeID", "domain", "originID", "keyID", "sequence", "mutationID", "entityID", "parents", "kind", "payload", "signature"],
+            optionalKeys: ["baseHash"],
             validate: { try validate($0) }
         )
     }

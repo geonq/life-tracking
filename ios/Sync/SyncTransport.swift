@@ -50,7 +50,7 @@ public actor SyncTransport {
             from: response,
             maximumBytes: SyncContractConstants.maxBodyBytes,
             requiredKeys: ["schemaVersion", "storeID", "results", "operations", "acknowledgements", "upper", "more"],
-            validate: { try Self.validate($0) }
+            validate: { try Self.validate($0, endpoint: endpoint, expectedStoreID: request.storeID) }
         )
     }
 
@@ -456,13 +456,18 @@ public actor SyncTransport {
         }
     }
 
-    private static func validate(_ response: SyncExchangeResponse) throws {
+    private static func validate(
+        _ response: SyncExchangeResponse,
+        endpoint: SyncEndpoint,
+        expectedStoreID: String
+    ) throws {
         try SyncContractValidation.requireSchema(response.schemaVersion)
         try SyncContractValidation.requireUUID(response.storeID)
         guard response.results.count <= 128,
               response.operations.count <= 128,
               response.acknowledgements.count <= 128 else { throw SyncFailure.capacity }
         try SyncWireCodec.validate(response.upper)
+        try SyncWireCodec.verifyResponseRecords(response, endpoint: endpoint, expectedStoreID: expectedStoreID)
     }
 
     private static func validate(_ value: AdminBlobPutResult20) throws {
