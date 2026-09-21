@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-21 Europe/Berlin. Release: NO-GO.
-Current checkpoint: 038cd37.
+Current checkpoint: 9d222ac.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -31,10 +31,19 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   frontiers, separate acknowledgement cursor progression, stream-head/index
   migration, and original-schema regression are covered. Focused suite: 21
   passed, one cryptography-dependent skip.
+- P03 calendar codec/target activation: e76be67. Strict bounded series payload,
+  deterministic ordering, wire-boundary NFC normalization, and icon hash-before-
+  ImageIO validation are checked in.
+- P03 durable calendar replication: 9d222ac. Calendar store/adapter/composition,
+  authenticated ACK separation, replay-anchor durability, safe compaction,
+  missing-parent conflict retention, frontier pagination safety, and focused
+  regressions are reviewed and pushed. API tests are 160/160; gateway is 23
+  passed with one crypto-dependent skip. Native Swift evidence is pending the
+  Xcode license gate.
 
 ## Ordered implementation
 
-1. P03 adapts calendar/finance stores; P04 adapts fitness, nutrition,
+1. P04 adapts finance, fitness, nutrition,
    supplements and lifestyle stores with local durability before acknowledgement.
 2. P05 reviews the eight D1 candidates against their exact design packet; P06
    adds native Canvas/inspector/vault integration only after P01/P05.
