@@ -3,7 +3,7 @@
 Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
 
 - Current source checkpoint: `4436211`; `main` and `origin/main` are synchronized.
-  `codex/p06-b` is synchronized with main at `6e353f1`.
+  `codex/p06-b` is synchronized with main.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
 - P01: shared sync contract/codec complete at `a21ccf3` + `673dc0a`.
