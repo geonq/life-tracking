@@ -84,6 +84,26 @@ public enum PlanningWorkspaceFailureCategory: String, Equatable, Sendable {
     case unknown
 }
 
+public enum PlanningInspectorNoteStatus: String, Equatable, Sendable {
+    case idle
+    case unsupported
+    case loading
+    case ready
+    case stale
+    case failed
+    case unavailable
+}
+
+public enum PlanningInspectorFailureCategory: String, Equatable, Sendable {
+    case unsupportedReference
+    case notFound
+    case unavailable
+    case contextMismatch
+    case readFailed
+    case decodeFailed
+    case unknown
+}
+
 private enum PlanningWorkspaceRetryIntent: Equatable {
     case restore
     case openPath(String)
@@ -91,6 +111,21 @@ private enum PlanningWorkspaceRetryIntent: Equatable {
 
 private struct PlanningWorkspacePresentationToken: Equatable, Sendable {
     let id: UUID
+}
+
+private struct PlanningInspectorReadRequest: Equatable, Sendable {
+    let id: UUID
+    let documentTokenID: UUID
+    let nodeID: String
+    let documentPath: PlanningStoredPath
+    let notePath: PlanningStoredPath
+    let accessContext: PlanningCanvasAccessContext
+}
+
+private struct PlanningInspectorReferenceRoute: Equatable, Sendable {
+    let path: PlanningStoredPath?
+    let markdownPath: PlanningStoredPath?
+    let fragment: String?
 }
 
 /// Read-only production adapter for the first mounted Canvas workspace. It
@@ -165,6 +200,17 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     @Published public private(set) var lastDiagnostic: PlanningDiagnostic?
     @Published public private(set) var isMounted = false
     @Published public var pathInput: String
+    @Published public private(set) var isInspectorPresented = false
+    @Published public private(set) var isInspectorNotePresented = false
+    @Published public private(set) var inspectorNode: PlanningCanvasNode?
+    @Published public private(set) var inspectorReference: String?
+    @Published public private(set) var inspectorReferencePath: PlanningStoredPath?
+    @Published public private(set) var inspectorNotePath: PlanningStoredPath?
+    @Published public private(set) var inspectorReferenceFragment: String?
+    @Published public private(set) var inspectorNoteSource: String?
+    @Published public private(set) var inspectorNoteStatus: PlanningInspectorNoteStatus = .idle
+    @Published public private(set) var inspectorError: String?
+    @Published public private(set) var inspectorFailure: PlanningInspectorFailureCategory?
 
     private let coordinatorID = UUID()
     private let workspaceKey: String
@@ -175,6 +221,12 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     private var cleanupID: UUID?
     private var retryIntent: PlanningWorkspaceRetryIntent = .restore
     private var presentationTokenID = UUID()
+    private var inspectorDocumentTokenID = UUID()
+    private var inspectorRequest: PlanningInspectorReadRequest?
+    private var inspectorProject: PlanningProjectCoordinator?
+    private var inspectorTask: Task<Void, Never>?
+    private var inspectorReadsBlocked = false
+    private var inspectorSelection: AnyCancellable?
 #if DEBUG
     /// Test-only suspension point for exercising generation and teardown races
     /// against the real store/session pipeline. It is absent from release code.
@@ -184,6 +236,9 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     internal var beforeRetryOpen: (@Sendable () async -> Void)?
     /// Test-only suspension point before the non-supersedable store cleanup.
     internal var beforeCleanupClose: (@Sendable () async -> Void)?
+    /// Test-only suspension point before a candidate inspector session reads.
+    internal var beforeInspectorRead: (@Sendable () async -> Void)?
+    internal var afterInspectorRead: (@Sendable () async -> Void)?
 #endif
 
     public init(
@@ -326,7 +381,8 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     private func startRestore(
         ownedBy token: PlanningWorkspacePresentationToken
     ) -> Task<Void, Never> {
-        schedule { [weak self] generation in
+        invalidateInspectorWork()
+        return schedule { [weak self] generation in
             guard let self else { return }
             guard self.ownsPresentation(token) else { return }
             self.project = nil
@@ -359,6 +415,7 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     }
 
     public func attach(_ selection: PlanningUserSelectedDirectory) async {
+        invalidateInspectorWork()
         let token = beginPresentationOperation()
         retryIntent = .restore
         project = nil
@@ -405,6 +462,7 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     }
 
     public func openCanvas(relativePath: String) async {
+        invalidateInspectorWork()
         let token = beginPresentationOperation()
         pathInput = relativePath
         retryIntent = .openPath(relativePath)
@@ -469,6 +527,227 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
         }
     }
 
+    public func inspectNode(id: String) {
+        guard let project,
+              let node = project.nodesByID[id] else { return }
+
+        invalidateInspectorWork()
+        project.selectNode(id)
+        let route = inspectorReferenceRoute(for: node.file)
+        inspectorProject = project
+        inspectorNode = node
+        inspectorReference = node.file
+        inspectorReferencePath = route?.path
+        inspectorNotePath = route?.markdownPath
+        inspectorReferenceFragment = route?.fragment
+        inspectorNoteSource = nil
+        inspectorError = nil
+        inspectorFailure = nil
+        isInspectorPresented = true
+        isInspectorNotePresented = false
+        // Published delivers in willSet; use the emitted value, not the old
+        // stored selection. Keep invalidation independent of SwiftUI mounting.
+        inspectorSelection = project.$selectedNodeID.sink { [weak self] selectedID in
+            guard selectedID != id else { return }
+            self?.closeInspector()
+        }
+
+        if node.file == nil {
+            inspectorNoteStatus = .idle
+        } else if route?.markdownPath != nil {
+            inspectorNoteStatus = .idle
+        } else {
+            inspectorNoteStatus = .unsupported
+            inspectorFailure = .unsupportedReference
+            inspectorError = "Open note is available only for a validated LifeOS Markdown reference."
+        }
+    }
+
+    public func openSelectedNodeNote() async {
+        guard isInspectorPresented,
+              !inspectorReadsBlocked,
+              let project,
+              let node = project.selectedNode,
+              node.id == inspectorNode?.id,
+              let notePath = inspectorNotePath,
+              notePath.isMarkdown else {
+            return
+        }
+        guard let documentPath = openedPath,
+              let accessContext = inspectorAccessContext() else {
+            blockInspectorReads(
+                error: PlanningFilesystemError.needsReselection
+            )
+            return
+        }
+
+        isInspectorNotePresented = true
+        await readInspectorNote(
+            nodeID: node.id,
+            documentPath: documentPath,
+            notePath: notePath,
+            accessContext: accessContext
+        )
+    }
+
+    public func refreshInspectorNote() async {
+        guard isInspectorPresented,
+              !inspectorReadsBlocked,
+              isInspectorNotePresented,
+              let project,
+              let node = project.selectedNode,
+              node.id == inspectorNode?.id,
+              let documentPath = openedPath,
+              let notePath = inspectorNotePath,
+              notePath.isMarkdown else {
+            return
+        }
+
+        guard let accessContext = inspectorAccessContext() else {
+            blockInspectorReads(error: PlanningFilesystemError.needsReselection)
+            return
+        }
+
+        await readInspectorNote(
+            nodeID: node.id,
+            documentPath: documentPath,
+            notePath: notePath,
+            accessContext: accessContext
+        )
+    }
+
+    public func closeInspectorNote() {
+        inspectorTask?.cancel()
+        inspectorTask = nil
+        inspectorRequest = nil
+        isInspectorNotePresented = false
+        inspectorNoteSource = nil
+        inspectorError = nil
+        inspectorFailure = nil
+        inspectorNoteStatus = inspectorNotePath?.isMarkdown == true ? .idle : .unsupported
+    }
+
+    public func closeInspector() {
+        invalidateInspectorWork()
+    }
+
+    private func readInspectorNote(
+        nodeID: String,
+        documentPath: PlanningStoredPath,
+        notePath: PlanningStoredPath,
+        accessContext: PlanningCanvasAccessContext
+    ) async {
+        inspectorTask?.cancel()
+        inspectorTask = nil
+
+        let priorPath = inspectorNotePath
+        let priorSource = inspectorNoteSource
+        if priorPath != notePath {
+            inspectorNoteSource = nil
+        }
+        inspectorNoteStatus = .loading
+        inspectorError = nil
+        inspectorFailure = nil
+
+        let request = PlanningInspectorReadRequest(
+            id: UUID(),
+            documentTokenID: inspectorDocumentTokenID,
+            nodeID: nodeID,
+            documentPath: documentPath,
+            notePath: notePath,
+            accessContext: accessContext
+        )
+        inspectorRequest = request
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let persistence = PlanningReadOnlyCanvasPersistence(store: self.store)
+            let candidate = PlanningCanvasSession(
+                path: notePath,
+                context: accessContext,
+                persistence: persistence
+            )
+            do {
+#if DEBUG
+                if let beforeInspectorRead {
+                    await beforeInspectorRead()
+                }
+#endif
+                guard self.isCurrentInspectorRequest(request) else { return }
+                try await candidate.load()
+                guard self.isCurrentInspectorRequest(request) else { return }
+
+#if DEBUG
+                if let afterInspectorRead { await afterInspectorRead() }
+#endif
+                guard self.isCurrentInspectorRequest(request) else { return }
+                let currentContext = try await persistence.context()
+                guard self.isCurrentInspectorRequest(request) else { return }
+                guard currentContext == accessContext else {
+                    self.blockInspectorReads(
+                        error: PlanningCanvasSessionError.staleGeneration
+                    )
+                    return
+                }
+                guard self.isCurrentInspectorRequest(request) else { return }
+
+                guard candidate.path == notePath,
+                      let state = candidate.currentState,
+                      state.markdownPath?.value == notePath.value,
+                      let source = state.markdownSource else {
+                    throw PlanningFilesystemError.malformedDocument
+                }
+
+                if candidate.state == .ready {
+                    self.inspectorNoteSource = source
+                    self.inspectorNoteStatus = .ready
+                    self.inspectorError = nil
+                    self.inspectorFailure = nil
+                } else if candidate.state == .unavailable {
+                    // A bounded cache read is useful as a preview, but it is
+                    // never promoted to a current note.
+                    self.inspectorNoteSource = source
+                    self.inspectorNoteStatus = .stale
+                    self.inspectorError = "This note preview is stale and may be from the local cache."
+                    self.inspectorFailure = .unavailable
+                } else {
+                    throw PlanningFilesystemError.unavailable("inspector")
+                }
+            } catch {
+                guard self.isCurrentInspectorRequest(request) else { return }
+                // Even a failed read must revalidate authority before retaining
+                // a previous preview: the store can change while it is awaited.
+                do {
+                    let currentContext = try await persistence.context()
+                    guard self.isCurrentInspectorRequest(request) else { return }
+                    guard currentContext == accessContext else {
+                        self.blockInspectorReads(error: PlanningCanvasSessionError.staleGeneration)
+                        return
+                    }
+                } catch {
+                    guard self.isCurrentInspectorRequest(request) else { return }
+                    self.blockInspectorReads(error: error)
+                    return
+                }
+                if self.isInspectorAuthorityLoss(error) {
+                    self.blockInspectorReads(error: error)
+                } else {
+                    self.recordInspectorFailure(
+                        error,
+                        notePath: notePath,
+                        priorPath: priorPath,
+                        priorSource: priorSource
+                    )
+                }
+            }
+            if self.inspectorRequest == request {
+                self.inspectorTask = nil
+            }
+        }
+        inspectorTask = task
+        await task.value
+    }
+
     /// Unmounts the Canvas immediately, then serializes the final presentation
     /// reconciliation behind any in-flight store operation. Store authority
     /// remains available until the workspace is suspended or another vault is
@@ -520,7 +799,176 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
         await task.value
     }
 
+    private func inspectorAccessContext() -> PlanningCanvasAccessContext? {
+        guard accessSnapshot.state == .ready,
+              let vaultID = accessSnapshot.vaultID,
+              let selectionGeneration = accessSnapshot.selectionGeneration else {
+            return nil
+        }
+        return PlanningCanvasAccessContext(
+            vaultID: vaultID,
+            selectionGeneration: selectionGeneration
+        )
+    }
+
+    private func inspectorReferenceRoute(for reference: String?) -> PlanningInspectorReferenceRoute? {
+        guard let reference else { return nil }
+        guard reference.hasPrefix("LifeOS/") else {
+            return PlanningInspectorReferenceRoute(
+                path: nil,
+                markdownPath: nil,
+                fragment: nil
+            )
+        }
+
+        let suffixWithFragment = String(reference.dropFirst("LifeOS/".count))
+        let suffix: String
+        let fragment: String?
+        if let separator = suffixWithFragment.firstIndex(of: "#") {
+            suffix = String(suffixWithFragment[..<separator])
+            fragment = String(suffixWithFragment[suffixWithFragment.index(after: separator)...])
+        } else {
+            suffix = suffixWithFragment
+            fragment = nil
+        }
+
+        guard let path = try? PlanningStoredPath(suffix) else {
+            return PlanningInspectorReferenceRoute(
+                path: nil,
+                markdownPath: nil,
+                fragment: fragment
+            )
+        }
+        return PlanningInspectorReferenceRoute(
+            path: path,
+            markdownPath: path.isMarkdown ? path : nil,
+            fragment: fragment
+        )
+    }
+
+    private func isCurrentInspectorRequest(_ request: PlanningInspectorReadRequest) -> Bool {
+        guard !Task.isCancelled,
+              isInspectorPresented,
+              isInspectorNotePresented,
+              !inspectorReadsBlocked,
+              inspectorDocumentTokenID == request.documentTokenID,
+              inspectorRequest == request,
+              let project,
+              project === inspectorProject,
+              project.selectedNodeID == request.nodeID,
+              openedPath == request.documentPath,
+              accessSnapshot.vaultID == request.accessContext.vaultID,
+              accessSnapshot.selectionGeneration == request.accessContext.selectionGeneration else {
+            return false
+        }
+        return true
+    }
+
+    private func invalidateInspectorWork() {
+        inspectorSelection?.cancel()
+        inspectorSelection = nil
+        inspectorDocumentTokenID = UUID()
+        inspectorRequest = nil
+        inspectorTask?.cancel()
+        inspectorTask = nil
+        inspectorProject = nil
+        inspectorReadsBlocked = false
+        isInspectorPresented = false
+        isInspectorNotePresented = false
+        inspectorNode = nil
+        inspectorReference = nil
+        inspectorReferencePath = nil
+        inspectorNotePath = nil
+        inspectorReferenceFragment = nil
+        inspectorNoteSource = nil
+        inspectorNoteStatus = .idle
+        inspectorError = nil
+        inspectorFailure = nil
+    }
+
+    private func blockInspectorReads(error: Error) {
+        inspectorRequest = nil
+        inspectorTask = nil
+        inspectorReadsBlocked = true
+        inspectorNoteSource = nil
+        inspectorNoteStatus = .unavailable
+        inspectorError = inspectorErrorDescription(for: error)
+        inspectorFailure = .contextMismatch
+    }
+
+    private func recordInspectorFailure(
+        _ error: Error,
+        notePath: PlanningStoredPath,
+        priorPath: PlanningStoredPath?,
+        priorSource: String?
+    ) {
+        let canRetainPriorPreview = priorPath == notePath && priorSource != nil
+        if canRetainPriorPreview {
+            inspectorNoteSource = priorSource
+            inspectorNoteStatus = .stale
+        } else {
+            inspectorNoteSource = nil
+            inspectorNoteStatus = .failed
+        }
+        inspectorError = inspectorErrorDescription(for: error)
+        inspectorFailure = inspectorFailureCategory(for: error)
+    }
+
+    private func isInspectorAuthorityLoss(_ error: Error) -> Bool {
+        if let error = error as? PlanningCanvasSessionError {
+            if case .staleGeneration = error { return true }
+        }
+        if let error = error as? PlanningFilesystemError {
+            switch error {
+            case .unselected, .needsReselection, .permissionDenied, .identityChanged:
+                return true
+            default:
+                return false
+            }
+        }
+        if let error = error as? PlanningStorageError {
+            switch error {
+            case .staleAccess, .closed:
+                return true
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
+    private func inspectorFailureCategory(for error: Error) -> PlanningInspectorFailureCategory {
+        if let error = error as? PlanningFilesystemError {
+            switch error {
+            case .notFound: return .notFound
+            case .unselected, .needsReselection, .permissionDenied, .identityChanged,
+                 .providerOffline, .notDownloaded, .unavailable:
+                return .unavailable
+            case .malformedDocument: return .decodeFailed
+            default: return .readFailed
+            }
+        }
+        if error is PlanningValidationError {
+            return .decodeFailed
+        }
+        if error is PlanningCanvasSessionError {
+            return .readFailed
+        }
+        if error is PlanningStorageError {
+            return .readFailed
+        }
+        return .unknown
+    }
+
+    private func inspectorErrorDescription(for error: Error) -> String {
+        if let localized = (error as? LocalizedError)?.errorDescription {
+            return localized
+        }
+        return String(describing: error)
+    }
+
     private func invalidatePresentation(markIdle: Bool = false) {
+        invalidateInspectorWork()
         presentationTokenID = UUID()
         operationGeneration &+= 1
         project = nil
@@ -612,6 +1060,7 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     }
 
     private func beginPresentationOperation() -> PlanningWorkspacePresentationToken {
+        invalidateInspectorWork()
         let token = PlanningWorkspacePresentationToken(id: UUID())
         presentationTokenID = token.id
         return token

@@ -269,6 +269,11 @@ public final class PlanningProjectCoordinator: ObservableObject {
         selectedNodeID = id
     }
 
+    public var selectedNode: PlanningCanvasNode? {
+        guard let selectedNodeID else { return nil }
+        return nodesByID[selectedNodeID]
+    }
+
     /// Starts a drag preview. No session interaction, index rebuild, or write
     /// occurs here; all document work is deferred to commitNodeDrag().
     @discardableResult
@@ -681,6 +686,7 @@ public final class PlanningProjectCoordinator: ObservableObject {
         document = nil
         cacheDocument = nil
         cachedRevision = nil
+        selectedNodeID = nil
         nodesByID.removeAll(keepingCapacity: false)
         edgesByID.removeAll(keepingCapacity: false)
         nodeSourceOrdinals.removeAll(keepingCapacity: false)

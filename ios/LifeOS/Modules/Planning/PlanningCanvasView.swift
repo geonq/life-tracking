@@ -99,11 +99,16 @@ public struct PlanningCanvasInputLifecycle: Equatable {
 /// Calendar/vault routing and node creation remain outside this component.
 public struct PlanningCanvasView: View {
     @ObservedObject private var coordinator: PlanningProjectCoordinator
+    private let onInspect: (() -> Void)?
     @State private var viewport = PlanningCanvasViewport()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    public init(coordinator: PlanningProjectCoordinator) {
+    public init(
+        coordinator: PlanningProjectCoordinator,
+        onInspect: (() -> Void)? = nil
+    ) {
         self.coordinator = coordinator
+        self.onInspect = onInspect
     }
 
     public var body: some View {
@@ -146,6 +151,10 @@ public struct PlanningCanvasView: View {
                 toolbar(in: proxy.size)
             }
             .background(LifeOSTokens.canvas)
+            .accessibilityAction(named: Text("Inspect selected node")) {
+                guard coordinator.selectedNodeID != nil else { return }
+                onInspect?()
+            }
             .onDisappear {
                 coordinator.cancelNodeDrag()
             }
@@ -257,15 +266,23 @@ public struct PlanningCanvasView: View {
             toolbarButton("arrow.up.left.and.arrow.down.right", label: "Fit") {
                 fit(in: size)
             }
-            toolbarButton("arrow.uturn.backward", label: "Undo") {
-                runAsyncAction {
-                    _ = try await coordinator.undo()
+            if coordinator.allowsEditing {
+                toolbarButton("arrow.uturn.backward", label: "Undo") {
+                    runAsyncAction {
+                        _ = try await coordinator.undo()
+                    }
+                }
+                toolbarButton("arrow.uturn.forward", label: "Redo") {
+                    runAsyncAction {
+                        _ = try await coordinator.redo()
+                    }
                 }
             }
-            toolbarButton("arrow.uturn.forward", label: "Redo") {
-                runAsyncAction {
-                    _ = try await coordinator.redo()
+            if let onInspect {
+                toolbarButton("info.circle", label: "Inspect selected node") {
+                    onInspect()
                 }
+                .disabled(coordinator.selectedNodeID == nil)
             }
             if coordinator.retryMode != .none {
                 toolbarButton(

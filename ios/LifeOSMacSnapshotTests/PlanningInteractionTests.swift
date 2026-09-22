@@ -131,6 +131,14 @@ private actor P06PersistenceSpy: PlanningCanvasPersistence {
     }
 }
 
+private struct PlanningInteractionWorkspaceFixture {
+    let root: URL
+    let support: URL
+    let selection: PlanningUserSelectedDirectory
+    let store: PlanningVaultStore
+    let ownerID: UUID
+}
+
 @MainActor
 final class PlanningInteractionTests: XCTestCase {
     func testViewportRoundTripFocalZoomFitAndInvalidInput() {
@@ -296,6 +304,114 @@ final class PlanningInteractionTests: XCTestCase {
 
         XCTAssertFalse(lifecycle.isInputActive)
         XCTAssertFalse(lifecycle.isSpacePressed)
+    }
+
+    func testReadOnlySelectionCanRequestInspectionWithoutMutation() async throws {
+        let fixture = try interactionFixture()
+        registerTeardown(for: fixture)
+        let node = try PlanningCanvasNode(
+            id: "note",
+            type: .file,
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 100,
+            file: "LifeOS/Projects/Note.md"
+        )
+        try writeInteractionCanvas(fixture, nodes: [node])
+
+        let workspace = PlanningWorkspaceCoordinator(
+            store: fixture.store,
+            localGrantOwnerID: fixture.ownerID
+        )
+        await workspace.attach(fixture.selection)
+        await workspace.openCanvas(relativePath: "Projects/Personal.canvas")
+        let project = try XCTUnwrap(workspace.project)
+        project.selectNode("note")
+
+        var inspectionRequested = false
+        let requestInspection = {
+            inspectionRequested = true
+            workspace.inspectNode(id: "note")
+        }
+        _ = PlanningCanvasView(coordinator: project, onInspect: requestInspection).body
+        requestInspection()
+
+        XCTAssertTrue(inspectionRequested)
+        XCTAssertTrue(workspace.isInspectorPresented)
+        XCTAssertEqual(project.selectedNode?.id, "note")
+        XCTAssertFalse(project.canEdit)
+        XCTAssertFalse(project.beginNodeDrag(id: "note"))
+        let status = try await fixture.store.status()
+        XCTAssertEqual(status.pendingMutationCount, 0)
+    }
+
+    func testAccessContextInvalidationClearsSelectedNode() async throws {
+        let context = PlanningCanvasAccessContext(vaultID: UUID(), selectionGeneration: UUID())
+        let node = try makeNode(id: "node", x: 0, y: 0)
+        let spy = try P06PersistenceSpy(
+            document: try PlanningCanvasDocument(nodes: [node], edges: []),
+            context: context
+        )
+        let session = PlanningCanvasSession(
+            path: try PlanningStoredPath("Projects/P06.canvas"),
+            context: context,
+            persistence: spy
+        )
+        let coordinator = PlanningProjectCoordinator(
+            session: session,
+            accessContext: context,
+            allowsEditing: false
+        )
+        try await coordinator.open()
+        coordinator.selectNode("node")
+        XCTAssertEqual(coordinator.selectedNode?.id, "node")
+
+        coordinator.updateAccessContext(
+            PlanningCanvasAccessContext(
+                vaultID: context.vaultID,
+                selectionGeneration: UUID()
+            )
+        )
+
+        XCTAssertNil(coordinator.selectedNodeID)
+        XCTAssertNil(coordinator.selectedNode)
+        XCTAssertTrue(coordinator.nodesByID.isEmpty)
+        let counts = await spy.counts()
+        XCTAssertEqual(counts.stage, 0)
+        XCTAssertEqual(counts.publish, 0)
+    }
+
+    func testInspectorDismissalPreservesCanvasSelection() async throws {
+        let fixture = try interactionFixture()
+        registerTeardown(for: fixture)
+        let node = try PlanningCanvasNode(
+            id: "note",
+            type: .file,
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 100,
+            file: "LifeOS/Projects/Note.md"
+        )
+        try writeInteractionCanvas(fixture, nodes: [node])
+
+        let workspace = PlanningWorkspaceCoordinator(
+            store: fixture.store,
+            localGrantOwnerID: fixture.ownerID
+        )
+        await workspace.attach(fixture.selection)
+        await workspace.openCanvas(relativePath: "Projects/Personal.canvas")
+        let project = try XCTUnwrap(workspace.project)
+        project.selectNode("note")
+        workspace.inspectNode(id: "note")
+        XCTAssertTrue(workspace.isInspectorPresented)
+
+        workspace.closeInspector()
+
+        XCTAssertFalse(workspace.isInspectorPresented)
+        XCTAssertEqual(project.selectedNodeID, "note")
+        XCTAssertEqual(project.selectedNode?.id, "note")
     }
 
     func testPreviewUpdatesDoNotTouchPersistenceOrRebuildIndex() async throws {
@@ -686,6 +802,54 @@ final class PlanningInteractionTests: XCTestCase {
         try await reloaded.open()
         XCTAssertEqual(reloaded.nodesByID["node"]?.unknownFields, node.unknownFields)
         XCTAssertNotNil(PlanningCanvasView(coordinator: reloaded).body)
+    }
+
+    private func interactionFixture() throws -> PlanningInteractionWorkspaceFixture {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lifeos-p06b-interaction-vault-\(UUID().uuidString)", isDirectory: true)
+        let support = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lifeos-p06b-interaction-support-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+
+        let vaultID = UUID()
+        _ = try PlanningSafeFileIO.initializeLifeOS(at: root, vaultID: vaultID)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("LifeOS/Projects", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        let store = try PlanningVaultStore.makeTesting(
+            rootURL: root,
+            applicationSupportDirectory: support,
+            deviceID: vaultID
+        )
+        return PlanningInteractionWorkspaceFixture(
+            root: root,
+            support: support,
+            selection: try PlanningUserSelectedDirectory.testFactory(url: root),
+            store: store,
+            ownerID: vaultID
+        )
+    }
+
+    private func registerTeardown(for fixture: PlanningInteractionWorkspaceFixture) {
+        addTeardownBlock {
+            await fixture.store.close()
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at: fixture.support)
+        }
+    }
+
+    private func writeInteractionCanvas(
+        _ fixture: PlanningInteractionWorkspaceFixture,
+        nodes: [PlanningCanvasNode]
+    ) throws {
+        let document = try PlanningCanvasDocument(nodes: nodes, edges: [])
+        let bytes = try PlanningCanvasCodec.encode(document)
+        try bytes.write(
+            to: fixture.root.appendingPathComponent("LifeOS/Projects/Personal.canvas"),
+            options: .atomic
+        )
     }
 
     private func makeNode(

@@ -248,7 +248,10 @@ public struct PlanningWorkspaceView: View {
                 }
                 .padding(.horizontal, LifeOSTokens.Space.md)
                 .padding(.vertical, LifeOSTokens.Space.xs)
-                PlanningCanvasView(coordinator: project)
+                PlanningWorkspaceCanvasContent(
+                    workspace: coordinator,
+                    project: project
+                )
             }
         } else {
             progressState
@@ -342,6 +345,246 @@ public struct PlanningWorkspaceView: View {
             }
         }
 #endif
+    }
+}
+
+private struct PlanningWorkspaceCanvasContent: View {
+    @ObservedObject var workspace: PlanningWorkspaceCoordinator
+    @ObservedObject var project: PlanningProjectCoordinator
+
+    var body: some View {
+        canvasSurface
+    }
+
+    @ViewBuilder
+    private var canvasSurface: some View {
+#if os(macOS)
+        HStack(spacing: 0) {
+            PlanningCanvasView(coordinator: project, onInspect: inspectSelectedNode)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if workspace.isInspectorPresented {
+                Divider()
+                PlanningWorkspaceInspectorView(workspace: workspace)
+                    .frame(minWidth: 300, idealWidth: 340, maxWidth: 420)
+            }
+        }
+#elseif os(iOS)
+        PlanningCanvasView(coordinator: project, onInspect: inspectSelectedNode)
+            .sheet(
+                isPresented: Binding(
+                    get: { workspace.isInspectorPresented },
+                    set: { presented in
+                        if !presented {
+                            workspace.closeInspector()
+                        }
+                    }
+                )
+            ) {
+                PlanningWorkspaceInspectorView(workspace: workspace)
+                    .presentationDetents([.medium, .large])
+            }
+#else
+        PlanningCanvasView(coordinator: project, onInspect: inspectSelectedNode)
+#endif
+    }
+
+    private func inspectSelectedNode() {
+        guard let selectedNodeID = project.selectedNodeID else { return }
+        workspace.inspectNode(id: selectedNodeID)
+    }
+}
+
+private struct PlanningWorkspaceInspectorView: View {
+    @ObservedObject var workspace: PlanningWorkspaceCoordinator
+
+    var body: some View {
+        Group {
+            if workspace.isInspectorNotePresented {
+                notePreview
+            } else {
+                metadata
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(LifeOSTokens.surface)
+    }
+
+    private var metadata: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
+                inspectorHeader(title: "Inspect node", leadingTitle: nil) {
+                    workspace.closeInspector()
+                }
+
+                if let node = workspace.inspectorNode {
+                    metadataRow("Type", node.type.rawValue.capitalized)
+                    metadataRow("Node ID", node.id)
+
+                    if let text = node.text {
+                        metadataRow("Text", text)
+                    }
+                    if let label = node.label {
+                        metadataRow("Label", label)
+                    }
+                    if let background = node.background {
+                        metadataRow("Background", background)
+                    }
+                    if let backgroundStyle = node.backgroundStyle {
+                        metadataRow("Background style", backgroundStyle)
+                    }
+                    if let reference = workspace.inspectorReference {
+                        metadataRow("File reference", reference)
+                    }
+                    if let path = workspace.inspectorReferencePath {
+                        metadataRow("Relative path", path.value)
+                    }
+                    if let fragment = workspace.inspectorReferenceFragment {
+                        metadataRow("Fragment", "#\(fragment)")
+                    }
+                    if let url = node.url {
+                        metadataRow("URL", url)
+                    }
+
+                    if workspace.inspectorNotePath != nil {
+                        Button("Open note") {
+                            Task { await workspace.openSelectedNodeNote() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("planning-inspector-open-note")
+                    } else if workspace.inspectorReference != nil {
+                        Text("This reference is metadata only.")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(LifeOSTokens.secondaryText)
+                    }
+                } else {
+                    Text("No node selected")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                }
+            }
+            .padding(LifeOSTokens.Space.lg)
+        }
+    }
+
+    private var notePreview: some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
+            inspectorHeader(title: "Note preview", leadingTitle: "Back") {
+                workspace.closeInspectorNote()
+            }
+
+            if let path = workspace.inspectorNotePath {
+                Text("LifeOS/\(path.value)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .textSelection(.enabled)
+            }
+            if let fragment = workspace.inspectorReferenceFragment {
+                Text("Reference fragment: #\(fragment) (display only)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+            }
+
+            inspectorNoteStatus
+
+            if let source = workspace.inspectorNoteSource {
+                ScrollView([.vertical, .horizontal]) {
+                    Text(source)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(LifeOSTokens.primaryText)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(LifeOSTokens.Space.sm)
+                }
+                .background(LifeOSTokens.canvas, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
+                }
+            } else {
+                Spacer(minLength: 0)
+            }
+
+            Button("Refresh") {
+                Task { await workspace.refreshInspectorNote() }
+            }
+            .buttonStyle(.bordered)
+            .disabled(workspace.inspectorNoteStatus == .loading || workspace.inspectorNoteStatus == .unavailable)
+            .accessibilityIdentifier("planning-inspector-refresh")
+        }
+        .padding(LifeOSTokens.Space.lg)
+    }
+
+    private var inspectorNoteStatus: some View {
+        HStack(spacing: LifeOSTokens.Space.xs) {
+            switch workspace.inspectorNoteStatus {
+            case .loading:
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading note…")
+            case .ready:
+                Label("Current read", systemImage: "checkmark.circle")
+            case .stale:
+                Label("Stale preview", systemImage: "exclamationmark.triangle")
+            case .failed:
+                Label("Could not read note", systemImage: "xmark.circle")
+            case .unavailable:
+                Label("Note access unavailable", systemImage: "icloud.slash")
+            case .idle, .unsupported:
+                EmptyView()
+            }
+            if let error = workspace.inspectorError,
+               workspace.inspectorNoteStatus != .loading {
+                Text(error)
+                    .lineLimit(2)
+            }
+        }
+        .font(.system(size: 12, weight: .medium))
+        .foregroundStyle(noteStatusColor)
+    }
+
+    private var noteStatusColor: Color {
+        switch workspace.inspectorNoteStatus {
+        case .ready: return LifeOSTokens.success
+        case .stale, .loading: return LifeOSTokens.warning
+        case .failed, .unavailable: return LifeOSTokens.danger
+        case .idle, .unsupported: return LifeOSTokens.secondaryText
+        }
+    }
+
+    private func inspectorHeader(
+        title: String,
+        leadingTitle: String?,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: LifeOSTokens.Space.sm) {
+            if let leadingTitle {
+                Button(leadingTitle, action: action)
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("planning-inspector-back")
+            }
+            Text(title)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(LifeOSTokens.primaryText)
+            Spacer(minLength: LifeOSTokens.Space.xs)
+            if leadingTitle == nil {
+                Button("Close", action: action)
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("planning-inspector-close")
+            }
+        }
+    }
+
+    private func metadataRow(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title.uppercased())
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(LifeOSTokens.metadataText)
+            Text(value)
+                .font(.system(size: 13))
+                .foregroundStyle(LifeOSTokens.primaryText)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
