@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
-Current source checkpoint: 433ea64; main and origin/main are synchronized.
+Current source checkpoint: 1df4642; main and origin/main are synchronized.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -89,12 +89,19 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   medium READY TO CHECKPOINT. Swift parsing and both arm64 build-for-testing
   lanes pass; testmanagerd/CoreSimulator blocked runtime picker evidence.
 
+- P06-B picker lifecycle hardening: `1df4642`. Astra medium found no P0–P3
+  issue after correction. AppKit sheet completion ownership, UIKit ancestor-safe
+  dismissal, pre-presentation cancellation, static owner-token teardown,
+  SwiftUI task gating, retry disabling, and sanitized picker errors are pushed.
+  macOS and iPhone 17 arm64 build-for-testing pass; mounted/runtime evidence is
+  still open. The next exact contract is `tasks/p06b-mounted-picker-plan.md`.
+
 ## Ordered implementation
 
 1. P04 adapts finance, fitness, nutrition,
    supplements and lifestyle stores with local durability before acknowledgement.
-2. P06-B continues with mounted picker presentation and a real-vault round trip
-   after the accepted chooser checkpoint; no worker may guess CP-B adapter
+2. P06-B continues with mounted picker probes and a real-vault round trip from
+   `tasks/p06b-mounted-picker-plan.md`; no worker may guess CP-B adapter
    identities.
 3. P07 shared visual/motion primitives; P08 calendar; P09 finance; P10 fitness;
    P11 HealthKit/Zepp provenance; P12 usage; P13 tax; P14 widgets/intents.

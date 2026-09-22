@@ -181,3 +181,18 @@ Updated 2026-09-22 Europe/Berlin.
 - Swift parsing, macOS and iPhone 17 arm64 build-for-testing passed. Mac test
   execution was blocked by testmanagerd sandboxing and the iOS focused run by
   CoreSimulator refusal; mounted picker/viewport runtime evidence is pending.
+
+## 2026-09-22 P06-B mounted picker hardening
+
+- `1df4642` is pushed on `main` and `origin/main` after Astra medium's final
+  source gate. The native picker now retains AppKit ownership through sheet
+  completion, dismisses the owned UIKit picker through its actual relationship,
+  returns nil for pre-presentation cancellation, and uses static representable
+  teardown with owner tokens.
+- SwiftUI refuses overlapping picker tasks, disables all competing open/retry
+  controls while a picker is active, clears document tickets on teardown, and
+  surfaces sanitized picker errors. Folder/document public APIs and
+  `asCopy: false` remain unchanged.
+- Mac and iPhone 17 arm64 build-for-testing passed. Native mounted picker,
+  interactive dismissal, viewport, and real-vault no-mutation evidence remain
+  pending; the exact next contract is `tasks/p06b-mounted-picker-plan.md`.

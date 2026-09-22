@@ -15,9 +15,9 @@ evidence are still open.
 
 ## Current truth
 
-- `main` and `origin/main` are synchronized at source checkpoint `433ea64`;
-  the transaction workspace is `86baaa8`, the inspector is `454f4d1`, and the
-  chooser is `433ea64` in that history.
+- `main` and `origin/main` are synchronized at source checkpoint `1df4642`;
+  the transaction workspace is `86baaa8`, the inspector is `454f4d1`, the
+  chooser is `433ea64`, and picker hardening is `1df4642` in that history.
 - `codex/p06-b` is synchronized with the same source and documentation state.
 - The P00 ledger remains acceptance truth: 258 leaves, 7 aliases, pending evidence.
 - P01: `a21ccf3`, `673dc0a`; P02: `038cd37`; P03 durable calendar: `9d222ac`.
@@ -40,6 +40,10 @@ evidence are still open.
   preserves the mounted Canvas on cancellation/failure, and routes Markdown to
   a read-only preview. It adds no enumeration, indexing, network, vault write,
   or CP-B behavior.
+- `1df4642` hardens the native picker lifetime: no overlapping SwiftUI picker
+  task, owner-token guarded representable teardown, ancestor-safe iOS dismissal,
+  exactly-once cancellation, and AppKit sheet completion ownership. The
+  bounded next plan is `tasks/p06b-mounted-picker-plan.md`.
 
 ## Evidence
 
@@ -71,13 +75,19 @@ evidence are still open.
   service refused the focused run. The generic x86_64 simulator build still
   has the pre-existing `PlanningGraphTests` type-check failure. These are
   qualified environment/build facts, not runtime acceptance.
+- The picker hardening patch passed Astra's final source gate, Swift parsing,
+  macOS `LifeOSMacLogic` build-for-testing, and iPhone 17 arm64
+  `LifeOSLogic` build-for-testing. Native mounted presentation, interactive
+  dismissal, viewport preservation, and real-vault mutation evidence remain
+  unverified.
 - The iPhone 17 simulator was shut down after validation; no owned xcodebuild,
   xctest, LifeOS app, or booted simulator process remains. Build outputs and
   result bundles are isolated under `/tmp` and are disposable.
 
 ## Next action
 
-Continue native graph/vault routing with mounted picker presentation and a
-real-vault round trip. Keep one worker and one Apple lane at a time; preserve
-gradual commits, pushes, compact handoffs, and evidence-led gates. Investigate
-test-host network isolation separately; do not call qualified iOS runs green.
+Continue with the mounted picker probes and real-vault round trip defined in
+`tasks/p06b-mounted-picker-plan.md`. Keep one worker and one Apple lane at a
+time; preserve gradual commits, pushes, compact handoffs, and evidence-led
+gates. Investigate test-host network isolation separately; do not call
+qualified iOS runs green.

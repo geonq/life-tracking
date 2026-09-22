@@ -2,7 +2,7 @@
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
 
-- Current source checkpoint: `433ea64`; `main`, `origin/main`, and
+- Current source checkpoint: `1df4642`; `main`, `origin/main`, and
   `codex/p06-b` are synchronized with the validated P06-B documentation.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
@@ -44,6 +44,11 @@ Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
   Markdown a read-only preview. Swift parsing and macOS/iPhone 17 arm64
   build-for-testing passed; runtime picker/viewport evidence remains open
   because testmanagerd/CoreSimulator refused execution.
+- P06-B mounted picker hardening is pushed at `1df4642` after Astra medium
+  READY TO COMPILE. AppKit/iOS ownership, cancellation, teardown, task gating,
+  and sanitized errors are statically reviewed; macOS and iPhone 17 arm64
+  build-for-testing passed. Native mounted picker and real-vault evidence are
+  still pending.
 - Evidence: API typecheck and 160 tests pass; gateway replication is 23 passed
   with one cryptography-dependent skip; `LifeOSMacLogic` passed 405/405 tests
   on Xcode 27/macOS 26.6.2.
@@ -51,7 +56,7 @@ Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
   intermittent after the final run; signing, physical iPhone, Windows, and
   live-provider evidence remain unknown or unavailable.
 
-Next: continue native graph/vault UI with mounted picker presentation and a
-real-vault round trip, visual/motion, widgets, providers,
+Next: continue native graph/vault UI with mounted picker probes and a real-vault
+round trip from `tasks/p06b-mounted-picker-plan.md`, visual/motion, widgets, providers,
 Windows, physical-device, and final security evidence gates. Release remains
 NO-GO until those gates close.

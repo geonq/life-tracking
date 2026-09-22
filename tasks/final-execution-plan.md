@@ -2,7 +2,7 @@
 
 Updated 2026-09-22 Europe/Berlin. Authoritative design remains in
 artifacts/blueprint/20260921, with R20-06-DISPATCH as the latest contract
-precedence. Current implementation checkpoint is 433ea64; the transaction
+precedence. Current implementation checkpoint is 1df4642; the transaction
 workspace base is 86baaa8 and the inspector base is 454f4d1.
 Release is NO-GO.
 
@@ -37,8 +37,9 @@ vault observer/project coordinator and planning transport seam. The read-only
 inspector checkpoint `454f4d1` covers selected-node metadata and in-vault
 Markdown preview. The chooser checkpoint `433ea64` adds the typed
 Canvas/Markdown opening path for one existing document under attached
-`LifeOS/`; the next bounded tranche is mounted picker presentation and a
-real-vault round trip.
+`LifeOS/`. Picker lifetime hardening is pushed at `1df4642`; the next bounded
+tranche is the mounted probes and real-vault round trip in
+`tasks/p06b-mounted-picker-plan.md`.
 
 P07 establishes the shared visual/motion/orb primitives. P08 repairs calendar
 interaction. P09 integrates finance and live-readback boundaries. P10 owns

@@ -8,8 +8,8 @@ updated 2026-09-22.
 
 ## Current checkpoint
 
-main and local origin/main match and include P06-B chooser source checkpoint
-433ea64, with the transaction workspace at 86baaa8 and inspector at 454f4d1.
+main and local origin/main match at picker-hardening checkpoint 1df4642, with
+chooser source 433ea64, transaction workspace 86baaa8, and inspector 454f4d1.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
 The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
 75 missing states. It is evidence-led, not a completion percentage.
@@ -68,12 +68,19 @@ keeps Markdown read-only. Swift parsing plus macOS and iPhone 17 arm64
 build-for-testing passed. Mac testmanagerd and iOS CoreSimulator blocked
 runtime execution, so mounted picker/viewport evidence remains pending.
 
+Picker hardening is pushed at 1df4642 after Astra medium READY TO COMPILE. The
+AppKit sheet and UIKit picker retain ownership through dismissal, SwiftUI
+prevents overlapping tasks and competing controls, representable teardown is
+static and owner-token guarded, and picker errors are sanitized. Both Apple
+arm64 build-for-testing lanes pass. The mounted probes and real-vault
+no-mutation round trip are specified in tasks/p06b-mounted-picker-plan.md.
+
 ## Next execution
 
 1. P04: finance, fitness, nutrition and local-record adapters
    with local durability before acknowledgement.
-2. P06-B: mounted native picker presentation and real-vault round trip after
-   the chooser checkpoint; retain the CP-B adapter pause
+2. P06-B: mounted native picker probes and real-vault round trip from
+   tasks/p06b-mounted-picker-plan.md; retain the CP-B adapter pause
    until shared persistence identities and tombstones are sealed.
 3. P07-P16: visual/motion system, screen migration, widgets, providers,
    security cleanup, and target composition.
