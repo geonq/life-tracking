@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
-Current source checkpoint: c4243a3; main and origin/main are synchronized.
+Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
+Current source checkpoint: 4436211; main and origin/main are synchronized.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -96,20 +96,20 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   macOS and iPhone 17 arm64 build-for-testing pass; mounted/runtime evidence is
   still open. The next exact contract is `tasks/p06b-mounted-picker-plan.md`.
 
-- P06-B Canvas evidence packet: `c4243a3`. DEBUG viewport reporting is wired
-  to the production setter, mirrored hosted lifecycle/coordinator tests cover
-  cancellation, failure, unmount, reopen, ticket supersession, Markdown back,
-  fixture no-mutation, and sibling/symlink rejection. Astra medium final gate
-  found no P0/P1/P2 issue; final macOS and iOS arm64 build-for-testing pass.
-  Native picker presentation and real-vault runtime evidence remain open.
+- P06-B lifecycle evidence checkpoint: 4436211. Owner-token presenter
+  storage avoids SwiftUI reconciliation writes; mirrored DEBUG hosted tests
+  cover lifecycle, picker races, viewport retention, and fixture safety. Astra
+  medium READY; macOS hosted suite 15/15 with zero runtime warnings, plus fresh
+  macOS and iPhone 17 arm64 build-for-testing. Native picker presentation and
+  real-vault runtime evidence remain open.
 
 ## Ordered implementation
 
 1. P04 adapts finance, fitness, nutrition,
    supplements and lifestyle stores with local durability before acknowledgement.
-2. P06-B continues with mounted picker probes and a real-vault round trip from
-   `tasks/p06b-mounted-picker-plan.md`; no worker may guess CP-B adapter
-   identities.
+2. P06-B continues with native picker presentation tests and a real-vault
+   round trip from tasks/p06b-mounted-picker-plan.md; no worker may guess CP-B
+   adapter identities.
 3. P07 shared visual/motion primitives; P08 calendar; P09 finance; P10 fitness;
    P11 HealthKit/Zepp provenance; P12 usage; P13 tax; P14 widgets/intents.
 4. P15 security/dead-path hardening; P16 composition and target membership.

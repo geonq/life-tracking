@@ -1,6 +1,6 @@
 # P06-B mounted picker and vault round-trip plan
 
-Updated 2026-09-22 Europe/Berlin. Base: `c4243a3`. This is a bounded plan
+Updated 2026-09-23 Europe/Berlin. Base: `4436211`. This is a bounded plan
 for native presentation evidence after the chooser checkpoint `433ea64`.
 Release remains NO-GO.
 
@@ -60,14 +60,14 @@ change; no persistence or public behavior changes. Use hosted `NSWindow` and
 visible `UIWindow` tests, controlled picker closures, continuations, and no
 fixed sleeps. Tests must close their own host and cancel tasks.
 
-The source portion is checkpointed at `c4243a3`. It adds the DEBUG probe,
-hosted Canvas lifecycle/coordinator tests, exact fixture snapshots, ticket
-supersession assertions, and mirrored macOS/iOS parity. Astra medium found no
-P0/P1/P2 issue; final macOS and iOS arm64 build-for-testing passed. These tests
-mount the Canvas component and coordinator, but do not inject the native picker
-broker, so they do not establish native picker presentation or real-vault
-runtime evidence. The presentation and mounted runtime lists below remain the
-next implementation/evidence lane.
+The source evidence is checkpointed at 4436211. It adds DEBUG viewport and
+presentation probes, mirrored hosted lifecycle/coordinator tests, exact fixture
+snapshots, ticket supersession, stale-presenter ownership checks, and idle-host
+restore coverage. Astra medium found no P0–P3 issue. On Xcode 27/macOS 27.0, the
+focused hosted suite passed 15/15 with zero runtime warnings; fresh macOS and
+iPhone 17 arm64 build-for-testing passed. Controlled selection closures mean
+these tests do not exercise the native picker broker or the user's real vault.
+Platform presentation and real-vault runtime evidence remain next.
 
 Required mounted tests in both suites:
 

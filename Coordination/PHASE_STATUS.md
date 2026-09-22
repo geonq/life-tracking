@@ -1,9 +1,9 @@
 # PHASE STATUS — LifeOS
 
-Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
+Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
 
-- Current source checkpoint: `c4243a3`; `main`, `origin/main`, and
-  `codex/p06-b` are synchronized with the validated P06-B documentation.
+- Current source checkpoint: `4436211`; `main` and `origin/main` are synchronized.
+  The older `codex/p06-b` branch remains at `960f030`.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
 - P01: shared sync contract/codec complete at `a21ccf3` + `673dc0a`.
@@ -49,16 +49,15 @@ Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
   and sanitized errors are statically reviewed; macOS and iPhone 17 arm64
   build-for-testing passed. Native mounted picker and real-vault evidence are
   still pending.
-- P06-B source evidence packet is pushed at `c4243a3` after Astra medium
-  READY. The DEBUG probe observes the production viewport setter, mirrored
-  hosted tests cover cancellation/failure/unmount/reopen, ticket supersession,
-  Markdown back, fixture no-mutation, and sibling/symlink rejection. Final
-  macOS and iOS arm64 build-for-testing passed. Native picker presentation and
-  real-vault runtime evidence remain pending.
+- P06-B lifecycle evidence is pushed at 4436211 after Astra medium READY.
+  Owner-token presenter storage removes state mutation during representable
+  updates. Hosted macOS tests passed 15/15 with zero runtime warnings; fresh
+  macOS and iPhone 17 arm64 build-for-testing passed. Native picker presentation
+  and real-vault runtime mutation evidence remain pending.
 - Evidence: API typecheck and 160 tests pass; gateway replication is 23 passed
   with one cryptography-dependent skip; `LifeOSMacLogic` passed 405/405 tests
   on Xcode 27/macOS 26.6.2.
-- Host: Xcode 27.0 and macOS 26.6.2 arm64 are available. CoreSimulator was
+- Host: Xcode 27 and macOS 27.0 arm64 are available. CoreSimulator was
   intermittent after the final run; signing, physical iPhone, Windows, and
   live-provider evidence remain unknown or unavailable.
 
