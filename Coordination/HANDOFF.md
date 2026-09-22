@@ -11,7 +11,7 @@ per tasks/p06b-mounted-picker-plan.md. Release remains NO-GO.
 
 - main and origin/main are synchronized at 4436211. This checkpoint fixes
   SwiftUI presenter ownership during representable updates and adds hosted
-  lifecycle regressions. The older codex/p06-b branch is still at 960f030.
+  lifecycle regressions. codex/p06-b is fast-forwarded to 6e353f1.
 - P01–P05 foundations are in main: authenticated sync, durable calendar,
   fitness payload boundary, graph/session, and native Canvas viewport.
 - P06-B prior checkpoints: workspace transaction 86baaa8, inspector
