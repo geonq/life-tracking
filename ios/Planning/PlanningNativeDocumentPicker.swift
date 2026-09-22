@@ -20,6 +20,14 @@ public enum PlanningDocumentDestination: Equatable, Sendable {
 import UIKit
 import UniformTypeIdentifiers
 
+#if DEBUG
+@MainActor
+internal struct PlanningNativeDocumentPickerTestHooks {
+    let didPresent: @MainActor (UIViewController, UIDocumentPickerViewController) -> Void
+    let didFinish: @MainActor () -> Void
+}
+#endif
+
 @MainActor
 private final class PlanningNativeDocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
     private enum PresentationPhase: Equatable {
@@ -34,6 +42,18 @@ private final class PlanningNativeDocumentPickerCoordinator: NSObject, UIDocumen
     private var continuation: CheckedContinuation<URL?, Error>?
     private var picker: UIDocumentPickerViewController?
     private var pendingResult: Result<URL?, Error>?
+#if DEBUG
+    private let testHooks: PlanningNativeDocumentPickerTestHooks?
+
+    init(testHooks: PlanningNativeDocumentPickerTestHooks? = nil) {
+        self.testHooks = testHooks
+        super.init()
+    }
+#else
+    override init() {
+        super.init()
+    }
+#endif
 
     func select(
         from presenter: UIViewController,
@@ -79,6 +99,9 @@ private final class PlanningNativeDocumentPickerCoordinator: NSObject, UIDocumen
                     if self.phase == .presenting {
                         self.phase = .presented
                     }
+#if DEBUG
+                    self.testHooks?.didPresent(presenter, picker)
+#endif
                     self.dismissOwnedPickerIfNeeded()
                 }
                 picker.presentationController?.delegate = self
@@ -144,6 +167,9 @@ private final class PlanningNativeDocumentPickerCoordinator: NSObject, UIDocumen
         self.pendingResult = nil
         self.continuation = nil
         self.picker = nil
+#if DEBUG
+        testHooks?.didFinish()
+#endif
         continuation.resume(with: pendingResult)
     }
 }
@@ -166,7 +192,25 @@ extension PlanningVaultSelectionBroker {
     public static func selectDocument(
         from presenter: UIViewController
     ) async throws -> PlanningUserSelectedDocument? {
-        let coordinator = PlanningNativeDocumentPickerCoordinator()
+        try await selectDocument(using: PlanningNativeDocumentPickerCoordinator(), from: presenter)
+    }
+
+#if DEBUG
+    internal static func selectDocumentForTesting(
+        from presenter: UIViewController,
+        hooks: PlanningNativeDocumentPickerTestHooks
+    ) async throws -> PlanningUserSelectedDocument? {
+        try await selectDocument(
+            using: PlanningNativeDocumentPickerCoordinator(testHooks: hooks),
+            from: presenter
+        )
+    }
+#endif
+
+    private static func selectDocument(
+        using coordinator: PlanningNativeDocumentPickerCoordinator,
+        from presenter: UIViewController
+    ) async throws -> PlanningUserSelectedDocument? {
         return try await PlanningNativeDocumentPickerLifetime.shared.withCoordinator(coordinator) {
             let contentTypes = [
                 UTType(filenameExtension: "canvas") ?? .data,
@@ -203,6 +247,14 @@ private final class PlanningNativeDocumentPickerLifetime {
 import AppKit
 import UniformTypeIdentifiers
 
+#if DEBUG
+@MainActor
+internal struct PlanningNativeDocumentPickerTestHooks {
+    let didPresent: @MainActor (NSWindow, NSOpenPanel) -> Void
+    let didFinish: @MainActor () -> Void
+}
+#endif
+
 @MainActor
 private final class PlanningNativeDocumentPanelCoordinator {
     private enum PresentationPhase: Equatable {
@@ -220,6 +272,13 @@ private final class PlanningNativeDocumentPanelCoordinator {
     private var pendingResult: Result<URL?, Error>?
     private var hostWindowCloseObserver: NSObjectProtocol?
     private var sheetCompletionOutstanding = false
+#if DEBUG
+    private let testHooks: PlanningNativeDocumentPickerTestHooks?
+
+    init(testHooks: PlanningNativeDocumentPickerTestHooks? = nil) {
+        self.testHooks = testHooks
+    }
+#endif
 
     func select(presenting window: NSWindow?) async throws -> URL? {
         guard phase == .idle, continuation == nil, panel == nil else {
@@ -275,6 +334,9 @@ private final class PlanningNativeDocumentPanelCoordinator {
                 if self.phase == .presenting {
                     self.phase = .presented
                 }
+#if DEBUG
+                self.testHooks?.didPresent(window, panel)
+#endif
                 if Task.isCancelled {
                     self.settle(.success(nil))
                 }
@@ -338,6 +400,9 @@ private final class PlanningNativeDocumentPanelCoordinator {
         self.continuation = nil
         self.panel = nil
         self.hostWindow = nil
+#if DEBUG
+        testHooks?.didFinish()
+#endif
         continuation.resume(with: pendingResult)
     }
 }
@@ -365,7 +430,25 @@ extension PlanningVaultSelectionBroker {
     public static func selectDocument(
         presenting window: NSWindow?
     ) async throws -> PlanningUserSelectedDocument? {
-        let coordinator = PlanningNativeDocumentPanelCoordinator()
+        try await selectDocument(using: PlanningNativeDocumentPanelCoordinator(), presenting: window)
+    }
+
+#if DEBUG
+    internal static func selectDocumentForTesting(
+        presenting window: NSWindow?,
+        hooks: PlanningNativeDocumentPickerTestHooks
+    ) async throws -> PlanningUserSelectedDocument? {
+        try await selectDocument(
+            using: PlanningNativeDocumentPanelCoordinator(testHooks: hooks),
+            presenting: window
+        )
+    }
+#endif
+
+    private static func selectDocument(
+        using coordinator: PlanningNativeDocumentPanelCoordinator,
+        presenting window: NSWindow?
+    ) async throws -> PlanningUserSelectedDocument? {
         return try await PlanningNativeDocumentPanelLifetime.shared.withCoordinator(coordinator) {
             let url = try await coordinator.select(presenting: window)
             guard let url else { return nil }

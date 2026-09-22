@@ -84,17 +84,25 @@ testMountedRealVaultChooserRoundTripDoesNotMutateVault
 testMountedRealVaultChooserRejectsSiblingAndSymlink
 ```
 
-Platform presentation tests:
+Platform presentation tests implemented in both mirrored suites:
 
-```text
-testMacDocumentPickerUsesOwningWindowSheet
-testMacDocumentPickerRejectsOccupiedSheet
-testMacDocumentPickerHostClosureSettlesCancellation
-testIOSDocumentPickerUsesMountedPresenter
-testIOSDocumentPickerRejectsOccupiedPresenter
-testIOSDocumentPickerInteractiveDismissalSettlesCancellation
-```
+macOS:
+- testMacDocumentPickerUsesOwningWindowSheet
+- testMacDocumentPickerRejectsOccupiedSheet
+- testMacDocumentPickerHostClosureSettlesCancellation
+- testMacDocumentPickerTaskCancellationDismissesOwnedSheetAndReleasesLifetime
 
+iOS:
+- testIOSDocumentPickerUsesMountedPresenter
+- testIOSDocumentPickerRejectsOccupiedPresenter
+- testIOSDocumentPickerAdaptiveDismissalCallbackSettlesCancellation
+- testIOSDocumentPickerTaskCancellationDismissesOwnedPickerAndReleasesLifetime
+
+Implementation and build evidence — 2026-09-23:
+- Astra medium returned READY TO CHECKPOINT with no actionable findings.
+- Swift parsing and mirrored-suite parity checks pass. Serial arm64 build-for-testing passes for LifeOSMacLogic on macOS 27 and LifeOSLogic for iOS Simulator.
+- Runtime remains unverified. The earlier macOS picker run was canceled while XCTest was starting its LaunchServices worker and executed zero tests. Current simctl cannot connect to CoreSimulatorService or discover runtimes. No native picker runtime result or real-vault round trip is claimed.
+- Retry native presentation tests and the isolated fixture-vault manifest check when the test launcher and simulator services are available. Never enumerate or mutate the user's production vault.
 Viewport assertions must use a nonidentity value such as translation `(137,
 -83)` and scale `1.35`, then verify exact values after cancel, failure,
 Markdown Back, and retained-project routing.

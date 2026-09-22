@@ -238,6 +238,34 @@ private final class PlanningWorkspaceSelectionCommitFailure: @unchecked Sendable
 
 @MainActor
 final class PlanningWorkspaceTests: XCTestCase {
+    @MainActor
+    private final class NativePickerTaskResultObserver {
+        typealias Completion = (Result<PlanningUserSelectedDocument?, Error>) -> Void
+
+        private var completedResult: Result<PlanningUserSelectedDocument?, Error>?
+        private var onResult: Completion?
+
+        func observe(_ callback: @escaping Completion) {
+            if let completedResult {
+                callback(completedResult)
+            } else {
+                self.onResult = callback
+            }
+        }
+
+        func finish(_ result: Result<PlanningUserSelectedDocument?, Error>) {
+            guard completedResult == nil else { return }
+            completedResult = result
+            let callback = onResult
+            onResult = nil
+            callback?(result)
+        }
+
+        func clearCallback() {
+            onResult = nil
+        }
+    }
+
     private func chooserWorkspace(_ fixture: Fixture, canvas: Bool = true) async -> PlanningWorkspaceCoordinator {
         let workspace = PlanningWorkspaceCoordinator(store: fixture.store, localGrantOwnerID: fixture.ownerID)
         await workspace.attach(fixture.selection)
@@ -719,6 +747,738 @@ final class PlanningWorkspaceTests: XCTestCase {
         await fulfillment(of: [ready], timeout: 2)
         probe.onPresenterReadyChange = nil
     }
+
+    @MainActor
+    private func awaitNativePickerResult(
+        _ task: Task<PlanningUserSelectedDocument?, Error>,
+        label: String,
+        timeout: TimeInterval = 3,
+        cleanupTimeout: TimeInterval = 2,
+        cleanupOwnedUI: @escaping @MainActor () -> Void = {},
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> Result<PlanningUserSelectedDocument?, Error>? {
+        let resultReady = expectation(description: "\(label) result before deadline")
+        var result: Result<PlanningUserSelectedDocument?, Error>?
+        let resultObserver = NativePickerTaskResultObserver()
+        resultObserver.observe { observedResult in
+            result = observedResult
+            resultReady.fulfill()
+        }
+
+        // The observer may outlive the test deadline while awaiting task.result.
+        // It holds the result callback weakly so clearing that callback releases
+        // the test case, expectations, and captured host after the cleanup bound.
+        let observerTask = Task { @MainActor [weak resultObserver] in
+            let completedResult = await task.result
+            resultObserver?.finish(completedResult)
+        }
+        defer {
+            resultObserver.clearCallback()
+            observerTask.cancel()
+        }
+
+        let firstWait = await XCTWaiter.fulfillment(of: [resultReady], timeout: timeout)
+        guard case .completed = firstWait, let completedResult = result else {
+            XCTFail(
+                "\(label) did not resolve before the \(timeout)-second deadline; "
+                    + "cancelling and cleaning up the test-owned picker.",
+                file: file,
+                line: line
+            )
+            resultObserver.clearCallback()
+            task.cancel()
+            cleanupOwnedUI()
+
+            let cleanupReady = expectation(description: "\(label) result during bounded cleanup")
+            resultObserver.observe { observedResult in
+                result = observedResult
+                cleanupReady.fulfill()
+            }
+            let cleanupWait = await XCTWaiter.fulfillment(
+                of: [cleanupReady],
+                timeout: cleanupTimeout
+            )
+            resultObserver.clearCallback()
+            guard case .completed = cleanupWait, result != nil else {
+                XCTFail(
+                    "\(label) remained unresolved after cancellation and owned-UI cleanup; "
+                        + "possible checked-continuation or picker-lifetime leak.",
+                    file: file,
+                    line: line
+                )
+                return nil
+            }
+
+            // A late result never converts the first-deadline failure into success.
+            return nil
+        }
+
+        return completedResult
+    }
+
+    @MainActor
+    private func assertNativePickerCancelled(
+        _ task: Task<PlanningUserSelectedDocument?, Error>,
+        isOwnedUIDetached: @escaping @MainActor () -> Bool,
+        label: String = "Native picker cancellation",
+        cleanupOwnedUI: @escaping @MainActor () -> Void = {},
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> Bool {
+        guard let result = await awaitNativePickerResult(
+            task,
+            label: label,
+            cleanupOwnedUI: cleanupOwnedUI,
+            file: file,
+            line: line
+        ) else {
+            cleanupOwnedUI()
+            return false
+        }
+        defer { cleanupOwnedUI() }
+        switch result {
+        case .success(let selection):
+            XCTAssertNil(selection, file: file, line: line)
+            guard selection == nil else { return false }
+            let detachedBeforeCleanup = isOwnedUIDetached()
+            XCTAssertTrue(
+                detachedBeforeCleanup,
+                "The broker must detach its owned picker before test cleanup.",
+                file: file,
+                line: line
+            )
+            return detachedBeforeCleanup
+        case .failure(let error):
+            XCTFail("Native picker cancellation failed: \(error)", file: file, line: line)
+            return false
+        }
+    }
+
+    @MainActor
+    private func assertNativePickerRejected(
+        _ task: Task<PlanningUserSelectedDocument?, Error>,
+        expectedCode: String,
+        label: String,
+        cleanupOwnedUI: @escaping @MainActor () -> Void,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> Bool {
+        guard let result = await awaitNativePickerResult(
+            task,
+            label: label,
+            cleanupOwnedUI: cleanupOwnedUI,
+            file: file,
+            line: line
+        ) else {
+            return false
+        }
+        cleanupOwnedUI()
+        switch result {
+        case .success:
+            XCTFail("\(label) unexpectedly succeeded", file: file, line: line)
+            return false
+        case .failure(let error as PlanningFilesystemError):
+            XCTAssertEqual(error.stableCode, expectedCode, file: file, line: line)
+            return error.stableCode == expectedCode
+        case .failure(let error):
+            XCTFail("\(label) returned an unexpected error: \(error)", file: file, line: line)
+            return false
+        }
+    }
+
+#if os(macOS)
+    func testMacDocumentPickerUsesOwningWindowSheet() async {
+        let host = PlanningCanvasHost(rootView: Text("Native picker host"))
+        defer { host.close() }
+        XCTAssertTrue(host.window.isVisible)
+
+        let presented = expectation(description: "NSOpenPanel attached to its owning window")
+        var observedPanel: NSOpenPanel?
+        var terminalCompletionCount = 0
+        let hooks = PlanningNativeDocumentPickerTestHooks(
+            didPresent: { owner, panel in
+                observedPanel = panel
+                XCTAssertTrue(owner === host.window)
+                XCTAssertTrue(owner.attachedSheet === panel)
+                presented.fulfill()
+            },
+            didFinish: { terminalCompletionCount += 1 }
+        )
+        let task = Task { @MainActor in
+            try await PlanningVaultSelectionBroker.selectDocumentForTesting(
+                presenting: host.window,
+                hooks: hooks
+            )
+        }
+
+        await fulfillment(of: [presented], timeout: 3)
+        guard let panel = observedPanel, host.window.attachedSheet === panel else {
+            XCTFail("The native open panel was not attached to the visible owner window")
+            _ = await assertNativePickerCancelled(
+                task,
+                isOwnedUIDetached: { host.window.attachedSheet == nil },
+                cleanupOwnedUI: {
+                    if let panel = observedPanel, host.window.attachedSheet === panel {
+                        host.window.endSheet(panel, returnCode: .cancel)
+                    }
+                }
+            )
+            return
+        }
+
+        host.window.endSheet(panel, returnCode: .cancel)
+        guard await assertNativePickerCancelled(
+            task,
+            isOwnedUIDetached: { host.window.attachedSheet == nil },
+            cleanupOwnedUI: {
+                if let panel = observedPanel, host.window.attachedSheet === panel {
+                    host.window.endSheet(panel, returnCode: .cancel)
+                }
+            }
+        ) else {
+            return
+        }
+        XCTAssertNil(host.window.attachedSheet)
+        XCTAssertEqual(terminalCompletionCount, 1)
+    }
+
+    func testMacDocumentPickerRejectsOccupiedSheet() async {
+        let host = PlanningCanvasHost(rootView: Text("Occupied sheet host"))
+        defer { host.close() }
+        let occupiedSheet = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 240, height: 120),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        var dismissalExpectation: XCTestExpectation?
+        host.window.beginSheet(occupiedSheet) { response in
+            XCTAssertEqual(response, .cancel)
+            dismissalExpectation?.fulfill()
+        }
+        XCTAssertTrue(host.window.attachedSheet === occupiedSheet)
+        func dismissOwnedSheetAndWait() async {
+            guard host.window.attachedSheet === occupiedSheet else { return }
+            let completion = expectation(description: "Test-owned occupied sheet dismissed")
+            dismissalExpectation = completion
+            host.window.endSheet(occupiedSheet, returnCode: .cancel)
+            await fulfillment(of: [completion], timeout: 3)
+            dismissalExpectation = nil
+        }
+        defer {
+            if host.window.attachedSheet === occupiedSheet {
+                host.window.endSheet(occupiedSheet, returnCode: .cancel)
+            }
+        }
+
+        var unexpectedPanel: NSOpenPanel?
+        let hooks = PlanningNativeDocumentPickerTestHooks(
+            didPresent: { _, panel in unexpectedPanel = panel },
+            didFinish: {}
+        )
+        let task = Task { @MainActor in
+            try await PlanningVaultSelectionBroker.selectDocumentForTesting(
+                presenting: host.window,
+                hooks: hooks
+            )
+        }
+        let rejectionSucceeded = await assertNativePickerRejected(
+            task,
+            expectedCode: "pickerPresenterBusy",
+            label: "Occupied owner window rejection",
+            cleanupOwnedUI: {
+                if let panel = unexpectedPanel, host.window.attachedSheet === panel {
+                    host.window.endSheet(panel, returnCode: .cancel)
+                }
+            }
+        )
+        let occupiedSheetRemainedAttached = host.window.attachedSheet === occupiedSheet
+        await dismissOwnedSheetAndWait()
+        XCTAssertTrue(rejectionSucceeded)
+        XCTAssertTrue(occupiedSheetRemainedAttached, "The broker must leave the pre-existing sheet attached.")
+        XCTAssertNil(host.window.attachedSheet)
+    }
+
+    func testMacDocumentPickerHostClosureSettlesCancellation() async {
+        let host = PlanningCanvasHost(rootView: Text("Closing picker host"))
+        let presented = expectation(description: "Native panel presented before host closure")
+        var observedPanel: NSOpenPanel?
+        defer {
+            if let panel = observedPanel, host.window.attachedSheet === panel {
+                host.window.endSheet(panel, returnCode: .cancel)
+            }
+            host.close()
+        }
+        var terminalCompletionCount = 0
+        let hooks = PlanningNativeDocumentPickerTestHooks(
+            didPresent: { owner, panel in
+                observedPanel = panel
+                XCTAssertTrue(owner === host.window)
+                XCTAssertTrue(owner.attachedSheet === panel)
+                presented.fulfill()
+            },
+            didFinish: { terminalCompletionCount += 1 }
+        )
+        let task = Task { @MainActor in
+            try await PlanningVaultSelectionBroker.selectDocumentForTesting(
+                presenting: host.window,
+                hooks: hooks
+            )
+        }
+
+        await fulfillment(of: [presented], timeout: 3)
+        guard let panel = observedPanel, host.window.attachedSheet === panel else {
+            XCTFail("The native panel was not attached before closing its host")
+            _ = await assertNativePickerCancelled(
+                task,
+                isOwnedUIDetached: { host.window.attachedSheet == nil },
+                cleanupOwnedUI: {
+                    if let panel = observedPanel, host.window.attachedSheet === panel {
+                        host.window.endSheet(panel, returnCode: .cancel)
+                    }
+                    host.close()
+                }
+            )
+            return
+        }
+
+        host.close()
+        guard await assertNativePickerCancelled(
+            task,
+            isOwnedUIDetached: { host.window.attachedSheet == nil },
+            cleanupOwnedUI: {
+                if let panel = observedPanel, host.window.attachedSheet === panel {
+                    host.window.endSheet(panel, returnCode: .cancel)
+                }
+                host.close()
+            }
+        ) else {
+            return
+        }
+        XCTAssertFalse(host.window.isVisible)
+        XCTAssertNil(host.window.attachedSheet)
+        XCTAssertEqual(terminalCompletionCount, 1)
+    }
+
+    func testMacDocumentPickerTaskCancellationDismissesOwnedSheetAndReleasesLifetime() async {
+        let host = PlanningCanvasHost(rootView: Text("Task cancellation host"))
+        defer { host.close() }
+
+        let firstPresented = expectation(description: "First picker sheet presented")
+        var firstPanel: NSOpenPanel?
+        var firstFinishCount = 0
+        let firstHooks = PlanningNativeDocumentPickerTestHooks(
+            didPresent: { owner, panel in
+                firstPanel = panel
+                XCTAssertTrue(owner === host.window)
+                XCTAssertTrue(owner.attachedSheet === panel)
+                firstPresented.fulfill()
+            },
+            didFinish: { firstFinishCount += 1 }
+        )
+        let firstTask = Task { @MainActor in
+            try await PlanningVaultSelectionBroker.selectDocumentForTesting(
+                presenting: host.window,
+                hooks: firstHooks
+            )
+        }
+
+        await fulfillment(of: [firstPresented], timeout: 3)
+        guard let panel = firstPanel, host.window.attachedSheet === panel else {
+            XCTFail("The first picker sheet was not attached to its owner")
+            _ = await assertNativePickerCancelled(
+                firstTask,
+                isOwnedUIDetached: { host.window.attachedSheet == nil },
+                cleanupOwnedUI: {
+                    if let panel = firstPanel, host.window.attachedSheet === panel {
+                        host.window.endSheet(panel, returnCode: .cancel)
+                    }
+                }
+            )
+            return
+        }
+
+        firstTask.cancel()
+        guard await assertNativePickerCancelled(
+            firstTask,
+            isOwnedUIDetached: { host.window.attachedSheet == nil },
+            label: "First picker task cancellation",
+            cleanupOwnedUI: {
+                if let panel = firstPanel, host.window.attachedSheet === panel {
+                    host.window.endSheet(panel, returnCode: .cancel)
+                }
+            }
+        ) else {
+            return
+        }
+        XCTAssertNil(host.window.attachedSheet)
+        XCTAssertEqual(firstFinishCount, 1)
+
+        let secondPresented = expectation(description: "Second picker sheet presented after cancellation")
+        var secondPanel: NSOpenPanel?
+        var secondFinishCount = 0
+        let secondHooks = PlanningNativeDocumentPickerTestHooks(
+            didPresent: { owner, panel in
+                secondPanel = panel
+                XCTAssertTrue(owner === host.window)
+                XCTAssertTrue(owner.attachedSheet === panel)
+                secondPresented.fulfill()
+            },
+            didFinish: { secondFinishCount += 1 }
+        )
+        let secondTask = Task { @MainActor in
+            try await PlanningVaultSelectionBroker.selectDocumentForTesting(
+                presenting: host.window,
+                hooks: secondHooks
+            )
+        }
+
+        await fulfillment(of: [secondPresented], timeout: 3)
+        guard let secondPanel, host.window.attachedSheet === secondPanel else {
+            XCTFail("A second picker could not acquire the released lifetime gate")
+            _ = await assertNativePickerCancelled(
+                secondTask,
+                isOwnedUIDetached: { host.window.attachedSheet == nil },
+                cleanupOwnedUI: {
+                    if let panel = secondPanel, host.window.attachedSheet === panel {
+                        host.window.endSheet(panel, returnCode: .cancel)
+                    }
+                }
+            )
+            return
+        }
+
+        secondTask.cancel()
+        guard await assertNativePickerCancelled(
+            secondTask,
+            isOwnedUIDetached: { host.window.attachedSheet == nil },
+            label: "Second picker task cancellation",
+            cleanupOwnedUI: {
+                if host.window.attachedSheet === secondPanel {
+                    host.window.endSheet(secondPanel, returnCode: .cancel)
+                }
+            }
+        ) else {
+            return
+        }
+        XCTAssertNil(host.window.attachedSheet)
+        XCTAssertEqual(secondFinishCount, 1)
+    }
+#elseif os(iOS)
+    func testIOSDocumentPickerUsesMountedPresenter() async {
+        let host = PlanningCanvasHost(rootView: Text("Native picker host"))
+        defer { host.close() }
+        guard let presenter = host.window.rootViewController else {
+            XCTFail("The visible test window has no mounted root presenter")
+            return
+        }
+        XCTAssertTrue(presenter.viewIfLoaded?.window === host.window)
+
+        let presented = expectation(description: "UIDocumentPicker presented by mounted root")
+        var observedPicker: UIDocumentPickerViewController?
+        var terminalCompletionCount = 0
+        let hooks = PlanningNativeDocumentPickerTestHooks(
+            didPresent: { owner, picker in
+                observedPicker = picker
+                XCTAssertTrue(owner === presenter)
+                XCTAssertTrue(presenter.presentedViewController === picker)
+                presented.fulfill()
+            },
+            didFinish: { terminalCompletionCount += 1 }
+        )
+        let task = Task { @MainActor in
+            try await PlanningVaultSelectionBroker.selectDocumentForTesting(
+                from: presenter,
+                hooks: hooks
+            )
+        }
+
+        await fulfillment(of: [presented], timeout: 3)
+        guard let picker = observedPicker,
+              presenter.presentedViewController === picker,
+              let delegate = picker.delegate else {
+            XCTFail("The native document picker was not presented by its mounted owner")
+            _ = await assertNativePickerCancelled(
+                task,
+                isOwnedUIDetached: { presenter.presentedViewController == nil },
+                cleanupOwnedUI: {
+                    if let picker = observedPicker,
+                       picker.presentingViewController === presenter {
+                        picker.dismiss(animated: false)
+                    }
+                }
+            )
+            return
+        }
+
+        delegate.documentPickerWasCancelled?(picker)
+        delegate.documentPickerWasCancelled?(picker)
+        guard await assertNativePickerCancelled(
+            task,
+            isOwnedUIDetached: { presenter.presentedViewController == nil },
+            cleanupOwnedUI: {
+                if let picker = observedPicker,
+                   picker.presentingViewController === presenter {
+                    picker.dismiss(animated: false)
+                }
+            }
+        ) else {
+            return
+        }
+        XCTAssertNil(presenter.presentedViewController)
+        XCTAssertEqual(terminalCompletionCount, 1)
+    }
+
+    func testIOSDocumentPickerRejectsOccupiedPresenter() async {
+        let host = PlanningCanvasHost(rootView: Text("Occupied presenter host"))
+        defer { host.close() }
+        guard let presenter = host.window.rootViewController else {
+            XCTFail("The visible test window has no mounted root presenter")
+            return
+        }
+
+        let occupiedController = UIViewController()
+        occupiedController.modalPresentationStyle = .overFullScreen
+        let occupiedPresentation = expectation(description: "Test-owned controller presented")
+        presenter.present(occupiedController, animated: false) {
+            occupiedPresentation.fulfill()
+        }
+        await fulfillment(of: [occupiedPresentation], timeout: 3)
+        XCTAssertTrue(presenter.presentedViewController === occupiedController)
+
+        var dismissalExpectation: XCTestExpectation?
+        func dismissOwnedControllerAndWait() async {
+            guard presenter.presentedViewController === occupiedController else { return }
+            let completion = expectation(description: "Test-owned occupied controller dismissed")
+            dismissalExpectation = completion
+            presenter.dismiss(animated: false) {
+                dismissalExpectation?.fulfill()
+            }
+            await fulfillment(of: [completion], timeout: 3)
+            dismissalExpectation = nil
+        }
+        defer {
+            if presenter.presentedViewController === occupiedController {
+                presenter.dismiss(animated: false)
+            }
+        }
+
+        var unexpectedPicker: UIDocumentPickerViewController?
+        let hooks = PlanningNativeDocumentPickerTestHooks(
+            didPresent: { _, picker in unexpectedPicker = picker },
+            didFinish: {}
+        )
+        let task = Task { @MainActor in
+            try await PlanningVaultSelectionBroker.selectDocumentForTesting(
+                from: presenter,
+                hooks: hooks
+            )
+        }
+        let rejectionSucceeded = await assertNativePickerRejected(
+            task,
+            expectedCode: "pickerPresenterBusy",
+            label: "Occupied presenter rejection",
+            cleanupOwnedUI: {
+                if let picker = unexpectedPicker,
+                   picker.presentingViewController === presenter {
+                    picker.dismiss(animated: false)
+                }
+            }
+        )
+        let occupiedControllerRemainedPresented =
+            presenter.presentedViewController === occupiedController
+        await dismissOwnedControllerAndWait()
+        XCTAssertTrue(rejectionSucceeded)
+        XCTAssertTrue(
+            occupiedControllerRemainedPresented,
+            "The broker must leave the pre-existing controller presented."
+        )
+        XCTAssertNil(presenter.presentedViewController)
+    }
+
+    func testIOSDocumentPickerAdaptiveDismissalCallbackSettlesCancellation() async {
+        let host = PlanningCanvasHost(rootView: Text("Adaptive dismissal host"))
+        defer { host.close() }
+        guard let presenter = host.window.rootViewController else {
+            XCTFail("The visible test window has no mounted root presenter")
+            return
+        }
+
+        let presented = expectation(description: "Native picker presented before dismissal")
+        var observedPicker: UIDocumentPickerViewController?
+        var terminalCompletionCount = 0
+        let hooks = PlanningNativeDocumentPickerTestHooks(
+            didPresent: { owner, picker in
+                observedPicker = picker
+                XCTAssertTrue(owner === presenter)
+                XCTAssertTrue(presenter.presentedViewController === picker)
+                presented.fulfill()
+            },
+            didFinish: { terminalCompletionCount += 1 }
+        )
+        let task = Task { @MainActor in
+            try await PlanningVaultSelectionBroker.selectDocumentForTesting(
+                from: presenter,
+                hooks: hooks
+            )
+        }
+
+        await fulfillment(of: [presented], timeout: 3)
+        guard let picker = observedPicker,
+              presenter.presentedViewController === picker,
+              let presentationController = picker.presentationController,
+              let delegate = presentationController.delegate else {
+            XCTFail("The presented picker has no adaptive dismissal delegate")
+            _ = await assertNativePickerCancelled(
+                task,
+                isOwnedUIDetached: { presenter.presentedViewController == nil },
+                cleanupOwnedUI: {
+                    if let picker = observedPicker,
+                       picker.presentingViewController === presenter {
+                        picker.dismiss(animated: false)
+                    }
+                }
+            )
+            return
+        }
+
+        let dismissalCompleted = expectation(description: "Presented picker dismissal completed")
+        picker.dismiss(animated: false) {
+            // This verifies delegate callback behavior, not a physical swipe gesture.
+            delegate.presentationControllerDidDismiss?(presentationController)
+            delegate.presentationControllerDidDismiss?(presentationController)
+            dismissalCompleted.fulfill()
+        }
+        await fulfillment(of: [dismissalCompleted], timeout: 3)
+        guard await assertNativePickerCancelled(
+            task,
+            isOwnedUIDetached: { presenter.presentedViewController == nil },
+            cleanupOwnedUI: {
+                if let picker = observedPicker,
+                   picker.presentingViewController === presenter {
+                    picker.dismiss(animated: false)
+                }
+            }
+        ) else {
+            return
+        }
+        XCTAssertNil(presenter.presentedViewController)
+        XCTAssertEqual(terminalCompletionCount, 1)
+    }
+
+    func testIOSDocumentPickerTaskCancellationDismissesOwnedPickerAndReleasesLifetime() async {
+        let host = PlanningCanvasHost(rootView: Text("Task cancellation host"))
+        defer { host.close() }
+        guard let presenter = host.window.rootViewController else {
+            XCTFail("The task-cancellation host has no mounted root presenter")
+            return
+        }
+
+        let firstPresented = expectation(description: "First document picker presented")
+        var firstPicker: UIDocumentPickerViewController?
+        var firstFinishCount = 0
+        let firstHooks = PlanningNativeDocumentPickerTestHooks(
+            didPresent: { owner, picker in
+                firstPicker = picker
+                XCTAssertTrue(owner === presenter)
+                XCTAssertTrue(presenter.presentedViewController === picker)
+                firstPresented.fulfill()
+            },
+            didFinish: { firstFinishCount += 1 }
+        )
+        let firstTask = Task { @MainActor in
+            try await PlanningVaultSelectionBroker.selectDocumentForTesting(
+                from: presenter,
+                hooks: firstHooks
+            )
+        }
+
+        await fulfillment(of: [firstPresented], timeout: 3)
+        guard let picker = firstPicker, presenter.presentedViewController === picker else {
+            XCTFail("The first document picker was not attached to its presenter")
+            _ = await assertNativePickerCancelled(
+                firstTask,
+                isOwnedUIDetached: { presenter.presentedViewController == nil },
+                cleanupOwnedUI: {
+                    if let picker = firstPicker,
+                       picker.presentingViewController === presenter {
+                        picker.dismiss(animated: false)
+                    }
+                }
+            )
+            return
+        }
+
+        firstTask.cancel()
+        guard await assertNativePickerCancelled(
+            firstTask,
+            isOwnedUIDetached: { presenter.presentedViewController == nil },
+            label: "First picker task cancellation",
+            cleanupOwnedUI: {
+                if let picker = firstPicker,
+                   picker.presentingViewController === presenter {
+                    picker.dismiss(animated: false)
+                }
+            }
+        ) else {
+            return
+        }
+        XCTAssertNil(presenter.presentedViewController)
+        XCTAssertEqual(firstFinishCount, 1)
+
+        let secondPresented = expectation(description: "Second document picker presented after cancellation")
+        var secondPicker: UIDocumentPickerViewController?
+        var secondFinishCount = 0
+        let secondHooks = PlanningNativeDocumentPickerTestHooks(
+            didPresent: { owner, picker in
+                secondPicker = picker
+                XCTAssertTrue(owner === presenter)
+                XCTAssertTrue(presenter.presentedViewController === picker)
+                secondPresented.fulfill()
+            },
+            didFinish: { secondFinishCount += 1 }
+        )
+        let secondTask = Task { @MainActor in
+            try await PlanningVaultSelectionBroker.selectDocumentForTesting(
+                from: presenter,
+                hooks: secondHooks
+            )
+        }
+
+        await fulfillment(of: [secondPresented], timeout: 3)
+        guard let secondPicker, presenter.presentedViewController === secondPicker else {
+            XCTFail("A second picker could not acquire the released lifetime gate")
+            _ = await assertNativePickerCancelled(
+                secondTask,
+                isOwnedUIDetached: { presenter.presentedViewController == nil },
+                cleanupOwnedUI: {
+                    if let picker = secondPicker,
+                       picker.presentingViewController === presenter {
+                        picker.dismiss(animated: false)
+                    }
+                }
+            )
+            return
+        }
+
+        secondTask.cancel()
+        guard await assertNativePickerCancelled(
+            secondTask,
+            isOwnedUIDetached: { presenter.presentedViewController == nil },
+            label: "Second picker task cancellation",
+            cleanupOwnedUI: {
+                if secondPicker.presentingViewController === presenter {
+                    secondPicker.dismiss(animated: false)
+                }
+            }
+        ) else {
+            return
+        }
+        XCTAssertNil(presenter.presentedViewController)
+        XCTAssertEqual(secondFinishCount, 1)
+    }
+#endif
 
     private func completeMountedDocumentSelection(
         _ probe: PlanningWorkspacePresentationProbe
