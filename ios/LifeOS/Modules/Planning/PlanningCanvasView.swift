@@ -7,6 +7,68 @@ import AppKit
 import UIKit
 #endif
 
+#if DEBUG
+/// Instance-scoped observation and control for mounted Canvas evidence.
+///
+/// The probe is deliberately unavailable outside DEBUG builds. Its setter is
+/// bound to the same closure used by the native input overlay, so test-driven
+/// viewport changes exercise the production state transition rather than a
+/// parallel test-only state path.
+@MainActor
+public final class PlanningCanvasViewportProbe {
+    public private(set) var initialViewport: PlanningCanvasViewport?
+    public private(set) var currentViewport: PlanningCanvasViewport?
+    public private(set) var isActive = false
+    public var onMount: (() -> Void)?
+    public var onDisappear: (() -> Void)?
+    public var onViewportChange: ((PlanningCanvasViewport) -> Void)?
+
+    private var applyViewport: ((PlanningCanvasViewport) -> Void)?
+
+    public init() {}
+
+    public func setViewport(_ viewport: PlanningCanvasViewport) {
+        applyViewport?(viewport)
+    }
+
+    fileprivate func mount(
+        applyViewport: @escaping (PlanningCanvasViewport) -> Void,
+        initialViewport: PlanningCanvasViewport
+    ) {
+        self.applyViewport = applyViewport
+        self.initialViewport = initialViewport
+        self.currentViewport = initialViewport
+        isActive = true
+        onMount?()
+        onViewportChange?(initialViewport)
+    }
+
+    fileprivate func report(_ viewport: PlanningCanvasViewport) {
+        if initialViewport == nil {
+            initialViewport = viewport
+        }
+        currentViewport = viewport
+        onViewportChange?(viewport)
+    }
+
+    fileprivate func clearCallbacks() {
+        guard isActive else {
+            applyViewport = nil
+            onMount = nil
+            onDisappear = nil
+            onViewportChange = nil
+            return
+        }
+        isActive = false
+        onDisappear?()
+        applyViewport = nil
+        onMount = nil
+        onDisappear = nil
+        onViewportChange = nil
+    }
+}
+#endif
+
 /// Tracks the identities that belong to a native touch sequence. UIKit may
 /// deliver the end of an old multi-touch sequence after a later touch has
 /// arrived, so cancelled live identities stay quarantined until their own end
@@ -100,6 +162,9 @@ public struct PlanningCanvasInputLifecycle: Equatable {
 public struct PlanningCanvasView: View {
     @ObservedObject private var coordinator: PlanningProjectCoordinator
     private let onInspect: (() -> Void)?
+#if DEBUG
+    private let viewportProbe: PlanningCanvasViewportProbe?
+#endif
     @State private var viewport = PlanningCanvasViewport()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -109,10 +174,31 @@ public struct PlanningCanvasView: View {
     ) {
         self.coordinator = coordinator
         self.onInspect = onInspect
+#if DEBUG
+        self.viewportProbe = nil
+#endif
     }
+
+#if DEBUG
+    internal init(
+        coordinator: PlanningProjectCoordinator,
+        onInspect: (() -> Void)? = nil,
+        viewportProbe: PlanningCanvasViewportProbe?
+    ) {
+        self.coordinator = coordinator
+        self.onInspect = onInspect
+        self.viewportProbe = viewportProbe
+    }
+#endif
 
     public var body: some View {
         GeometryReader { proxy in
+            let applyViewport: (PlanningCanvasViewport) -> Void = { nextViewport in
+                viewport = nextViewport
+#if DEBUG
+                viewportProbe?.report(nextViewport)
+#endif
+            }
             let handlers = PlanningCanvasInputHandlers(
                 nodeIDAtScreen: { screenPoint in
                     coordinator.nodeID(at: viewport.worldPoint(screen: screenPoint))
@@ -120,9 +206,7 @@ public struct PlanningCanvasView: View {
                 nodeIsLocked: { id in
                     coordinator.nodesByID[id]?.locked == true
                 },
-                onViewportChange: { nextViewport in
-                    viewport = nextViewport
-                },
+                onViewportChange: applyViewport,
                 onBeginNodeDrag: { id, screenPoint in
                     coordinator.beginNodeDrag(
                         id: id,
@@ -148,15 +232,26 @@ public struct PlanningCanvasView: View {
                 canvas(in: proxy.size)
                 PlanningCanvasInputOverlay(viewport: $viewport, handlers: handlers)
                     .accessibilityHidden(true)
-                toolbar(in: proxy.size)
+                toolbar(in: proxy.size, applyViewport: applyViewport)
             }
             .background(LifeOSTokens.canvas)
             .accessibilityAction(named: Text("Inspect selected node")) {
                 guard coordinator.selectedNodeID != nil else { return }
                 onInspect?()
             }
+#if DEBUG
+            .onAppear {
+                viewportProbe?.mount(
+                    applyViewport: applyViewport,
+                    initialViewport: viewport
+                )
+            }
+#endif
             .onDisappear {
                 coordinator.cancelNodeDrag()
+#if DEBUG
+                viewportProbe?.clearCallbacks()
+#endif
             }
             .task {
                 guard coordinator.document == nil else { return }
@@ -261,10 +356,13 @@ public struct PlanningCanvasView: View {
             .background(.ultraThinMaterial, in: Capsule())
     }
 
-    private func toolbar(in size: CGSize) -> some View {
+    private func toolbar(
+        in size: CGSize,
+        applyViewport: @escaping (PlanningCanvasViewport) -> Void
+    ) -> some View {
         HStack(spacing: LifeOSTokens.Space.xs) {
             toolbarButton("arrow.up.left.and.arrow.down.right", label: "Fit") {
-                fit(in: size)
+                fit(in: size, applyViewport: applyViewport)
             }
             if coordinator.allowsEditing {
                 toolbarButton("arrow.uturn.backward", label: "Undo") {
@@ -343,14 +441,17 @@ public struct PlanningCanvasView: View {
         .accessibilityLabel(label)
     }
 
-    private func fit(in size: CGSize) {
+    private func fit(
+        in size: CGSize,
+        applyViewport: (PlanningCanvasViewport) -> Void
+    ) {
         var next = viewport
         next.fit(bounds: coordinator.fitBounds(), in: size, padding: 32)
         if reduceMotion {
-            viewport = next
+            applyViewport(next)
         } else {
             withAnimation(.snappy(duration: 0.22)) {
-                viewport = next
+                applyViewport(next)
             }
         }
     }

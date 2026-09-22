@@ -2,6 +2,96 @@ import Foundation
 import XCTest
 @testable import LifeOSMac
 
+#if DEBUG
+import SwiftUI
+#if os(macOS)
+import AppKit
+
+@MainActor
+private final class PlanningCanvasHost {
+    private let hostingView: NSHostingView<AnyView>
+    private(set) var window: NSWindow
+    private var didClose = false
+
+    init<Content: View>(rootView: Content) {
+        let hostingView = NSHostingView(rootView: AnyView(rootView))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 960, height: 720),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        self.hostingView = hostingView
+        self.window = window
+        window.isReleasedWhenClosed = false
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        hostingView.frame = window.contentView?.bounds ?? .zero
+        hostingView.autoresizingMask = [.width, .height]
+        hostingView.layoutSubtreeIfNeeded()
+    }
+
+    func close() {
+        guard !didClose else { return }
+        didClose = true
+        window.contentView = nil
+        window.orderOut(nil)
+        window.close()
+    }
+}
+#elseif os(iOS)
+import UIKit
+
+@MainActor
+private final class PlanningCanvasHost {
+    private let hostingController: UIHostingController<AnyView>
+    private(set) var window: UIWindow
+    private var didClose = false
+
+    init<Content: View>(rootView: Content) {
+        let hostingController = UIHostingController(rootView: AnyView(rootView))
+        let window = UIWindow(frame: UIScreen.main.bounds)
+        self.hostingController = hostingController
+        self.window = window
+        window.rootViewController = hostingController
+        window.makeKeyAndVisible()
+        hostingController.view.frame = window.bounds
+        hostingController.view.layoutIfNeeded()
+    }
+
+    func close() {
+        guard !didClose else { return }
+        didClose = true
+        hostingController.view.removeFromSuperview()
+        window.rootViewController = nil
+        window.isHidden = true
+    }
+}
+#endif
+#endif
+
+private final class PlanningWorkspaceTaskState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+
+    func markCompleted() {
+        lock.lock()
+        completed = true
+        lock.unlock()
+    }
+
+    var isCompleted: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return completed
+    }
+}
+
+private final class PlanningWorkspaceTaskBox: @unchecked Sendable {
+    var openTask: Task<Void, Never>?
+    var unmountTask: Task<Void, Never>?
+}
+
 private actor PlanningWorkspaceTestGate {
     private var entered = false
     private var released = false
@@ -162,12 +252,20 @@ final class PlanningWorkspaceTests: XCTestCase {
 
     private func assertSelectionRejected(_ url: URL, store: PlanningVaultStore,
                                          context: PlanningCanvasAccessContext,
+                                         expected: PlanningFilesystemError? = nil,
                                          file: StaticString = #filePath, line: UInt = #line) async throws {
         let selection = try PlanningUserSelectedDocument(pickerURL: url)
         do {
             _ = try await store.resolveSelectedDocument(selection, expectedContext: context)
             XCTFail("Unexpectedly accepted \(url)", file: file, line: line)
-        } catch { /* Rejection is the required boundary behavior. */ }
+        } catch let error as PlanningFilesystemError {
+            if let expected {
+                XCTAssertEqual(error, expected, file: file, line: line)
+                XCTAssertEqual(error.stableCode, expected.stableCode, file: file, line: line)
+            }
+        } catch {
+            XCTFail("Unexpected rejection error type: \(error)", file: file, line: line)
+        }
     }
 
     func testDocumentSelectionRoutesExistingCanvasAndMarkdown() async throws {
@@ -433,6 +531,406 @@ final class PlanningWorkspaceTests: XCTestCase {
         let status = try await f.store.status()
         XCTAssertEqual(status.pendingMutationCount, 0)
     }
+
+#if DEBUG
+    private enum FixtureEntryKind: Equatable {
+        case directory
+        case regularFile
+        case symbolicLink
+        case other
+    }
+
+    private struct FixtureEntrySnapshot: Equatable {
+        let kind: FixtureEntryKind
+        let bytes: Data?
+        let modificationDate: Date?
+        let symlinkDestination: String?
+    }
+
+    private enum FixtureSnapshotError: Error {
+        case missingType(URL)
+    }
+
+    private func fixtureSnapshot(at root: URL) throws -> [String: FixtureEntrySnapshot] {
+        let fileManager = FileManager.default
+        var snapshots: [String: FixtureEntrySnapshot] = [:]
+
+        func visit(_ url: URL, relativePath: String) throws {
+            let attributes = try fileManager.attributesOfItem(atPath: url.path)
+            guard let type = attributes[.type] as? FileAttributeType else {
+                throw FixtureSnapshotError.missingType(url)
+            }
+            let modificationDate = attributes[.modificationDate] as? Date
+
+            if type == .typeDirectory {
+                snapshots[relativePath] = FixtureEntrySnapshot(
+                    kind: .directory,
+                    bytes: nil,
+                    modificationDate: modificationDate,
+                    symlinkDestination: nil
+                )
+                let children = try fileManager.contentsOfDirectory(
+                    at: url,
+                    includingPropertiesForKeys: nil,
+                    options: []
+                ).sorted { $0.path < $1.path }
+                for child in children {
+                    let childPath = relativePath == "."
+                        ? child.lastPathComponent
+                        : relativePath + "/" + child.lastPathComponent
+                    try visit(child, relativePath: childPath)
+                }
+            } else if type == .typeRegular {
+                snapshots[relativePath] = FixtureEntrySnapshot(
+                    kind: .regularFile,
+                    bytes: try Data(contentsOf: url),
+                    modificationDate: modificationDate,
+                    symlinkDestination: nil
+                )
+            } else if type == .typeSymbolicLink {
+                snapshots[relativePath] = FixtureEntrySnapshot(
+                    kind: .symbolicLink,
+                    bytes: nil,
+                    modificationDate: modificationDate,
+                    symlinkDestination: try fileManager.destinationOfSymbolicLink(atPath: url.path)
+                )
+            } else {
+                snapshots[relativePath] = FixtureEntrySnapshot(
+                    kind: .other,
+                    bytes: nil,
+                    modificationDate: modificationDate,
+                    symlinkDestination: nil
+                )
+            }
+        }
+
+        try visit(root, relativePath: ".")
+        return snapshots
+    }
+
+    private func canvasHost(
+        for workspace: PlanningWorkspaceCoordinator,
+        probe: PlanningCanvasViewportProbe
+    ) throws -> PlanningCanvasHost {
+        let project = try XCTUnwrap(workspace.project)
+        return PlanningCanvasHost(
+            rootView: PlanningCanvasView(
+                coordinator: project,
+                viewportProbe: probe
+            )
+        )
+    }
+
+    private func canvasViewport(
+        _ probe: PlanningCanvasViewportProbe
+    ) async throws -> PlanningCanvasViewport {
+        if let viewport = probe.currentViewport {
+            return viewport
+        }
+        let mounted = expectation(description: "Canvas viewport mounted")
+        probe.onMount = { mounted.fulfill() }
+        if probe.currentViewport != nil {
+            mounted.fulfill()
+        }
+        await fulfillment(of: [mounted], timeout: 2)
+        probe.onMount = nil
+        return try XCTUnwrap(probe.currentViewport)
+    }
+
+    private func setCanvasViewport(
+        _ viewport: PlanningCanvasViewport,
+        on probe: PlanningCanvasViewportProbe
+    ) async {
+        guard probe.currentViewport != viewport else { return }
+        let changed = expectation(description: "Canvas viewport changed")
+        probe.onViewportChange = { next in
+            if next == viewport { changed.fulfill() }
+        }
+        defer { probe.onViewportChange = nil }
+        probe.setViewport(viewport)
+        if probe.currentViewport != viewport {
+            await fulfillment(of: [changed], timeout: 2)
+        }
+    }
+
+    private func drainTask(
+        _ task: Task<Void, Never>?,
+        state: PlanningWorkspaceTaskState,
+        finished: XCTestExpectation,
+        label: String
+    ) async {
+        guard let task else { return }
+        task.cancel()
+        if !state.isCompleted {
+            await fulfillment(of: [finished], timeout: 2)
+        }
+        if state.isCompleted {
+            await task.value
+        } else {
+            XCTFail("Timed out draining \(label) task")
+        }
+    }
+
+    func testDocumentSelectionSupersedesStaleTicket() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let w = await chooserWorkspace(f)
+        let probe = PlanningCanvasViewportProbe()
+        let host = try canvasHost(for: w, probe: probe)
+        defer { host.close() }
+        _ = try await canvasViewport(probe)
+
+        let first = try XCTUnwrap(w.beginDocumentSelection())
+        let second = try XCTUnwrap(w.beginDocumentSelection())
+        XCTAssertNotEqual(first, second)
+        w.cancelDocumentSelection(first)
+        w.cancelDocumentSelection(second)
+    }
+
+    func testCanvasViewportSurvivesDocumentCancellation() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let w = await chooserWorkspace(f)
+        let probe = PlanningCanvasViewportProbe()
+        let host = try canvasHost(for: w, probe: probe)
+        defer { host.close() }
+        _ = try await canvasViewport(probe)
+
+        let expected = PlanningCanvasViewport(
+            translation: CGSize(width: 137, height: -83),
+            scale: 1.35
+        )
+        await setCanvasViewport(expected, on: probe)
+        let viewportAfterInput = try XCTUnwrap(probe.currentViewport)
+        XCTAssertEqual(viewportAfterInput, expected)
+
+        let ticket = try XCTUnwrap(w.beginDocumentSelection())
+        w.cancelDocumentSelection(ticket)
+        XCTAssertEqual(probe.currentViewport, expected)
+        XCTAssertNotNil(w.project)
+    }
+
+    func testCanvasViewportSurvivesDocumentFailure() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let w = await chooserWorkspace(f)
+        let project = try XCTUnwrap(w.project)
+        let probe = PlanningCanvasViewportProbe()
+        let host = try canvasHost(for: w, probe: probe)
+        defer { host.close() }
+        _ = try await canvasViewport(probe)
+
+        let expected = PlanningCanvasViewport(
+            translation: CGSize(width: 137, height: -83),
+            scale: 1.35
+        )
+        await setCanvasViewport(expected, on: probe)
+        try writeNote(f, path: "Projects/Broken.canvas", source: "not canvas")
+        try await choose("Projects/Broken.canvas", fixture: f, workspace: w)
+
+        XCTAssertTrue(w.project === project)
+        XCTAssertEqual(probe.currentViewport, expected)
+        XCTAssertNotNil(w.lastError)
+        XCTAssertTrue(w.canRetryDocumentSelection)
+    }
+
+    func testDocumentSelectionUnmountIgnoresLateResult() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/Late.md", source: "# Late")
+        let w = await chooserWorkspace(f)
+        let probe = PlanningCanvasViewportProbe()
+        let host = try canvasHost(for: w, probe: probe)
+        let gate = PlanningWorkspaceTestGate()
+        let tasks = PlanningWorkspaceTaskBox()
+        let openState = PlanningWorkspaceTaskState()
+        let unmountState = PlanningWorkspaceTaskState()
+        let openFinished = expectation(description: "Late document selection task finished")
+        let unmountFinished = expectation(description: "Workspace unmount task finished")
+        let cleanupOpenFinished = expectation(description: "Cleanup: late document selection task finished")
+        let cleanupUnmountFinished = expectation(description: "Cleanup: workspace unmount task finished")
+        let gateEntered = expectation(description: "Document selection reached the lifecycle gate")
+        let probeDisappeared = expectation(description: "Canvas probe disappeared")
+        probe.onDisappear = { probeDisappeared.fulfill() }
+        w.afterDocumentSelectionResolution = {
+            gateEntered.fulfill()
+            await gate.wait()
+        }
+        addTeardownBlock { @MainActor in
+            defer {
+                w.afterDocumentSelectionResolution = nil
+                host.close()
+                probe.onMount = nil
+                probe.onDisappear = nil
+                probe.onViewportChange = nil
+            }
+            w.afterDocumentSelectionResolution = nil
+            host.close()
+            await gate.release()
+            await self.drainTask(
+                tasks.openTask,
+                state: openState,
+                finished: cleanupOpenFinished,
+                label: "document selection"
+            )
+            await self.drainTask(
+                tasks.unmountTask,
+                state: unmountState,
+                finished: cleanupUnmountFinished,
+                label: "workspace unmount"
+            )
+        }
+
+        _ = try await canvasViewport(probe)
+        let ticket = try XCTUnwrap(w.beginDocumentSelection())
+        let selection = try PlanningUserSelectedDocument(
+            pickerURL: noteURL(f, path: "Projects/Late.md")
+        )
+        tasks.openTask = Task {
+            defer {
+                openState.markCompleted()
+                openFinished.fulfill()
+                cleanupOpenFinished.fulfill()
+            }
+            await w.openSelectedDocument(selection, ticket: ticket)
+        }
+        await fulfillment(of: [gateEntered], timeout: 2)
+
+        w.requestUnmount()
+        tasks.unmountTask = Task {
+            defer {
+                unmountState.markCompleted()
+                unmountFinished.fulfill()
+                cleanupUnmountFinished.fulfill()
+            }
+            await w.unmount()
+        }
+        await gate.release()
+        await fulfillment(of: [openFinished, unmountFinished], timeout: 2)
+        if openState.isCompleted { await tasks.openTask?.value }
+        if unmountState.isCompleted { await tasks.unmountTask?.value }
+
+        host.close()
+        await fulfillment(of: [probeDisappeared], timeout: 2)
+
+        XCTAssertNil(w.inspectorNoteSource)
+        XCTAssertNil(w.project)
+        XCTAssertEqual(w.phase, .idle)
+        XCTAssertFalse(probe.isActive)
+        XCTAssertNil(probe.onViewportChange)
+    }
+
+    func testDocumentSelectionCanReopenAfterCancellation() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let w = await chooserWorkspace(f)
+        let probe = PlanningCanvasViewportProbe()
+        let host = try canvasHost(for: w, probe: probe)
+        defer { host.close() }
+        let initial = try await canvasViewport(probe)
+
+        let first = try XCTUnwrap(w.beginDocumentSelection())
+        w.cancelDocumentSelection(first)
+        let second = try XCTUnwrap(w.beginDocumentSelection())
+        w.cancelDocumentSelection(second)
+
+        XCTAssertEqual(probe.currentViewport, initial)
+        XCTAssertTrue(w.phase == .showingCanvas)
+    }
+
+    func testPickedMarkdownBackPreservesCanvasViewport() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/Note.md", source: "# Note")
+        let w = await chooserWorkspace(f)
+        let project = try XCTUnwrap(w.project)
+        let probe = PlanningCanvasViewportProbe()
+        let host = try canvasHost(for: w, probe: probe)
+        defer { host.close() }
+        _ = try await canvasViewport(probe)
+
+        let expected = PlanningCanvasViewport(
+            translation: CGSize(width: 137, height: -83),
+            scale: 1.35
+        )
+        await setCanvasViewport(expected, on: probe)
+        try await choose("Projects/Note.md", fixture: f, workspace: w)
+        w.closeInspectorNote()
+
+        XCTAssertTrue(w.project === project)
+        XCTAssertEqual(w.phase, .showingCanvas)
+        XCTAssertEqual(probe.currentViewport, expected)
+    }
+
+    func testStandaloneMarkdownPreviewBackReturnsToReady() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/Note.md", source: "# Note")
+        let w = await chooserWorkspace(f, canvas: false)
+        try await choose("Projects/Note.md", fixture: f, workspace: w)
+        XCTAssertEqual(w.phase, .ready)
+        XCTAssertEqual(w.inspectorNoteSource, "# Note")
+        w.closeInspectorNote()
+
+        XCTAssertEqual(w.phase, .ready)
+        XCTAssertFalse(w.isInspectorPresented)
+        XCTAssertNil(w.project)
+        w.requestUnmount()
+        await w.unmount()
+    }
+
+    func testVaultChooserRoundTripDoesNotMutateVault() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/Note.md", source: "# Untouched")
+        let w = await chooserWorkspace(f)
+        let before = try fixtureSnapshot(at: f.root)
+        try await choose("Projects/Note.md", fixture: f, workspace: w)
+        XCTAssertEqual(w.inspectorNoteSource, "# Untouched")
+        w.closeInspectorNote()
+        try await choose("Projects/Personal.canvas", fixture: f, workspace: w)
+        XCTAssertEqual(w.openedPath?.value, "Projects/Personal.canvas")
+        XCTAssertEqual(w.phase, .showingCanvas)
+        let after = try fixtureSnapshot(at: f.root)
+        XCTAssertEqual(after, before)
+        let status = try await f.store.status()
+        XCTAssertEqual(status.pendingMutationCount, 0)
+        w.requestUnmount()
+        await w.unmount()
+    }
+
+    func testVaultChooserRejectsSiblingAndSymlink() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let siblingURL = f.root.appendingPathComponent("LifeOS-other/Sibling.md")
+        try FileManager.default.createDirectory(
+            at: siblingURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("# Sibling".utf8).write(to: siblingURL, options: .atomic)
+        let outsideURL = f.root.appendingPathComponent("Outside.md")
+        try Data("# Outside".utf8).write(to: outsideURL, options: .atomic)
+        let symlinkURL = noteURL(f, path: "Projects/Escape.md")
+        try FileManager.default.createDirectory(
+            at: symlinkURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createSymbolicLink(
+            at: symlinkURL,
+            withDestinationURL: outsideURL
+        )
+        let w = await chooserWorkspace(f)
+        let context = try await f.store.currentCanvasAccessContext()
+
+        try await assertSelectionRejected(
+            siblingURL,
+            store: f.store,
+            context: context,
+            expected: .invalid("document.containment")
+        )
+        try await assertSelectionRejected(
+            symlinkURL,
+            store: f.store,
+            context: context,
+            expected: .needsReselection
+        )
+
+        w.requestUnmount()
+        await w.unmount()
+    }
+
+#endif
 
     private struct Fixture {
         let root: URL
