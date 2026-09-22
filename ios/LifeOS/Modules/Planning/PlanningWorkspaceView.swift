@@ -2,8 +2,156 @@ import SwiftUI
 
 #if os(macOS)
 import AppKit
+private typealias PlanningWorkspaceNativePresenter = NSWindow
 #elseif os(iOS)
 import UIKit
+private typealias PlanningWorkspaceNativePresenter = UIViewController
+#endif
+
+/// Holds the native picker presenter without publishing SwiftUI state changes.
+/// The owner token prevents stale representable teardown from clearing a newer
+/// representable instance's presenter.
+@MainActor
+internal final class PlanningWorkspacePresenterReference<Object: AnyObject> {
+    private(set) weak var value: Object?
+    private(set) var ownerID: UUID?
+
+    @discardableResult
+    internal func attach(_ value: Object, ownerID: UUID) -> Bool {
+        guard self.ownerID != ownerID || self.value !== value else { return false }
+        self.value = value
+        self.ownerID = ownerID
+        return true
+    }
+
+    @discardableResult
+    internal func detach(ownerID: UUID) -> Bool {
+        guard self.ownerID == ownerID else { return false }
+        value = nil
+        self.ownerID = nil
+        return true
+    }
+}
+
+#if DEBUG
+/// Instance-scoped control and observation for mounted workspace evidence.
+///
+/// The probe owns no workspace state. It only invokes the view's existing
+/// action and records lifecycle transitions emitted by that view instance.
+@MainActor
+internal final class PlanningWorkspacePresentationProbe {
+#if os(iOS)
+    internal typealias DocumentSelectionHandler =
+        (UIViewController) async throws -> PlanningUserSelectedDocument?
+#elseif os(macOS)
+    internal typealias DocumentSelectionHandler =
+        (NSWindow?) async throws -> PlanningUserSelectedDocument?
+#endif
+
+    internal let viewportProbe: PlanningCanvasViewportProbe?
+    internal var controlledDocumentSelection: DocumentSelectionHandler?
+
+    internal private(set) var isMounted = false
+    internal private(set) var isPickerTaskActive = false
+    internal private(set) var activePickerGeneration: UUID?
+    internal private(set) var currentPickerError: String?
+    internal private(set) var isPresenterReady = false
+    internal private(set) var isInspectorPresented = false
+    internal private(set) var mountCount = 0
+    internal private(set) var unmountCount = 0
+
+    internal var onMount: (() -> Void)?
+    internal var onUnmount: (() -> Void)?
+    internal var onPickerTaskStart: ((UUID) -> Void)?
+    internal var onPickerTaskFinish: ((UUID) -> Void)?
+    internal var onPickerErrorChange: ((String?) -> Void)?
+    internal var onPresenterReadyChange: ((Bool) -> Void)?
+    internal var onInspectorPresentedChange: ((Bool) -> Void)?
+
+    private var ownerID: UUID?
+    private var chooseDocumentAction: (() -> Void)?
+
+    internal init(viewportProbe: PlanningCanvasViewportProbe? = nil) {
+        self.viewportProbe = viewportProbe
+    }
+
+    internal func chooseDocument() {
+        chooseDocumentAction?()
+    }
+
+    internal func bind(
+        ownerID: UUID,
+        currentPickerError: String?,
+        presenterReady: Bool,
+        inspectorPresented: Bool,
+        chooseDocument: @escaping () -> Void
+    ) {
+        let ownerChanged = self.ownerID != ownerID
+        let wasMounted = isMounted
+        self.ownerID = ownerID
+        self.chooseDocumentAction = chooseDocument
+        self.currentPickerError = currentPickerError
+        self.isPresenterReady = presenterReady
+        self.isInspectorPresented = inspectorPresented
+        if ownerChanged {
+            isPickerTaskActive = false
+            activePickerGeneration = nil
+        }
+        isMounted = true
+        if !wasMounted || ownerChanged {
+            mountCount += 1
+            onMount?()
+        }
+    }
+
+    internal func unbind(ownerID: UUID) {
+        guard self.ownerID == ownerID else { return }
+        self.ownerID = nil
+        chooseDocumentAction = nil
+        let wasMounted = isMounted
+        isMounted = false
+        currentPickerError = nil
+        isPresenterReady = false
+        isInspectorPresented = false
+        if wasMounted {
+            unmountCount += 1
+            onUnmount?()
+        }
+    }
+
+    internal func updatePickerError(_ error: String?, ownerID: UUID) {
+        guard self.ownerID == ownerID, currentPickerError != error else { return }
+        currentPickerError = error
+        onPickerErrorChange?(error)
+    }
+
+    internal func updatePresenterReady(_ ready: Bool, ownerID: UUID) {
+        guard self.ownerID == ownerID, isPresenterReady != ready else { return }
+        isPresenterReady = ready
+        onPresenterReadyChange?(ready)
+    }
+
+    internal func updateInspectorPresented(_ presented: Bool, ownerID: UUID) {
+        guard self.ownerID == ownerID, isInspectorPresented != presented else { return }
+        isInspectorPresented = presented
+        onInspectorPresentedChange?(presented)
+    }
+
+    internal func pickerTaskDidStart(_ generation: UUID, ownerID: UUID) {
+        guard self.ownerID == ownerID else { return }
+        isPickerTaskActive = true
+        activePickerGeneration = generation
+        onPickerTaskStart?(generation)
+    }
+
+    internal func pickerTaskDidFinish(_ generation: UUID, ownerID: UUID) {
+        guard activePickerGeneration == generation,
+              self.ownerID == ownerID || self.ownerID == nil else { return }
+        isPickerTaskActive = false
+        activePickerGeneration = nil
+        onPickerTaskFinish?(generation)
+    }
+}
 #endif
 
 /// Native entry surface for an existing Obsidian-backed Canvas. This view
@@ -17,13 +165,12 @@ public struct PlanningWorkspaceView: View {
     @State private var pickerTask: Task<Void, Never>?
     @State private var pickerGeneration = UUID()
     @State private var activeDocumentTicket: PlanningDocumentSelectionTicket?
-#if os(iOS)
-    @State private var pickerPresenter: UIViewController?
-    @State private var pickerPresenterOwnerID: UUID?
-#elseif os(macOS)
-    @State private var pickerWindow: NSWindow?
-    @State private var pickerWindowOwnerID: UUID?
+#if DEBUG
+    private let presentationProbe: PlanningWorkspacePresentationProbe?
+    @State private var presentationProbeOwnerID = UUID()
 #endif
+    @State private var presenterReference =
+        PlanningWorkspacePresenterReference<PlanningWorkspaceNativePresenter>()
 
     public init(
         coordinator: PlanningWorkspaceCoordinator,
@@ -31,7 +178,22 @@ public struct PlanningWorkspaceView: View {
     ) {
         self.coordinator = coordinator
         self.onDone = onDone
+#if DEBUG
+        self.presentationProbe = nil
+#endif
     }
+
+#if DEBUG
+    internal init(
+        coordinator: PlanningWorkspaceCoordinator,
+        onDone: (() -> Void)? = nil,
+        presentationProbe: PlanningWorkspacePresentationProbe?
+    ) {
+        self.coordinator = coordinator
+        self.onDone = onDone
+        self.presentationProbe = presentationProbe
+    }
+#endif
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -43,35 +205,43 @@ public struct PlanningWorkspaceView: View {
 #if os(iOS)
         .background {
             PlanningWorkspacePresenterBridge { presenter, ownerID in
-                if let presenter {
-                    pickerPresenter = presenter
-                    pickerPresenterOwnerID = ownerID
-                } else if pickerPresenterOwnerID == ownerID {
-                    pickerPresenter = nil
-                    pickerPresenterOwnerID = nil
-                }
+                updateNativePresenter(presenter, ownerID: ownerID)
             }
             .frame(width: 0, height: 0)
         }
 #elseif os(macOS)
         .background {
             PlanningWorkspaceWindowBridge { window, ownerID in
-                if let window {
-                    pickerWindow = window
-                    pickerWindowOwnerID = ownerID
-                } else if pickerWindowOwnerID == ownerID {
-                    pickerWindow = nil
-                    pickerWindowOwnerID = nil
-                }
+                updateNativePresenter(window, ownerID: ownerID)
             }
             .frame(width: 0, height: 0)
         }
 #endif
+        .onChange(of: coordinator.isInspectorPresented) { _, presented in
+#if DEBUG
+            presentationProbe?.updateInspectorPresented(
+                presented,
+                ownerID: presentationProbeOwnerID
+            )
+#endif
+        }
         .onAppear {
+#if DEBUG
+            presentationProbe?.bind(
+                ownerID: presentationProbeOwnerID,
+                currentPickerError: pickerError,
+                presenterReady: presenterReference.value != nil,
+                inspectorPresented: coordinator.isInspectorPresented,
+                chooseDocument: { chooseDocument() }
+            )
+#endif
             coordinator.requestMount()
         }
         .onDisappear {
             cancelPickerPresentation()
+#if DEBUG
+            presentationProbe?.unbind(ownerID: presentationProbeOwnerID)
+#endif
             coordinator.requestUnmount()
         }
     }
@@ -293,11 +463,8 @@ public struct PlanningWorkspaceView: View {
                             .accessibilityIdentifier("planning-document-retry")
                     }
                 }
-                PlanningWorkspaceCanvasContent(
-                    workspace: coordinator,
-                    project: project
-                )
-                .accessibilityIdentifier("planning-workspace-canvas")
+                canvasContent(for: project)
+                    .accessibilityIdentifier("planning-workspace-canvas")
             }
         } else {
             progressState
@@ -357,6 +524,40 @@ public struct PlanningWorkspaceView: View {
         .padding(LifeOSTokens.Space.xl)
     }
 
+    private func canvasContent(
+        for project: PlanningProjectCoordinator
+    ) -> PlanningWorkspaceCanvasContent {
+#if DEBUG
+        return PlanningWorkspaceCanvasContent(
+            workspace: coordinator,
+            project: project,
+            viewportProbe: presentationProbe?.viewportProbe
+        )
+#else
+        return PlanningWorkspaceCanvasContent(workspace: coordinator, project: project)
+#endif
+    }
+
+    private func updateNativePresenter(
+        _ presenter: PlanningWorkspaceNativePresenter?,
+        ownerID: UUID
+    ) {
+        let changed: Bool
+        if let presenter {
+            changed = presenterReference.attach(presenter, ownerID: ownerID)
+        } else {
+            changed = presenterReference.detach(ownerID: ownerID)
+        }
+#if DEBUG
+        if changed {
+            presentationProbe?.updatePresenterReady(
+                presenterReference.value != nil,
+                ownerID: presentationProbeOwnerID
+            )
+        }
+#endif
+    }
+
     private func cancelPickerPresentation() {
         pickerGeneration = UUID()
         pickerTask?.cancel()
@@ -365,6 +566,41 @@ public struct PlanningWorkspaceView: View {
             coordinator.cancelDocumentSelection(activeDocumentTicket)
             self.activeDocumentTicket = nil
         }
+    }
+
+    private func setPickerError(_ error: String?) {
+        pickerError = error
+#if DEBUG
+        presentationProbe?.updatePickerError(error, ownerID: presentationProbeOwnerID)
+#endif
+    }
+
+    private func assignPickerTask(
+        _ task: Task<Void, Never>,
+        generation: UUID
+    ) {
+        pickerTask = task
+#if DEBUG
+        presentationProbe?.pickerTaskDidStart(generation, ownerID: presentationProbeOwnerID)
+#endif
+    }
+
+    private func finishPickerTask(
+        generation: UUID,
+        ticket: PlanningDocumentSelectionTicket? = nil
+    ) {
+        if pickerGeneration == generation {
+            pickerTask = nil
+            if let ticket, activeDocumentTicket == ticket {
+                activeDocumentTicket = nil
+            }
+        }
+        if let ticket {
+            coordinator.cancelDocumentSelection(ticket)
+        }
+#if DEBUG
+        presentationProbe?.pickerTaskDidFinish(generation, ownerID: presentationProbeOwnerID)
+#endif
     }
 
     private func pickerErrorDescription(_ error: Error) -> String {
@@ -376,115 +612,126 @@ public struct PlanningWorkspaceView: View {
 
     private func chooseVault() {
         guard pickerTask == nil else { return }
-        pickerError = nil
+        setPickerError(nil)
         let generation = UUID()
         pickerGeneration = generation
 #if os(iOS)
-        guard let pickerPresenter else {
-            pickerError = PlanningFilesystemError.unavailable("pickerPresenter").localizedDescription
+        guard let presenter = presenterReference.value else {
+            setPickerError(PlanningFilesystemError.unavailable("pickerPresenter").localizedDescription)
             return
         }
-        pickerTask = Task { @MainActor in
+        let task = Task { @MainActor in
             defer {
-                if pickerGeneration == generation {
-                    pickerTask = nil
-                }
+                finishPickerTask(generation: generation)
             }
             do {
-                if let selection = try await PlanningVaultSelectionBroker.selectDirectory(from: pickerPresenter) {
+                if let selection = try await PlanningVaultSelectionBroker.selectDirectory(from: presenter) {
                     guard !Task.isCancelled, pickerGeneration == generation else { return }
                     await coordinator.attach(selection)
                 }
             } catch {
                 guard !Task.isCancelled, pickerGeneration == generation else { return }
-                pickerError = pickerErrorDescription(error)
+                setPickerError(pickerErrorDescription(error))
             }
         }
+        assignPickerTask(task, generation: generation)
 #elseif os(macOS)
-        pickerTask = Task { @MainActor in
+        let window = presenterReference.value
+        let task = Task { @MainActor in
             defer {
-                if pickerGeneration == generation {
-                    pickerTask = nil
-                }
+                finishPickerTask(generation: generation)
             }
             do {
-                if let selection = try PlanningVaultSelectionBroker.selectDirectory(presenting: pickerWindow) {
+                if let selection = try PlanningVaultSelectionBroker.selectDirectory(presenting: window) {
                     guard !Task.isCancelled, pickerGeneration == generation else { return }
                     await coordinator.attach(selection)
                 }
             } catch {
                 guard !Task.isCancelled, pickerGeneration == generation else { return }
-                pickerError = pickerErrorDescription(error)
+                setPickerError(pickerErrorDescription(error))
             }
         }
+        assignPickerTask(task, generation: generation)
 #endif
     }
 
     private func chooseDocument() {
         guard pickerTask == nil else { return }
-        pickerError = nil
+        setPickerError(nil)
         let generation = UUID()
         pickerGeneration = generation
         guard let ticket = coordinator.beginDocumentSelection() else {
-            pickerError = "Choose a ready planning workspace before selecting a document."
+            setPickerError("Choose a ready planning workspace before selecting a document.")
             return
         }
         activeDocumentTicket = ticket
 
 #if os(iOS)
-        guard let pickerPresenter else {
+        guard let presenter = presenterReference.value else {
             coordinator.cancelDocumentSelection(ticket)
             activeDocumentTicket = nil
-            pickerError = PlanningFilesystemError.unavailable("pickerPresenter").localizedDescription
+            setPickerError(PlanningFilesystemError.unavailable("pickerPresenter").localizedDescription)
             return
         }
-        pickerTask = Task { @MainActor in
+#if DEBUG
+        let controlledDocumentSelection = presentationProbe?.controlledDocumentSelection
+#endif
+        let selectDocument: () async throws -> PlanningUserSelectedDocument? = {
+#if DEBUG
+            if let controlledDocumentSelection {
+                return try await controlledDocumentSelection(presenter)
+            }
+#endif
+            return try await PlanningVaultSelectionBroker.selectDocument(from: presenter)
+        }
+        let task = Task { @MainActor in
             defer {
-                if pickerGeneration == generation {
-                    pickerTask = nil
-                    if activeDocumentTicket == ticket {
-                        activeDocumentTicket = nil
-                    }
-                }
-                coordinator.cancelDocumentSelection(ticket)
+                finishPickerTask(generation: generation, ticket: ticket)
             }
             do {
-                if let selection = try await PlanningVaultSelectionBroker.selectDocument(from: pickerPresenter) {
+                if let selection = try await selectDocument() {
                     guard !Task.isCancelled, pickerGeneration == generation else { return }
                     await coordinator.openSelectedDocument(selection, ticket: ticket)
                 }
             } catch {
                 guard !Task.isCancelled, pickerGeneration == generation else { return }
-                pickerError = pickerErrorDescription(error)
+                setPickerError(pickerErrorDescription(error))
             }
         }
+        assignPickerTask(task, generation: generation)
 #elseif os(macOS)
-        guard let pickerWindow else {
+        guard let window = presenterReference.value else {
             coordinator.cancelDocumentSelection(ticket)
             activeDocumentTicket = nil
-            pickerError = PlanningFilesystemError.unavailable("pickerPresenter").localizedDescription
+            setPickerError(PlanningFilesystemError.unavailable("pickerPresenter").localizedDescription)
             return
         }
-        pickerTask = Task { @MainActor in
+#if DEBUG
+        let controlledDocumentSelection = presentationProbe?.controlledDocumentSelection
+#endif
+        let selectDocument: () async throws -> PlanningUserSelectedDocument? = {
+#if DEBUG
+            if let controlledDocumentSelection {
+                return try await controlledDocumentSelection(window)
+            }
+#endif
+            return try await PlanningVaultSelectionBroker.selectDocument(presenting: window)
+        }
+        let task = Task { @MainActor in
             defer {
-                if pickerGeneration == generation {
-                    pickerTask = nil
-                    if activeDocumentTicket == ticket {
-                        activeDocumentTicket = nil
-                    }
-                }
-                coordinator.cancelDocumentSelection(ticket)
+                finishPickerTask(generation: generation, ticket: ticket)
             }
             do {
-                if let selection = try await PlanningVaultSelectionBroker.selectDocument(presenting: pickerWindow) {
+                if let selection = try await selectDocument() {
                     guard !Task.isCancelled, pickerGeneration == generation else { return }
                     await coordinator.openSelectedDocument(selection, ticket: ticket)
                 }
             } catch {
                 guard !Task.isCancelled, pickerGeneration == generation else { return }
-                pickerError = pickerErrorDescription(error)
+                setPickerError(pickerErrorDescription(error))
             }
         }
+        assignPickerTask(task, generation: generation)
 #endif
     }
 }
@@ -492,16 +739,31 @@ public struct PlanningWorkspaceView: View {
 private struct PlanningWorkspaceCanvasContent: View {
     @ObservedObject var workspace: PlanningWorkspaceCoordinator
     @ObservedObject var project: PlanningProjectCoordinator
+#if DEBUG
+    let viewportProbe: PlanningCanvasViewportProbe?
+#endif
 
     var body: some View {
         canvasSurface
+    }
+
+    private var canvas: PlanningCanvasView {
+#if DEBUG
+        PlanningCanvasView(
+            coordinator: project,
+            onInspect: inspectSelectedNode,
+            viewportProbe: viewportProbe
+        )
+#else
+        PlanningCanvasView(coordinator: project, onInspect: inspectSelectedNode)
+#endif
     }
 
     @ViewBuilder
     private var canvasSurface: some View {
 #if os(macOS)
         HStack(spacing: 0) {
-            PlanningCanvasView(coordinator: project, onInspect: inspectSelectedNode)
+            canvas
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             if workspace.isInspectorPresented {
                 Divider()
@@ -510,7 +772,7 @@ private struct PlanningWorkspaceCanvasContent: View {
             }
         }
 #elseif os(iOS)
-        PlanningCanvasView(coordinator: project, onInspect: inspectSelectedNode)
+        canvas
             .sheet(
                 isPresented: Binding(
                     get: { workspace.isInspectorPresented },
@@ -525,7 +787,7 @@ private struct PlanningWorkspaceCanvasContent: View {
                     .presentationDetents([.medium, .large])
             }
 #else
-        PlanningCanvasView(coordinator: project, onInspect: inspectSelectedNode)
+        canvas
 #endif
     }
 
@@ -788,9 +1050,6 @@ private struct PlanningWorkspacePresenterBridge: UIViewControllerRepresentable {
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
         context.coordinator.onMount = onMount
-        if let currentPresenter = context.coordinator.currentPresenter {
-            onMount(currentPresenter, context.coordinator.ownerID)
-        }
     }
 
     static func dismantleUIViewController(_ uiViewController: UIViewController, coordinator: Coordinator) {
@@ -861,9 +1120,6 @@ private struct PlanningWorkspaceWindowBridge: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.onWindow = onWindow
         context.coordinator.currentView = nsView
-        if let currentWindow = context.coordinator.currentWindow {
-            onWindow(currentWindow, context.coordinator.ownerID)
-        }
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {

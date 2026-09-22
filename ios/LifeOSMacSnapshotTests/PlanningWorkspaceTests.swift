@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import XCTest
 @testable import LifeOSMac
 
@@ -648,9 +649,7 @@ final class PlanningWorkspaceTests: XCTestCase {
         }
         defer { probe.onViewportChange = nil }
         probe.setViewport(viewport)
-        if probe.currentViewport != viewport {
-            await fulfillment(of: [changed], timeout: 2)
-        }
+        await fulfillment(of: [changed], timeout: 2)
     }
 
     private func drainTask(
@@ -669,6 +668,664 @@ final class PlanningWorkspaceTests: XCTestCase {
         } else {
             XCTFail("Timed out draining \(label) task")
         }
+    }
+
+    private func mountedWorkspace(
+        for workspace: PlanningWorkspaceCoordinator,
+        probe: PlanningWorkspacePresentationProbe
+    ) -> PlanningCanvasHost {
+        PlanningCanvasHost(
+            rootView: PlanningWorkspaceView(
+                coordinator: workspace,
+                presentationProbe: probe
+            )
+        )
+    }
+
+    private func awaitWorkspaceMount(
+        _ probe: PlanningWorkspacePresentationProbe
+    ) async {
+        guard !probe.isMounted else { return }
+        let mounted = expectation(description: "Mounted planning workspace")
+        var fulfilled = false
+        probe.onMount = {
+            guard !fulfilled else { return }
+            fulfilled = true
+            mounted.fulfill()
+        }
+        if probe.isMounted, !fulfilled {
+            fulfilled = true
+            mounted.fulfill()
+        }
+        await fulfillment(of: [mounted], timeout: 2)
+        probe.onMount = nil
+    }
+
+    private func awaitPresenterReady(
+        _ probe: PlanningWorkspacePresentationProbe
+    ) async {
+        guard !probe.isPresenterReady else { return }
+        let ready = expectation(description: "Mounted planning presenter")
+        var fulfilled = false
+        probe.onPresenterReadyChange = { isReady in
+            guard isReady, !fulfilled else { return }
+            fulfilled = true
+            ready.fulfill()
+        }
+        if probe.isPresenterReady, !fulfilled {
+            fulfilled = true
+            ready.fulfill()
+        }
+        await fulfillment(of: [ready], timeout: 2)
+        probe.onPresenterReadyChange = nil
+    }
+
+    private func completeMountedDocumentSelection(
+        _ probe: PlanningWorkspacePresentationProbe
+    ) async {
+        let started = expectation(description: "Mounted document picker task started")
+        let finished = expectation(description: "Mounted document picker task finished")
+        var startedID: UUID?
+        var finishedID: UUID?
+        probe.onPickerTaskStart = { generation in
+            guard startedID == nil else { return }
+            startedID = generation
+            started.fulfill()
+        }
+        probe.onPickerTaskFinish = { generation in
+            guard finishedID == nil else { return }
+            finishedID = generation
+            finished.fulfill()
+        }
+        probe.chooseDocument()
+        await fulfillment(of: [started, finished], timeout: 2)
+        probe.onPickerTaskStart = nil
+        probe.onPickerTaskFinish = nil
+        XCTAssertEqual(startedID, finishedID)
+        XCTAssertFalse(probe.isPickerTaskActive)
+    }
+
+    private func registerMountedTeardown(
+        host: PlanningCanvasHost,
+        workspace: PlanningWorkspaceCoordinator,
+        probe: PlanningWorkspacePresentationProbe,
+        gate: PlanningWorkspaceTestGate? = nil
+    ) {
+        addTeardownBlock { @MainActor in
+            let pickerFinished = self.expectation(description: "Cleanup: mounted picker task finished")
+            let unmountFinished = self.expectation(description: "Cleanup: mounted workspace unmount finished")
+            let unmountState = PlanningWorkspaceTaskState()
+            let pickerWasActive = probe.isPickerTaskActive
+            var pickerFinishedOnce = false
+            var unmountTask: Task<Void, Never>?
+
+            defer {
+                unmountTask?.cancel()
+                probe.controlledDocumentSelection = nil
+                probe.onMount = nil
+                probe.onUnmount = nil
+                probe.onPickerTaskStart = nil
+                probe.onPickerTaskFinish = nil
+                probe.onPickerErrorChange = nil
+                probe.onPresenterReadyChange = nil
+            }
+
+            probe.onPickerTaskFinish = { _ in
+                guard !pickerFinishedOnce else { return }
+                pickerFinishedOnce = true
+                pickerFinished.fulfill()
+            }
+            if !pickerWasActive {
+                pickerFinished.fulfill()
+            }
+
+            if let gate {
+                await gate.release()
+            }
+            host.close()
+            await self.fulfillment(of: [pickerFinished], timeout: 2)
+
+            unmountTask = Task { @MainActor in
+                await workspace.unmount()
+                unmountState.markCompleted()
+                unmountFinished.fulfill()
+            }
+            await self.fulfillment(of: [unmountFinished], timeout: 2)
+            if !unmountState.isCompleted {
+                XCTFail("Timed out draining mounted workspace unmount")
+            }
+        }
+    }
+
+    func testPresenterReferenceAttachmentIsIdempotent() {
+        let reference = PlanningWorkspacePresenterReference<NSObject>()
+        let ownerID = UUID()
+        let presenter = NSObject()
+
+        XCTAssertTrue(reference.attach(presenter, ownerID: ownerID))
+        XCTAssertFalse(reference.attach(presenter, ownerID: ownerID))
+        XCTAssertTrue(reference.value === presenter)
+        XCTAssertEqual(reference.ownerID, ownerID)
+    }
+
+    func testPresenterReferenceRejectsStaleOwnerDetachment() {
+        let reference = PlanningWorkspacePresenterReference<NSObject>()
+        let firstOwnerID = UUID()
+        let secondOwnerID = UUID()
+        let firstPresenter = NSObject()
+        let secondPresenter = NSObject()
+
+        XCTAssertTrue(reference.attach(firstPresenter, ownerID: firstOwnerID))
+        XCTAssertTrue(reference.attach(secondPresenter, ownerID: secondOwnerID))
+        XCTAssertFalse(reference.detach(ownerID: firstOwnerID))
+        XCTAssertTrue(reference.value === secondPresenter)
+        XCTAssertEqual(reference.ownerID, secondOwnerID)
+    }
+
+    func testPresenterReferenceCurrentOwnerDetachmentClearsAttachment() {
+        let reference = PlanningWorkspacePresenterReference<NSObject>()
+        let ownerID = UUID()
+        let presenter = NSObject()
+
+        XCTAssertTrue(reference.attach(presenter, ownerID: ownerID))
+        XCTAssertTrue(reference.detach(ownerID: ownerID))
+        XCTAssertNil(reference.value)
+        XCTAssertNil(reference.ownerID)
+    }
+
+    func testPresenterReferenceImmediateAttachAndDetachLeavesNoStaleValue() {
+        let reference = PlanningWorkspacePresenterReference<NSObject>()
+        let ownerID = UUID()
+        let presenter = NSObject()
+
+        XCTAssertTrue(reference.attach(presenter, ownerID: ownerID))
+        XCTAssertTrue(reference.detach(ownerID: ownerID))
+        XCTAssertNil(reference.value)
+        XCTAssertNil(reference.ownerID)
+    }
+
+    func testInitiallyIdleHostedWorkspaceRestoresPersistedVault() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        _ = try await f.store.attachExisting(selection: f.selection)
+        let workspace = PlanningWorkspaceCoordinator(
+            store: f.store,
+            localGrantOwnerID: f.ownerID
+        )
+        XCTAssertEqual(workspace.phase, .idle)
+
+        let restored = expectation(description: "Hosted workspace restored persisted vault")
+        var observedReady = false
+        let phaseObservation = workspace.$phase.sink { phase in
+            guard phase == .ready, !observedReady else { return }
+            observedReady = true
+            restored.fulfill()
+        }
+        defer { phaseObservation.cancel() }
+
+        let probe = PlanningWorkspacePresentationProbe()
+        let host = mountedWorkspace(for: workspace, probe: probe)
+        registerMountedTeardown(host: host, workspace: workspace, probe: probe)
+        await awaitWorkspaceMount(probe)
+        await fulfillment(of: [restored], timeout: 2)
+
+        XCTAssertTrue(workspace.isMounted)
+        XCTAssertEqual(workspace.phase, .ready)
+        XCTAssertEqual(workspace.accessSnapshot.vaultID, f.ownerID)
+        XCTAssertNil(workspace.project)
+    }
+
+    func testMountedDocumentPickerRejectsDuplicatePresentation() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let workspace = await chooserWorkspace(f)
+        let viewportProbe = PlanningCanvasViewportProbe()
+        let probe = PlanningWorkspacePresentationProbe(viewportProbe: viewportProbe)
+        let host = mountedWorkspace(for: workspace, probe: probe)
+        let gate = PlanningWorkspaceTestGate()
+        registerMountedTeardown(host: host, workspace: workspace, probe: probe, gate: gate)
+        await awaitWorkspaceMount(probe)
+        await awaitPresenterReady(probe)
+        _ = try await canvasViewport(viewportProbe)
+        XCTAssertTrue(viewportProbe.isActive)
+
+        let calls = PlanningWorkspaceScopeCounter()
+        let closureEntered = expectation(description: "Duplicate selection closure entered")
+        let closureExited = expectation(description: "Duplicate selection closure exited")
+        var closureEnteredOnce = false
+        var closureExitedOnce = false
+        probe.controlledDocumentSelection = { _ in
+            _ = calls.start()
+            if !closureEnteredOnce {
+                closureEnteredOnce = true
+                closureEntered.fulfill()
+            }
+            defer {
+                calls.stop()
+                if !closureExitedOnce {
+                    closureExitedOnce = true
+                    closureExited.fulfill()
+                }
+            }
+            await gate.wait()
+            return nil
+        }
+        let finished = expectation(description: "Duplicate test picker finished")
+        var finishedOnce = false
+        probe.onPickerTaskFinish = { _ in
+            guard !finishedOnce else { return }
+            finishedOnce = true
+            finished.fulfill()
+        }
+
+        probe.chooseDocument()
+        await fulfillment(of: [closureEntered], timeout: 2)
+        probe.chooseDocument()
+        let activeCounts = calls.counts
+        XCTAssertEqual(activeCounts.starts, 1)
+        XCTAssertEqual(activeCounts.active, 1)
+        XCTAssertEqual(activeCounts.maximumActive, 1)
+
+        await gate.release()
+        await fulfillment(of: [closureExited, finished], timeout: 2)
+        let finalCounts = calls.counts
+        XCTAssertEqual(finalCounts.stops, 1)
+        XCTAssertEqual(finalCounts.active, 0)
+        XCTAssertFalse(probe.isPickerTaskActive)
+    }
+
+    func testMountedDocumentPickerCancellationPreservesCanvasViewport() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let workspace = await chooserWorkspace(f)
+        let viewportProbe = PlanningCanvasViewportProbe()
+        let probe = PlanningWorkspacePresentationProbe(viewportProbe: viewportProbe)
+        let host = mountedWorkspace(for: workspace, probe: probe)
+        registerMountedTeardown(host: host, workspace: workspace, probe: probe)
+        await awaitWorkspaceMount(probe)
+        await awaitPresenterReady(probe)
+        _ = try await canvasViewport(viewportProbe)
+        let project = try XCTUnwrap(workspace.project)
+        project.selectNode("root")
+        XCTAssertEqual(project.selectedNodeID, "root")
+        let expected = PlanningCanvasViewport(
+            translation: CGSize(width: 137, height: -83),
+            scale: 1.35
+        )
+        XCTAssertNotEqual(try XCTUnwrap(viewportProbe.currentViewport), expected)
+        await setCanvasViewport(expected, on: viewportProbe)
+        let openedPath = try XCTUnwrap(workspace.openedPath)
+        var canvasDisappearances = 0
+        viewportProbe.onDisappear = {
+            canvasDisappearances += 1
+        }
+
+        probe.controlledDocumentSelection = { _ in nil }
+        await completeMountedDocumentSelection(probe)
+
+        XCTAssertTrue(viewportProbe.isActive)
+        XCTAssertEqual(viewportProbe.currentViewport, expected)
+        XCTAssertTrue(workspace.project === project)
+        XCTAssertEqual(workspace.openedPath, openedPath)
+        XCTAssertEqual(project.selectedNodeID, "root")
+        XCTAssertEqual(canvasDisappearances, 0)
+        XCTAssertEqual(workspace.phase, .showingCanvas)
+        XCTAssertNil(probe.currentPickerError)
+        viewportProbe.onDisappear = nil
+    }
+
+    func testMountedDocumentPickerFailurePreservesCanvasViewport() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/Broken.canvas", source: "not canvas")
+        let workspace = await chooserWorkspace(f)
+        let viewportProbe = PlanningCanvasViewportProbe()
+        let probe = PlanningWorkspacePresentationProbe(viewportProbe: viewportProbe)
+        let host = mountedWorkspace(for: workspace, probe: probe)
+        registerMountedTeardown(host: host, workspace: workspace, probe: probe)
+        await awaitWorkspaceMount(probe)
+        await awaitPresenterReady(probe)
+        _ = try await canvasViewport(viewportProbe)
+        let project = try XCTUnwrap(workspace.project)
+        project.selectNode("root")
+        XCTAssertEqual(project.selectedNodeID, "root")
+        let expected = PlanningCanvasViewport(
+            translation: CGSize(width: 137, height: -83),
+            scale: 1.35
+        )
+        XCTAssertNotEqual(try XCTUnwrap(viewportProbe.currentViewport), expected)
+        await setCanvasViewport(expected, on: viewportProbe)
+        let openedPath = try XCTUnwrap(workspace.openedPath)
+        var canvasDisappearances = 0
+        viewportProbe.onDisappear = {
+            canvasDisappearances += 1
+        }
+        let before = try fixtureSnapshot(at: f.root)
+
+        probe.controlledDocumentSelection = { _ in
+            try PlanningUserSelectedDocument(
+                pickerURL: self.noteURL(f, path: "Projects/Broken.canvas")
+            )
+        }
+        await completeMountedDocumentSelection(probe)
+
+        XCTAssertTrue(viewportProbe.isActive)
+        XCTAssertEqual(viewportProbe.currentViewport, expected)
+        XCTAssertTrue(workspace.project === project)
+        XCTAssertEqual(workspace.openedPath, openedPath)
+        XCTAssertEqual(project.selectedNodeID, "root")
+        XCTAssertEqual(canvasDisappearances, 0)
+        XCTAssertEqual(try fixtureSnapshot(at: f.root), before)
+        XCTAssertNotNil(workspace.lastError)
+        XCTAssertTrue(workspace.canRetryDocumentSelection)
+        viewportProbe.onDisappear = nil
+    }
+
+    func testMountedDocumentPickerUnmountCancelsAndIgnoresLateSelection() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/Late.md", source: "# Late")
+        let workspace = await chooserWorkspace(f)
+        let viewportProbe = PlanningCanvasViewportProbe()
+        let probe = PlanningWorkspacePresentationProbe(viewportProbe: viewportProbe)
+        let host = mountedWorkspace(for: workspace, probe: probe)
+        let gate = PlanningWorkspaceTestGate()
+        registerMountedTeardown(host: host, workspace: workspace, probe: probe, gate: gate)
+        await awaitWorkspaceMount(probe)
+        await awaitPresenterReady(probe)
+        _ = try await canvasViewport(viewportProbe)
+
+        let selectionReturned = expectation(description: "Late mounted selection returned")
+        let pickerFinished = expectation(description: "Late mounted picker finished")
+        let unmounted = expectation(description: "Mounted workspace disappeared")
+        let selectionEntered = expectation(description: "Late mounted picker entered selection closure")
+        let cancellationObserved = expectation(description: "Late mounted picker observed cancellation")
+        var pickerFinishedOnce = false
+        var unmountedOnce = false
+        var selectionEnteredOnce = false
+        var selectionReturnedOnce = false
+        var cancellationObservedOnce = false
+        probe.onPickerTaskFinish = { _ in
+            guard !pickerFinishedOnce else { return }
+            pickerFinishedOnce = true
+            pickerFinished.fulfill()
+        }
+        probe.onUnmount = {
+            guard !unmountedOnce else { return }
+            unmountedOnce = true
+            unmounted.fulfill()
+        }
+        let selection = try PlanningUserSelectedDocument(
+            pickerURL: noteURL(f, path: "Projects/Late.md")
+        )
+        probe.controlledDocumentSelection = { _ in
+            if !selectionEnteredOnce {
+                selectionEnteredOnce = true
+                selectionEntered.fulfill()
+            }
+            await gate.wait()
+            if !selectionReturnedOnce {
+                selectionReturnedOnce = true
+                selectionReturned.fulfill()
+            }
+            if Task.isCancelled, !cancellationObservedOnce {
+                cancellationObservedOnce = true
+                cancellationObserved.fulfill()
+            }
+            return selection
+        }
+        probe.chooseDocument()
+        await fulfillment(of: [selectionEntered], timeout: 2)
+
+        host.close()
+        await fulfillment(of: [unmounted], timeout: 2)
+        await gate.release()
+        await fulfillment(of: [selectionReturned, cancellationObserved, pickerFinished], timeout: 2)
+
+        XCTAssertTrue(cancellationObservedOnce)
+        XCTAssertNil(workspace.inspectorNoteSource)
+        XCTAssertNil(workspace.project)
+        XCTAssertNil(workspace.openedPath)
+        XCTAssertNil(workspace.lastError)
+        XCTAssertNil(workspace.lastFailure)
+        XCTAssertNil(workspace.lastDiagnostic)
+        XCTAssertEqual(workspace.phase, .idle)
+        XCTAssertFalse(viewportProbe.isActive)
+        XCTAssertFalse(probe.isMounted)
+        XCTAssertFalse(probe.isPickerTaskActive)
+    }
+
+    func testMountedDocumentPickerCanReopenAfterCancellation() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let workspace = await chooserWorkspace(f)
+        let probe = PlanningWorkspacePresentationProbe()
+        let host = mountedWorkspace(for: workspace, probe: probe)
+        registerMountedTeardown(host: host, workspace: workspace, probe: probe)
+        await awaitWorkspaceMount(probe)
+        await awaitPresenterReady(probe)
+
+        let calls = PlanningWorkspaceScopeCounter()
+        probe.controlledDocumentSelection = { _ in
+            _ = calls.start()
+            calls.stop()
+            return nil
+        }
+        await completeMountedDocumentSelection(probe)
+        await completeMountedDocumentSelection(probe)
+
+        XCTAssertEqual(calls.counts.starts, 2)
+        XCTAssertEqual(calls.counts.maximumActive, 1)
+        XCTAssertEqual(workspace.phase, .showingCanvas)
+    }
+
+    func testMountedDocumentPickerErrorStateClearsOnSuccess() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/Note.md", source: "# Note")
+        let workspace = await chooserWorkspace(f)
+        let probe = PlanningWorkspacePresentationProbe()
+        let host = mountedWorkspace(for: workspace, probe: probe)
+        registerMountedTeardown(host: host, workspace: workspace, probe: probe)
+        await awaitWorkspaceMount(probe)
+        await awaitPresenterReady(probe)
+
+        var shouldFail = true
+        var observedErrors: [String?] = []
+        probe.onPickerErrorChange = { observedErrors.append($0) }
+        probe.controlledDocumentSelection = { _ in
+            if shouldFail {
+                shouldFail = false
+                throw PlanningFilesystemError.invalid("controlled.failure")
+            }
+            return try PlanningUserSelectedDocument(
+                pickerURL: self.noteURL(f, path: "Projects/Note.md")
+            )
+        }
+        await completeMountedDocumentSelection(probe)
+        XCTAssertNotNil(probe.currentPickerError)
+
+        await completeMountedDocumentSelection(probe)
+        XCTAssertNil(probe.currentPickerError)
+        XCTAssertEqual(workspace.inspectorNoteSource, "# Note")
+        XCTAssertTrue(observedErrors.contains(where: { $0 != nil }))
+        XCTAssertTrue(observedErrors.contains(where: { $0 == nil }))
+    }
+
+    func testMountedPickedMarkdownBackPreservesCanvasViewport() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/Note.md", source: "# Note")
+        let workspace = await chooserWorkspace(f)
+        let viewportProbe = PlanningCanvasViewportProbe()
+        let probe = PlanningWorkspacePresentationProbe(viewportProbe: viewportProbe)
+        let host = mountedWorkspace(for: workspace, probe: probe)
+        registerMountedTeardown(host: host, workspace: workspace, probe: probe)
+        await awaitWorkspaceMount(probe)
+        await awaitPresenterReady(probe)
+        _ = try await canvasViewport(viewportProbe)
+        let project = try XCTUnwrap(workspace.project)
+        project.selectNode("root")
+        XCTAssertEqual(project.selectedNodeID, "root")
+        let expected = PlanningCanvasViewport(
+            translation: CGSize(width: 137, height: -83),
+            scale: 1.35
+        )
+        XCTAssertNotEqual(try XCTUnwrap(viewportProbe.currentViewport), expected)
+        await setCanvasViewport(expected, on: viewportProbe)
+        let openedPath = try XCTUnwrap(workspace.openedPath)
+        var canvasDisappearances = 0
+        viewportProbe.onDisappear = {
+            canvasDisappearances += 1
+        }
+        probe.controlledDocumentSelection = { _ in
+            try PlanningUserSelectedDocument(
+                pickerURL: self.noteURL(f, path: "Projects/Note.md")
+            )
+        }
+
+        let inspectorPresented = expectation(
+            description: "Mounted workspace reported inspector presentation"
+        )
+        let inspectorDismissed = expectation(
+            description: "Mounted workspace reported inspector dismissal"
+        )
+        var presentationAcknowledged = false
+        var dismissalAcknowledged = false
+        probe.onInspectorPresentedChange = { presented in
+            if presented {
+                guard !presentationAcknowledged else { return }
+                presentationAcknowledged = true
+                inspectorPresented.fulfill()
+            } else if presentationAcknowledged && !dismissalAcknowledged {
+                dismissalAcknowledged = true
+                inspectorDismissed.fulfill()
+            }
+        }
+        defer { probe.onInspectorPresentedChange = nil }
+
+        await completeMountedDocumentSelection(probe)
+        XCTAssertEqual(workspace.inspectorNoteSource, "# Note")
+        await fulfillment(of: [inspectorPresented], timeout: 2)
+        guard presentationAcknowledged else { return }
+        XCTAssertTrue(probe.isInspectorPresented)
+        workspace.closeInspectorNote()
+        await fulfillment(of: [inspectorDismissed], timeout: 2)
+
+        XCTAssertTrue(workspace.project === project)
+        XCTAssertEqual(workspace.openedPath, openedPath)
+        XCTAssertEqual(project.selectedNodeID, "root")
+        XCTAssertEqual(workspace.phase, .showingCanvas)
+        XCTAssertFalse(probe.isInspectorPresented)
+        XCTAssertTrue(viewportProbe.isActive)
+        XCTAssertEqual(viewportProbe.currentViewport, expected)
+        XCTAssertEqual(canvasDisappearances, 0)
+        viewportProbe.onDisappear = nil
+    }
+
+    func testMountedStandaloneMarkdownPreviewBackReturnsToReady() async throws {
+        let f = try fixture(withCanvas: false); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/Note.md", source: "# Note")
+        let workspace = await chooserWorkspace(f, canvas: false)
+        let probe = PlanningWorkspacePresentationProbe()
+        let host = mountedWorkspace(for: workspace, probe: probe)
+        registerMountedTeardown(host: host, workspace: workspace, probe: probe)
+        await awaitWorkspaceMount(probe)
+        await awaitPresenterReady(probe)
+        probe.controlledDocumentSelection = { _ in
+            try PlanningUserSelectedDocument(
+                pickerURL: self.noteURL(f, path: "Projects/Note.md")
+            )
+        }
+
+        await completeMountedDocumentSelection(probe)
+        XCTAssertEqual(workspace.phase, .ready)
+        XCTAssertEqual(workspace.inspectorNoteSource, "# Note")
+        workspace.closeInspectorNote()
+
+        XCTAssertEqual(workspace.phase, .ready)
+        XCTAssertFalse(workspace.isInspectorPresented)
+        XCTAssertNil(workspace.project)
+    }
+
+    func testMountedTemporaryVaultChooserRoundTripDoesNotMutateVault() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/Note.md", source: "# Untouched")
+        let secondCanvas = #"{"nodes":[{"id":"second","type":"text","x":20,"y":30,"width":180,"height":90,"text":"Second"}],"edges":[]}"#
+        try Data(secondCanvas.utf8).write(
+            to: f.root.appendingPathComponent("LifeOS/Projects/Second.canvas"),
+            options: .atomic
+        )
+        let workspace = await chooserWorkspace(f)
+        let viewportProbe = PlanningCanvasViewportProbe()
+        let probe = PlanningWorkspacePresentationProbe(viewportProbe: viewportProbe)
+        let host = mountedWorkspace(for: workspace, probe: probe)
+        registerMountedTeardown(host: host, workspace: workspace, probe: probe)
+        await awaitWorkspaceMount(probe)
+        await awaitPresenterReady(probe)
+        _ = try await canvasViewport(viewportProbe)
+        let before = try fixtureSnapshot(at: f.root)
+
+        probe.controlledDocumentSelection = { _ in
+            try PlanningUserSelectedDocument(
+                pickerURL: self.noteURL(f, path: "Projects/Note.md")
+            )
+        }
+        await completeMountedDocumentSelection(probe)
+        XCTAssertEqual(workspace.inspectorNoteSource, "# Untouched")
+        workspace.closeInspectorNote()
+
+        probe.controlledDocumentSelection = { _ in
+            try PlanningUserSelectedDocument(
+                pickerURL: self.noteURL(f, path: "Projects/Second.canvas")
+            )
+        }
+        await completeMountedDocumentSelection(probe)
+
+        XCTAssertEqual(workspace.openedPath?.value, "Projects/Second.canvas")
+        XCTAssertEqual(workspace.phase, .showingCanvas)
+        XCTAssertEqual(try fixtureSnapshot(at: f.root), before)
+        let status = try await f.store.status()
+        XCTAssertEqual(status.pendingMutationCount, 0)
+    }
+
+    func testMountedTemporaryVaultChooserRejectsSiblingAndSymlink() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let siblingURL = f.root.appendingPathComponent("LifeOS-other/Sibling.md")
+        try FileManager.default.createDirectory(
+            at: siblingURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("# Sibling".utf8).write(to: siblingURL, options: .atomic)
+        let outsideURL = f.root.appendingPathComponent("Outside.md")
+        try Data("# Outside".utf8).write(to: outsideURL, options: .atomic)
+        let symlinkURL = noteURL(f, path: "Projects/Escape.md")
+        try FileManager.default.createSymbolicLink(
+            at: symlinkURL,
+            withDestinationURL: outsideURL
+        )
+        let workspace = await chooserWorkspace(f)
+        let project = try XCTUnwrap(workspace.project)
+        let viewportProbe = PlanningCanvasViewportProbe()
+        let probe = PlanningWorkspacePresentationProbe(viewportProbe: viewportProbe)
+        let host = mountedWorkspace(for: workspace, probe: probe)
+        registerMountedTeardown(host: host, workspace: workspace, probe: probe)
+        await awaitWorkspaceMount(probe)
+        await awaitPresenterReady(probe)
+        _ = try await canvasViewport(viewportProbe)
+        let before = try fixtureSnapshot(at: f.root)
+
+        probe.controlledDocumentSelection = { _ in
+            try PlanningUserSelectedDocument(pickerURL: siblingURL)
+        }
+        await completeMountedDocumentSelection(probe)
+        XCTAssertTrue(workspace.project === project)
+        XCTAssertNotNil(workspace.lastError)
+        XCTAssertNil(workspace.inspectorNoteSource)
+        XCTAssertFalse(workspace.isInspectorPresented)
+        XCTAssertEqual(try fixtureSnapshot(at: f.root), before)
+
+        probe.controlledDocumentSelection = { _ in
+            try PlanningUserSelectedDocument(pickerURL: symlinkURL)
+        }
+        await completeMountedDocumentSelection(probe)
+        XCTAssertTrue(workspace.project === project)
+        XCTAssertNil(workspace.inspectorNoteSource)
+        XCTAssertFalse(workspace.isInspectorPresented)
+        XCTAssertEqual(try fixtureSnapshot(at: f.root), before)
+        XCTAssertEqual(workspace.lastFailure, .needsReselection)
     }
 
     func testDocumentSelectionSupersedesStaleTicket() async throws {
@@ -2642,6 +3299,7 @@ final class PlanningWorkspaceTests: XCTestCase {
         let gate = PlanningWorkspaceTestGate()
         first.beforeCleanupClose = { await gate.wait() }
         first.requestUnmount()
+        XCTAssertFalse(first.isMounted, "Unmount must revoke mount authority synchronously.")
         for _ in 0..<200 {
             if await gate.hasEntered { break }
             await Task.yield()
@@ -2650,6 +3308,10 @@ final class PlanningWorkspaceTests: XCTestCase {
         XCTAssertTrue(cleanupGateEntered)
 
         let remountTask = Task { await first.mount() }
+        for _ in 0..<200 where !first.isMounted {
+            await Task.yield()
+        }
+        XCTAssertTrue(first.isMounted, "Remount must restore mount authority before cleanup finishes.")
         await second.attach(fixture.selection)
         XCTAssertEqual(second.phase, .unavailable)
 

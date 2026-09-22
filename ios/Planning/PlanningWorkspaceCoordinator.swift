@@ -209,7 +209,7 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     @Published public private(set) var lastError: String?
     @Published public private(set) var lastFailure: PlanningWorkspaceFailureCategory?
     @Published public private(set) var lastDiagnostic: PlanningDiagnostic?
-    @Published public private(set) var isMounted = false
+    public private(set) var isMounted = false
     @Published public var pathInput: String
     @Published public private(set) var isInspectorPresented = false
     @Published public private(set) var isInspectorNotePresented = false
