@@ -529,13 +529,16 @@ public actor CalendarStore {
         guard data.count <= CalendarStoreEnvelope.maximumEncodedBytes else {
             throw CalendarStoreError.payloadTooLarge
         }
-        try CalendarJSONStructureGuard.validate(data)
         let isWrapper: Bool
-        if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             isWrapper = !Set(object.keys).isDisjoint(with: ["snapshot", "seriesMembership", "replication"])
         } else {
             isWrapper = false
         }
+        if data.count > CalendarSnapshot.maximumEncodedBytes, !isWrapper {
+            throw CalendarSnapshotError.payloadTooLarge
+        }
+        try CalendarJSONStructureGuard.validate(data)
         let envelope: CalendarStoreEnvelope
         if isWrapper {
             envelope = try JSONDecoder.calendar.decode(CalendarStoreEnvelope.self, from: data)
@@ -563,16 +566,31 @@ public actor CalendarStore {
             seriesMembership: links,
             replication: existing.replication
         )
-        try saveEnvelope(envelope)
-        return snapshot
+        let data = try encodeEnvelope(envelope)
+        // Decode and validate the exact bytes that are about to be committed.
+        // This gives callers the canonical value represented by durable data
+        // without making a fallible read after the atomic replacement.
+        let canonical = try JSONDecoder.calendar.decode(CalendarStoreEnvelope.self, from: data)
+        try canonical.validate()
+        try persist(data)
+        return canonical.snapshot
     }
 
     public func saveEnvelope(_ envelope: CalendarStoreEnvelope) throws {
+        let data = try encodeEnvelope(envelope)
+        try persist(data)
+    }
+
+    private func encodeEnvelope(_ envelope: CalendarStoreEnvelope) throws -> Data {
         try envelope.validate()
         let data = try JSONEncoder.calendar.encode(envelope)
         guard data.count <= CalendarStoreEnvelope.maximumEncodedBytes else {
             throw CalendarStoreError.payloadTooLarge
         }
+        return data
+    }
+
+    private func persist(_ data: Data) throws {
         let directory = url.deletingLastPathComponent()
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
@@ -664,7 +682,7 @@ public actor CalendarStore {
     }
 }
 
-private enum CalendarDateCoding {
+enum CalendarDateCoding {
     private static func formatter() -> ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
@@ -676,12 +694,22 @@ private enum CalendarDateCoding {
         pattern: #"^(.+T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$"#
     )
 
+    static func canonicalDate(_ date: Date) throws -> Date {
+        try parse(try canonicalString(for: date))
+    }
+
     static func encode(_ date: Date, to encoder: Encoder) throws {
+        let value = try canonicalString(for: date, codingPath: encoder.codingPath)
+        var container = encoder.singleValueContainer()
+        try container.encode(value)
+    }
+
+    private static func canonicalString(for date: Date, codingPath: [CodingKey] = []) throws -> String {
         let seconds = date.timeIntervalSince1970
         guard seconds.isFinite else {
             throw EncodingError.invalidValue(
                 date,
-                .init(codingPath: encoder.codingPath, debugDescription: "Invalid calendar timestamp")
+                .init(codingPath: codingPath, debugDescription: "Invalid calendar timestamp")
             )
         }
         var wholeSeconds = floor(seconds)
@@ -696,22 +724,29 @@ private enum CalendarDateCoding {
         let value = fraction.isEmpty
             ? base
             : base.replacingOccurrences(of: "Z", with: ".\(fraction)Z")
-        var container = encoder.singleValueContainer()
-        try container.encode(value)
+        return value
     }
 
     static func decode(from decoder: Decoder) throws -> Date {
         let container = try decoder.singleValueContainer()
         let raw = try container.decode(String.self)
+        do {
+            return try parse(raw)
+        } catch {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid ISO-8601 calendar timestamp"
+            )
+        }
+    }
+
+    private static func parse(_ raw: String) throws -> Date {
         let range = NSRange(location: 0, length: (raw as NSString).length)
         guard let match = pattern.firstMatch(in: raw, range: range),
               let baseRange = Range(match.range(at: 1), in: raw),
               let zoneRange = Range(match.range(at: 3), in: raw),
               let baseDate = formatter().date(from: String(raw[baseRange]) + String(raw[zoneRange])) else {
-            throw DecodingError.dataCorruptedError(
-                in: container,
-                debugDescription: "Invalid ISO-8601 calendar timestamp"
-            )
+            throw CalendarDateCodingError.invalidTimestamp
         }
 
         var fraction = 0.0
@@ -719,14 +754,15 @@ private enum CalendarDateCoding {
            let fractionRange = Range(match.range(at: 2), in: raw) {
             let digits = String(raw[fractionRange].prefix(9))
             guard let parsed = Double("0.\(digits)") else {
-                throw DecodingError.dataCorruptedError(
-                    in: container,
-                    debugDescription: "Invalid ISO-8601 fractional timestamp"
-                )
+                throw CalendarDateCodingError.invalidTimestamp
             }
             fraction = parsed
         }
         return baseDate.addingTimeInterval(fraction)
+    }
+
+    private enum CalendarDateCodingError: Error {
+        case invalidTimestamp
     }
 }
 

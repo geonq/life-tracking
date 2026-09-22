@@ -740,7 +740,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertTrue(source.contains("LifeOSTokens.estimate"))
         XCTAssertTrue(source.contains("weekday(.abbreviated)"))
         XCTAssertTrue(source.contains("LifeOSIcon(.chevronRight, context: .disclosure)"))
-        XCTAssertTrue(source.contains("LifeOSIcon(providerIcon(selectedProvider), context: .toolbar)"))
+        XCTAssertTrue(source.contains("LifeOSIcon(.usage, context: .toolbar)"))
         XCTAssertFalse(source.contains("private func preferredRange"))
         XCTAssertFalse(source.contains(".textCase(.uppercase)"))
         XCTAssertFalse(source.contains("enum UsageTab"))

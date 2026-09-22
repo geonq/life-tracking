@@ -2156,7 +2156,7 @@ final class CalendarDomainTests: XCTestCase {
     func testCoordinatorSuccessfulMutationReplacesPreviousUndoToken() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let url = directory.appendingPathComponent("calendar.json")
-        let now = Date.now
+        let now = base
         let first = try CalendarItem(title: "first", start: now, end: now.addingTimeInterval(60), createdAt: now, updatedAt: now)
         let second = try CalendarItem(title: "second", start: now.addingTimeInterval(120), end: now.addingTimeInterval(180), createdAt: now, updatedAt: now.addingTimeInterval(1))
         let sentRevisions = CalendarRevisionRecorder()
@@ -2193,7 +2193,7 @@ final class CalendarDomainTests: XCTestCase {
         )
         let peerSeed = await peer.save(second)
         XCTAssertEqual(peerSeed, .success)
-        let peerMerge = await peer.merge(CalendarSnapshot(items: [tombstone]), now: now)
+        let peerMerge = await peer.merge(CalendarSnapshot(items: [tombstone]), now: .now)
         XCTAssertEqual(peerMerge, .success)
         let peerDurable = try await peer.store.load()
         XCTAssertTrue(peerDurable.items.first(where: { $0.id == second.id })?.isDeleted == true)

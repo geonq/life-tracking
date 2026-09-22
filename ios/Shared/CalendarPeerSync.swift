@@ -46,11 +46,14 @@ public struct CalendarPeerSyncEnvelope: Codable, Equatable, Sendable {
         guard (0...Self.maximumRevision).contains(revision) else { throw CalendarPeerSyncError.invalidRevision }
         guard sentAt.timeIntervalSinceReferenceDate.isFinite else { throw CalendarPeerSyncError.invalidEnvelope }
         try snapshot.validatedForPersistence()
+        let storedSentAt = version == Self.currentVersion
+            ? try CalendarDateCoding.canonicalDate(sentAt)
+            : sentAt
         self.version = version
         self.snapshot = snapshot
         self.senderID = senderID
         self.revision = revision
-        self.sentAt = sentAt
+        self.sentAt = storedSentAt
     }
 
     public init(snapshot: CalendarSnapshot, senderID: String, revision: Int, sentAt: Date = .now) throws {

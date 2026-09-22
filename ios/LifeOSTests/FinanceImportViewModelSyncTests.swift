@@ -410,7 +410,10 @@ final class FinanceImportViewModelSyncTests: XCTestCase {
 
         cardState.model.clearAll()
         XCTAssertTrue(try fixtureTransactionStore.all().isEmpty)
-        XCTAssertEqual(cardState.model.syncState, .pending(entryCount: 1, operationCount: 1))
+        XCTAssertEqual(
+            cardState.model.syncState,
+            .pending(entryCount: 1, operationCount: preview.transactions.count)
+        )
 
         // The fixture sync operation is a fail-closed no-op. It throws before
         // constructing TailscaleSyncClient, so exercising the refresh action

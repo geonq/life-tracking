@@ -1948,6 +1948,10 @@ final class FinanceImportedTransactionStoreTests: XCTestCase {
         // the existing transaction, revisions, outbox, and receipt remain.
         XCTAssertEqual(try store.all(), [persistedRow])
         let loadedBeforeCommit = try persistedEnvelope(at: url)
+        let persistedOperation = try JSONDecoder.lifeOS.decode(
+            FinanceImportedSyncOperation.self,
+            from: JSONEncoder.lifeOS.encode(operation)
+        )
         XCTAssertEqual(loadedBeforeCommit.transactions, [persistedRow])
         XCTAssertEqual(loadedBeforeCommit.transactions.first?.category, FinanceTransactionCategory.groceries.rawValue)
         XCTAssertEqual(loadedBeforeCommit.remoteRecordRevisions, envelope.remoteRecordRevisions)
@@ -1960,7 +1964,7 @@ final class FinanceImportedTransactionStoreTests: XCTestCase {
             envelope.remoteTombstones.map(\.revision)
         )
         XCTAssertEqual(loadedBeforeCommit.outbox.map(\.idempotencyKey), envelope.outbox.map(\.idempotencyKey))
-        XCTAssertEqual(loadedBeforeCommit.outbox.flatMap(\.operations), envelope.outbox.flatMap(\.operations))
+        XCTAssertEqual(loadedBeforeCommit.outbox.flatMap(\.operations), [persistedOperation])
         XCTAssertEqual(loadedBeforeCommit.importMappings.first?.identityScheme, .legacyV2)
         XCTAssertEqual(loadedBeforeCommit.importBatches.map(\.id), envelope.importBatches.map(\.id))
         XCTAssertEqual(loadedBeforeCommit.importBatches.flatMap(\.rowLinks), envelope.importBatches.flatMap(\.rowLinks))
@@ -1983,6 +1987,10 @@ final class FinanceImportedTransactionStoreTests: XCTestCase {
     func testBoundedStateReadRejectsMaximumPlusOneBeforeJSONDecode() throws {
         let url = temporaryURL()
         defer { removeStore(at: url) }
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
         try Data(repeating: 0x20, count: FinanceImportedTransactionStore.maximumStateBytes + 1).write(to: url)
 
         let store = try FinanceImportedTransactionStore(url: url)

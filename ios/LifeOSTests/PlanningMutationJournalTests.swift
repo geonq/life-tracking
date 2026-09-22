@@ -665,7 +665,7 @@ final class PlanningMutationJournalTests: XCTestCase {
         try journal.openValidated()
         let request = try PlanningMutationRequest(
             vaultID: identity.vaultID,
-            path: try PlanningStoredPath("Notes/nul.md"),
+            path: try PlanningStoredPath("Notes/nul-witness.md"),
             operation: .create,
             expectedVersion: .absent,
             proposedBytes: Data()
