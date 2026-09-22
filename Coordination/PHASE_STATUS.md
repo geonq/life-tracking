@@ -2,9 +2,9 @@
 
 Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
 
-- Current native picker source checkpoint: `7cc189f`; main, origin/main,
-  and codex/p06-b are synchronized after the follow-up status commit. Native
-  picker runtime and vault-manifest evidence remain pending.
+- Current source checkpoint: `ebef1ac`; main, origin/main, and codex/p06-b
+  are synchronized. Native picker source checkpoint 7cc189f remains compiled
+  but runtime/vault evidence is pending.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
 - P01: shared sync contract/codec complete at `a21ccf3` + `673dc0a`.
@@ -13,8 +13,11 @@ Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
   device-signature verification complete at `038cd37`.
 - P03: strict calendar codec and durable store/adapter/composition are complete
   at `e76be67` and `9d222ac`.
-- P04: strict training payload serialization is pushed at `b0e52e1`; durable
-  fitness/nutrition/journal/lifestyle adapters remain open behind CP-B.
+- P04 strict training payload serialization is pushed at `b0e52e1`.
+  The closed 17-case SyncStoreKind registry and exhaustive domain mapping are
+  pushed at `ebef1ac`; Astra medium READY and macOS/iOS arm64 build-for-testing
+  passed. Protocol tests compiled but were not executed. Durable adapters remain
+  paused on CP-B migration, command identity, signing/sequence, and tombstones.
 - P05 D1: bounded graph/parser/spatial/session/vault work is pushed at `ca2caf1`.
 - `0451afb` restores URL-safe Base64 decoding, Xcode 27 public-key compatibility,
   and the actor-safe store URL surface.
@@ -68,8 +71,10 @@ Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
   physical iPhone, Windows, and live-provider evidence remain unknown or
   unavailable.
 
-Next: add the closed SyncStoreKind registry and protocol tests, then have
-Astra seal the CP-B training adapter bridge before durable P04 adapters.
-Retry P06-B native picker runtime and isolated vault-manifest evidence when
-Apple test services recover; then continue visual/motion, widgets, providers,
-Windows, physical-device, and final security gates. Release remains NO-GO.
+Next: Astra medium seals the CP-B training adapter contract, including
+migration/bootstrap keys, command-to-wire identity, signing/sequence ownership,
+deletion/tombstone retention, and clearReceiptJournalAfterExport interaction.
+Then Luna xhigh implements that contract. Keep P06-B native picker runtime and
+isolated vault-manifest evidence pending until Apple test services recover.
+Continue visual/motion, widgets, providers, Windows, physical-device, and final
+security gates after the adapter bridge. Release remains NO-GO.

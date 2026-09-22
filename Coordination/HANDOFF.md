@@ -4,14 +4,15 @@ Updated 2026-09-23 Europe/Berlin.
 
 ## Active task
 
-P06-B native picker implementation is checkpointed; runtime presentation
+P04 CP-B training adapter contract seal is next. P06-B native picker runtime
 and isolated vault round-trip evidence remain open. Release remains NO-GO.
 
 ## Current source state
 
-- main, origin/main, and codex/p06-b are synchronized. Native picker source
-  and mirrored tests are checkpointed at 7cc189f. Runtime evidence remains
-  open as described below.
+- main, origin/main, and codex/p06-b are synchronized at 7cc189f's
+  coordination follow-up. The latest implementation is the P04
+  SyncStoreKind registry at ebef1ac; native picker source/tests remain at
+  7cc189f.
 - P01–P05 foundations are in main: authenticated sync, durable calendar,
   fitness payload boundary, graph/session, and native Canvas viewport.
 - P06-B prior checkpoints: workspace transaction 86baaa8, inspector
@@ -37,6 +38,10 @@ and isolated vault round-trip evidence remain open. Release remains NO-GO.
   XCTest LaunchServices worker startup with zero tests executed. Current
   simctl cannot connect to CoreSimulatorService or discover runtimes. No
   native picker runtime result or real-vault round trip is claimed.
+- P04 SyncStoreKind implementation at ebef1ac has a closed 17-case raw
+  value set and exhaustive O(1) domain mapping. Astra medium returned READY.
+  LifeOSMacLogic and LifeOSLogic arm64 build-for-testing passed after the
+  change; the new protocol tests compiled but were not executed.
 - Both serial build sessions exited; 24 GiB remained available on the volume.
 - Earlier mainline evidence remains: LifeOSMacLogic 405/405; focused iPhone 17
   P06-B suite 62/62. API tests 160/160; gateway replication 23 passed with
@@ -54,9 +59,9 @@ registry evidence remain open. The hosted chooser tests use controlled
 selection closures and fixture vaults; they do not prove native picker
 presentation or access to the user's real vault.
 
-Next implement the closed SyncStoreKind registry and exhaustive domain/
-wire tests in SyncContract.swift and SyncProtocolTests.swift. Keep durable P04
-adapters paused until Astra seals the CP-B training bridge contract. Retry
-native picker runtime and isolated vault-manifest evidence when LaunchServices
-and CoreSimulator are available. Keep Apple lanes serial; builds are not runtime
-acceptance.
+Next Astra medium seals the CP-B training adapter contract: migration/bootstrap
+keys, command-to-wire identity, signing and sequence allocation, deletion/
+tombstone retention, and the relation to clearReceiptJournalAfterExport().
+Then Luna xhigh can implement only the approved bridge. Retry P06-B native
+picker runtime and isolated vault-manifest evidence when Apple test services
+recover. Keep Apple lanes serial; builds are not runtime acceptance.

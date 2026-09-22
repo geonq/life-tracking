@@ -8,9 +8,10 @@ updated 2026-09-23.
 
 ## Current checkpoint
 
-main, origin/main, and codex/p06-b are synchronized. The native picker
-implementation checkpoint is 7cc189f, following chooser 433ea64, workspace
-86baaa8, inspector 454f4d1, and lifecycle checkpoint 4436211.
+main, origin/main, and codex/p06-b are synchronized at the latest
+coordination checkpoint. P04 SyncStoreKind is pushed at ebef1ac; native picker
+tests remain at 7cc189f, following chooser 433ea64, workspace 86baaa8,
+inspector 454f4d1, and lifecycle checkpoint 4436211.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
 The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
 75 missing states. It is evidence-led, not a completion percentage.
@@ -44,10 +45,12 @@ P04 training payload serialization, bounded local canonical JSON, NFC and
 numeric/domain/parser regressions are pushed at b0e52e1 after Astra static PASS.
 No durable fitness store adapter is claimed yet; native logic lanes are green,
 while signed UI, physical-device, and external-provider evidence remain open.
-The next adapter attempt is blocked by CP-B: SyncStoreKind, replication
-metadata migration, command-to-wire identity persistence, signing/sequence
-ownership, and training tombstone semantics are absent or unsealed. P05 graph
-review may advance independently; no worker may guess these interfaces.
+The closed 17-case SyncStoreKind registry and exhaustive domain switch
+are pushed at ebef1ac. Both macOS and iOS arm64 build-for-testing pass; the
+protocol tests compile but runtime execution remains unverified. Durable
+adapters are still blocked by CP-B replication metadata migration, command-to-
+wire identity persistence, signing/sequence ownership, and training tombstone
+semantics. No worker may guess these interfaces.
 
 P06-B now has a pushed read-only Calendar-to-Obsidian Canvas workspace with
 durable selection transaction recovery and prepare-before-publish journal
@@ -96,15 +99,14 @@ is currently unavailable.
 
 ## Next execution
 
-1. P04 prerequisite: add the closed SyncStoreKind enum, exhaustive domain
-   mapping, and serialization/rejection tests in SyncContract.swift and
-   SyncProtocolTests.swift. Do not alter storeID, signed bytes, adapters,
-   sequence allocation, or migrations in this packet.
-2. Keep durable P04 adapters paused until Astra seals the CP-B training bridge
-   contract, especially migration/bootstrap keys, command identity, signing/
-   sequence ownership, and tombstone retention.
-3. Retry P06-B native picker tests and the isolated fixture-vault manifest
-   round trip when LaunchServices and CoreSimulator are available.
-4. Continue P07-P16 visual/motion, screen migration, widgets, providers,
-   security cleanup, and target composition; then P17/P18 Windows/live-provider,
-   physical-device, and final evidence gates.
+1. Astra medium seals the CP-B training adapter bridge: migration/bootstrap
+   key map, command-to-wire identity persistence, exact signing/sequence
+   allocation, delete/tombstone retention, and clearReceiptJournalAfterExport
+   interaction.
+2. Luna xhigh implements only that approved bridge, then Astra medium reviews
+   the batch before checkpoint. No durable adapter is registered before the
+   contract is sealed.
+3. Retry P06-B native picker runtime and isolated fixture-vault manifest
+   comparison when LaunchServices and CoreSimulator recover.
+4. Continue P07-P16 visual/motion, widgets, providers, and security cleanup;
+   then Windows/live-provider, physical-device, and final evidence gates.
