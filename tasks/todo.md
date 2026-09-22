@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
-Current checkpoint: 80579bc.
+Current checkpoint: 4ff27e3.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -62,11 +62,17 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   global Finance date codec unchanged; LifeOSLogic passes 1,837/1,837 on the
   iOS 27 iPhone 17 simulator.
 
+- P06-A native Canvas checkpoint: `4ff27e3`. Native viewport, AppKit/UIKit
+  input bridge, owner tokens/touch quarantine, shared geometry, cached
+  presentation queries, retry recovery, and interaction regressions are pushed
+  after Astra PASS. Main macOS evidence is 405/405 full and 19/19 focused;
+  final worker iOS focused evidence is 18/18 and generic iOS builds pass.
+
 ## Ordered implementation
 
 1. P04 adapts finance, fitness, nutrition,
    supplements and lifestyle stores with local durability before acknowledgement.
-2. P06 adds native Canvas/inspector/vault integration after accepted P01/P05
+2. P06-B adds native Canvas routing/inspector/vault integration after accepted P01/P05
    contracts; no worker may guess CP-B adapter identities.
 3. P07 shared visual/motion primitives; P08 calendar; P09 finance; P10 fitness;
    P11 HealthKit/Zepp provenance; P12 usage; P13 tax; P14 widgets/intents.

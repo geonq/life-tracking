@@ -25,7 +25,8 @@ Updated 2026-09-22 Europe/Berlin.
   unknown, failed, and pending remain separate.
 - Every accepted tranche records exact files, hashes, evidence, complexity,
   cleanup, commit, push, and local/origin parity. The current code checkpoint
-  is native persistence `80579bc` after Xcode-27 compatibility `0451afb`.
+  is P06-A native Canvas `4ff27e3` after native persistence `80579bc` and
+  Xcode-27 compatibility `0451afb`.
 - Apple lanes are serialized, use owned result paths, and are not claimed from
   an interrupted or silent command.
 
@@ -98,3 +99,14 @@ Updated 2026-09-22 Europe/Berlin.
 - Astra static review passed. The Xcode 27 Mac lane passes 379/379 native
   tests and the iOS 27 simulator logic lane passes 1,837/1,837; signed UI and
   physical-device evidence remain open.
+
+## 2026-09-22 P06-A native Canvas checkpoint
+
+- `4ff27e3` is pushed on main and origin/main after Astra PASS. It adds the
+  native viewport, AppKit/UIKit input bridge, owner tokens and touch quarantine,
+  shared node/edge geometry, cached presentation queries, retry recovery, and
+  focused platform regressions. Main macOS evidence is 405/405 full and 19/19
+  focused; final worker iOS evidence is 18/18 focused plus generic build.
+- This is a bounded Canvas tranche. Vault routing, inspector/document flows,
+  Calendar integration, CP-B adapters, signed UI, physical-device input, and
+  external provider evidence remain open.
