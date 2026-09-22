@@ -2,8 +2,8 @@
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
 
-- Current source checkpoint: `86baaa8` on `codex/p06-b`; main remains at
-  `409a3da` until the checkpoint docs are committed and the branch is merged.
+- Current checkpoint: `80c5663` on `main` and `origin/main`; P06-B source is
+  `86baaa8` in the same history.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
 - P01: shared sync contract/codec complete at `a21ccf3` + `673dc0a`.
@@ -38,6 +38,6 @@ Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
   intermittent after the final run; signing, physical iPhone, Windows, and
   live-provider evidence remain unknown or unavailable.
 
-Next: merge the validated P06-B checkpoint, then continue native graph/vault
-UI, visual/motion, widgets, providers, Windows, physical-device, and final
-security evidence gates. Release remains NO-GO until those gates close.
+Next: continue native graph/vault UI, visual/motion, widgets, providers,
+Windows, physical-device, and final security evidence gates. Release remains
+NO-GO until those gates close.

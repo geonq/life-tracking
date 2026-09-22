@@ -14,10 +14,10 @@ evidence are still open.
 
 ## Current truth
 
-- `main` and `origin/main` still point to `409a3da` until the validated P06-B
-  source and documentation commits are fast-forwarded.
-- P06-B source is committed at `86baaa8` on `codex/p06-b` (`feat: add
-  transactional planning vault workspace`).
+- `main` and `origin/main` point to `80c5663` (`docs: record P06-B
+  transaction checkpoint`), with P06-B source at `86baaa8` immediately below.
+- The same P06-B source and documentation history is available on
+  `codex/p06-b`.
 - The P00 ledger remains acceptance truth: 258 leaves, 7 aliases, pending evidence.
 - P01: `a21ccf3`, `673dc0a`; P02: `038cd37`; P03 durable calendar: `9d222ac`.
 - P04 payload boundary: `b0e52e1`; durable fitness adapters remain open.
@@ -57,7 +57,6 @@ evidence are still open.
 
 ## Next action
 
-Push and fast-forward the two P06-B checkpoint commits, then continue native
-graph/vault routing and inspector UI. Keep one worker and one Apple lane at a
-time; preserve gradual commits, pushes, compact handoffs, and evidence-led
-gates.
+Continue native graph/vault routing and inspector UI. Keep one worker and one
+Apple lane at a time; preserve gradual commits, pushes, compact handoffs, and
+evidence-led gates.
