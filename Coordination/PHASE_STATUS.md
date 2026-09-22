@@ -2,7 +2,8 @@
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
 
-- Current checkpoint: `4ff27e3`; local `main` and `origin/main` match.
+- Current source checkpoint: `86baaa8` on `codex/p06-b`; main remains at
+  `409a3da` until the checkpoint docs are committed and the branch is merged.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
 - P01: shared sync contract/codec complete at `a21ccf3` + `673dc0a`.
@@ -22,6 +23,14 @@ Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
   Astra PASS. The full macOS lane passed 405/405, focused macOS interaction
   tests passed 19/19, the final worker passed focused iOS interaction tests
   18/18, and generic iOS builds passed. Native physical input remains open.
+- P06-B planning workspace transaction checkpoint is implemented at `86baaa8`.
+  Calendar can route a selected existing vault to a read-only validated canvas
+  document. Selection persistence, revocation, initialize/attach/restore
+  resource ordering, journal readiness, and mirrored failure regressions are
+  included. Astra medium review is clear for validation.
+- P06-B evidence: Xcode 27 macOS focused suites passed 107/107; fresh iOS
+  27 build-for-testing succeeded and the serial simulator rerun passed 62/62
+  focused tests. The simulator was shut down afterward.
 - Evidence: API typecheck and 160 tests pass; gateway replication is 23 passed
   with one cryptography-dependent skip; `LifeOSMacLogic` passed 405/405 tests
   on Xcode 27/macOS 26.6.2.
@@ -29,6 +38,6 @@ Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
   intermittent after the final run; signing, physical iPhone, Windows, and
   live-provider evidence remain unknown or unavailable.
 
-Next: resolve CP-B or keep the adapter lane paused, then P06-B native graph/vault
+Next: merge the validated P06-B checkpoint, then continue native graph/vault
 UI, visual/motion, widgets, providers, Windows, physical-device, and final
-security evidence gates.
+security evidence gates. Release remains NO-GO until those gates close.

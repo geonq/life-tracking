@@ -110,3 +110,40 @@ Updated 2026-09-22 Europe/Berlin.
 - This is a bounded Canvas tranche. Vault routing, inspector/document flows,
   Calendar integration, CP-B adapters, signed UI, physical-device input, and
   external provider evidence remain open.
+
+## 2026-09-22 Apple lane resource hygiene
+
+- Apple validation runs through `scripts/validate_apple_on_mac.sh` or
+  `scripts/run_prerelease_lanes.sh`, never through multiple ad-hoc xcodebuild
+  lanes. Keep `-jobs 1`, disable parallel test destinations, use one simulator,
+  and preserve separate log/result/DerivedData paths.
+- Both lane scripts own a simulator cleanup trap. If a command is interrupted,
+  inspect the exact xcodebuild/xctest process tree, stop only the owned stalled
+  process, then run `simctl shutdown` and verify no LifeOS test process or booted
+  simulator remains before starting another lane.
+- A long silent interval during first-use simulator runtime preparation is not
+  evidence of a dead test. Read the owned log and process state first; do not
+  start a second lane or kill Apple CoreSimulator daemons while preparation is
+  progressing.
+
+## 2026-09-22 P06-B planning workspace transaction checkpoint
+
+- `86baaa8` is the validated P06-B source checkpoint. It adds the read-only
+  Calendar-to-Obsidian `.canvas` workspace, transactional vault selection,
+  journal/resource handoff, and mirrored iOS/macOS regressions.
+- Selection persistence uses a bounded composite record plus durable pending
+  and explicit decision records. Recovery rolls back before a decision, keeps
+  only a matching decided candidate, validates transaction/device evidence,
+  and keeps legacy pending records rollback-only.
+- Initialize, attach, and restore prepare candidate journals before publishing
+  access or replacing installed resources. Ordinary candidate rejection keeps
+  the old workspace; uncertain access commits invalidate access and release
+  writer resources. Revoke stays serialized and reports failed durability.
+- Private-file removal flushes the existing parent directory even when the
+  entry is already absent. The test-only fault seam sits between unlink and
+  directory flush; production defaults to no fault.
+- Validation: Astra medium final review had no P1/P2 blocker; Xcode 27 macOS
+  focused lane passed 107/107, and the fresh serial iOS 27 simulator rerun
+  passed 62/62 focused tests. These are focused code-boundary gates, not full
+  release evidence for CP-B, signed UI, physical iPhone, Windows, providers,
+  or final security.

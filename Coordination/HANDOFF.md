@@ -5,15 +5,19 @@ Updated 2026-09-22 Europe/Berlin.
 ## Active task
 
 P00/P01/P02/P03, P04 training serialization, P05 D1 graph/session, the Xcode
-27 native compatibility checkpoint, and the bounded P06-A native Canvas
-viewport/input checkpoint are pushed. Release remains NO-GO:
+27 native compatibility checkpoint, the bounded P06-A native Canvas
+viewport/input checkpoint, and the P06-B planning workspace transaction
+checkpoint are pushed. Release remains NO-GO:
 CP-B adapters, signed UI/device evidence, Windows/live providers,
 physical-device comparison, remaining UI/motion work, and final security
 evidence are still open.
 
 ## Current truth
 
-- `main` and `origin/main` point to `4ff27e3` (`feat: add native planning canvas interactions`).
+- `main` and `origin/main` still point to `409a3da` until the validated P06-B
+  source and documentation commits are fast-forwarded.
+- P06-B source is committed at `86baaa8` on `codex/p06-b` (`feat: add
+  transactional planning vault workspace`).
 - The P00 ledger remains acceptance truth: 258 leaves, 7 aliases, pending evidence.
 - P01: `a21ccf3`, `673dc0a`; P02: `038cd37`; P03 durable calendar: `9d222ac`.
 - P04 payload boundary: `b0e52e1`; durable fitness adapters remain open.
@@ -41,9 +45,19 @@ evidence are still open.
   simulator service was intermittent after the run, so no new full iOS count
   is claimed. Signed UI, App Group, physical iPhone, Windows, and live-provider
   evidence remain pending; no claim is made for those lanes.
+- P06-B source review passed Astra medium's final gate with no P1/P2 blocker.
+  The isolated Xcode 27 macOS lane passed 107/107 focused tests. A fresh iOS
+  27 build-for-testing succeeded, and the serial iPhone 17 simulator rerun
+  passed 62/62 focused tests: 6 filesystem, 18 interaction, and 38 workspace.
+  The first full iOS attempt had two order/timing failures; both tests passed
+  alone and the full rerun passed. The rerun is the canonical evidence.
+- The iPhone 17 simulator was shut down after validation; no owned xcodebuild,
+  xctest, LifeOS app, or booted simulator process remains. Build outputs and
+  result bundles are isolated under `/tmp` and are disposable.
 
 ## Next action
 
-Resolve CP-B or keep the adapter lane paused, then continue P06-B native
-graph/vault routing and inspector UI. Keep one Luna worker and one Apple lane at a time; preserve
-gradual commits, pushes, compact handoffs, and evidence-led gates.
+Push and fast-forward the two P06-B checkpoint commits, then continue native
+graph/vault routing and inspector UI. Keep one worker and one Apple lane at a
+time; preserve gradual commits, pushes, compact handoffs, and evidence-led
+gates.
