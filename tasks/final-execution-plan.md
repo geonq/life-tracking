@@ -2,7 +2,8 @@
 
 Updated 2026-09-22 Europe/Berlin. Authoritative design remains in
 artifacts/blueprint/20260921, with R20-06-DISPATCH as the latest contract
-precedence. Current implementation checkpoint is 86baaa8.
+precedence. Current implementation checkpoint is 454f4d1; the transaction
+workspace base is 86baaa8.
 Release is NO-GO.
 
 ## Rules
@@ -32,7 +33,10 @@ supplements and lifestyle durable adapters.
 
 P05 depends on P00/P01 and reviews the eight untracked D1 files. P06 depends on
 P01/P05 and owns native planning Canvas, inspector, viewport, gesture bridge,
-vault observer/project coordinator and planning transport seam.
+vault observer/project coordinator and planning transport seam. The read-only
+inspector checkpoint `454f4d1` covers selected-node metadata and in-vault
+Markdown preview; the next bounded tranche is the existing-document chooser
+and typed Canvas/Markdown opening path.
 
 P07 establishes the shared visual/motion/orb primitives. P08 repairs calendar
 interaction. P09 integrates finance and live-readback boundaries. P10 owns

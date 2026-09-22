@@ -2,7 +2,7 @@
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
 
-- Current source checkpoint: `86baaa8`; `main`, `origin/main`, and
+- Current source checkpoint: `454f4d1`; `main`, `origin/main`, and
   `codex/p06-b` are synchronized with the validated P06-B documentation.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
@@ -28,6 +28,13 @@ Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
   document. Selection persistence, revocation, initialize/attach/restore
   resource ordering, journal readiness, and mirrored failure regressions are
   included. Astra medium review is clear for validation.
+- P06-B read-only node inspector is pushed at `454f4d1`. It adds selected-node
+  metadata, exact in-vault Markdown preview/refresh, Mac trailing inspection,
+  iPhone sheet presentation, and lifecycle/path guards without Canvas writes.
+- P06-B inspector evidence: Xcode 27 macOS focused suites passed 73/73. The
+  iPhone 17 run passed all 21 interaction tests and every new inspector test;
+  four older workspace tests failed after offline-host network timeouts, so
+  this run is qualified and not a full iOS green gate.
 - P06-B evidence: Xcode 27 macOS focused suites passed 107/107; fresh iOS
   27 build-for-testing succeeded and the serial simulator rerun passed 62/62
   focused tests. The simulator was shut down afterward.
@@ -38,6 +45,7 @@ Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
   intermittent after the final run; signing, physical iPhone, Windows, and
   live-provider evidence remain unknown or unavailable.
 
-Next: continue native graph/vault UI, visual/motion, widgets, providers,
+Next: continue native graph/vault UI with the existing-document chooser plan,
+visual/motion, widgets, providers,
 Windows, physical-device, and final security evidence gates. Release remains
 NO-GO until those gates close.

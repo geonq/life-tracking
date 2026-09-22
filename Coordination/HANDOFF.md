@@ -6,16 +6,18 @@ Updated 2026-09-22 Europe/Berlin.
 
 P00/P01/P02/P03, P04 training serialization, P05 D1 graph/session, the Xcode
 27 native compatibility checkpoint, the bounded P06-A native Canvas
-viewport/input checkpoint, and the P06-B planning workspace transaction
-checkpoint are pushed. Release remains NO-GO:
+viewport/input checkpoint, the P06-B planning workspace transaction
+checkpoint, and the read-only P06-B node inspector are pushed. Release remains
+NO-GO:
 CP-B adapters, signed UI/device evidence, Windows/live providers,
 physical-device comparison, remaining UI/motion work, and final security
 evidence are still open.
 
 ## Current truth
 
-- `main` and `origin/main` are synchronized with the validated P06-B
-  documentation checkpoint; P06-B source is `86baaa8` in that history.
+- `main` and `origin/main` are synchronized through the source and documentation
+  checkpoint; the transaction workspace is `86baaa8` and the inspector is
+  `454f4d1` in that history.
 - `codex/p06-b` is synchronized with the same source and documentation state.
 - The P00 ledger remains acceptance truth: 258 leaves, 7 aliases, pending evidence.
 - P01: `a21ccf3`, `673dc0a`; P02: `038cd37`; P03 durable calendar: `9d222ac`.
@@ -30,6 +32,9 @@ evidence are still open.
 - `4ff27e3` adds the P06-A native planning canvas viewport, AppKit/UIKit input
   bridge, sequence ownership/quarantine, shared node geometry, presentation
   caching, retry recovery, and platform interaction regressions.
+- `454f4d1` adds read-only selected-node metadata, exact in-vault `LifeOS/*.md`
+  validation, bounded Markdown preview/refresh, Mac trailing inspection,
+  iPhone sheet presentation, and late-result authority guards.
 
 ## Evidence
 
@@ -50,12 +55,18 @@ evidence are still open.
   passed 62/62 focused tests: 6 filesystem, 18 interaction, and 38 workspace.
   The first full iOS attempt had two order/timing failures; both tests passed
   alone and the full rerun passed. The rerun is the canonical evidence.
+- The inspector patch’s Xcode 27 macOS focused suites passed 73/73 (22
+  interaction and 51 workspace). The iPhone 17 run passed all 21 interaction
+  tests and every new inspector test; four older workspace tests failed after
+  offline-host backend/websocket timeouts. Astra classified the patch READY TO
+  CHECKPOINT with no P1/P2 blocker; mounted UI evidence remains open.
 - The iPhone 17 simulator was shut down after validation; no owned xcodebuild,
   xctest, LifeOS app, or booted simulator process remains. Build outputs and
   result bundles are isolated under `/tmp` and are disposable.
 
 ## Next action
 
-Continue native graph/vault routing and inspector UI. Keep one worker and one
-Apple lane at a time; preserve gradual commits, pushes, compact handoffs, and
-evidence-led gates.
+Continue native graph/vault routing with the bounded existing-document chooser
+plan. Keep one worker and one Apple lane at a time; preserve gradual commits,
+pushes, compact handoffs, and evidence-led gates. Investigate test-host network
+isolation separately; do not call the qualified iOS run green.

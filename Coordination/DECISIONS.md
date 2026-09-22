@@ -147,3 +147,19 @@ Updated 2026-09-22 Europe/Berlin.
   passed 62/62 focused tests. These are focused code-boundary gates, not full
   release evidence for CP-B, signed UI, physical iPhone, Windows, providers,
   or final security.
+
+## 2026-09-22 P06-B read-only node inspector
+
+- `454f4d1` is the accepted source checkpoint after Astra medium review. It
+  adds selected Canvas node metadata, exact `LifeOS/` Markdown reference
+  validation, bounded read-only preview, refresh/back, Mac trailing inspection,
+  iPhone sheet presentation, and late-result guards for selection, vault,
+  lifecycle, and cancellation changes. It does not create, edit, publish, or
+  network-read documents.
+- Xcode 27 macOS focused suites passed 73/73: 22 interaction and 51 workspace.
+  The iPhone 17 run passed all 21 interaction tests and all new inspector tests;
+  four older workspace tests failed after the offline Windows host caused
+  backend/websocket timeouts. Astra found no P1/P2 inspector blocker, but the
+  test-host isolation issue stays qualified and separate from this checkpoint.
+- Mounted native presentation, signed/App Group behavior, physical-device
+  input, real-vault round trip, and final visual review remain open.

@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
-Current source checkpoint: 86baaa8; main and origin/main are synchronized.
+Current source checkpoint: 454f4d1; main and origin/main are synchronized.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -75,11 +75,18 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   failure regressions are implemented. Astra medium review passed; focused
   Xcode 27 evidence is 107/107 macOS and 62/62 iOS simulator tests.
 
+- P06-B read-only node inspector: `454f4d1`. Selected-node metadata, exact
+  in-vault Markdown preview/refresh, Mac/iPhone presentation, and lifecycle/path
+  guards are pushed after Astra medium READY TO CHECKPOINT. Mac focused evidence
+  is 73/73. The iPhone run passed all inspector tests, while four older
+  workspace tests failed after offline-host network timeouts; no full iOS green
+  claim is made.
+
 ## Ordered implementation
 
 1. P04 adapts finance, fitness, nutrition,
    supplements and lifestyle stores with local durability before acknowledgement.
-2. P06-B continues with native Canvas routing/inspector/vault integration after
+2. P06-B continues with native Canvas routing/document chooser/vault integration after
    the accepted transaction workspace checkpoint; no worker may guess CP-B
    adapter identities.
 3. P07 shared visual/motion primitives; P08 calendar; P09 finance; P10 fitness;
