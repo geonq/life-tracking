@@ -1,6 +1,6 @@
 # P06-B mounted picker and vault round-trip plan
 
-Updated 2026-09-22 Europe/Berlin. Base: `afce4ed`. This is a bounded plan
+Updated 2026-09-22 Europe/Berlin. Base: `c4243a3`. This is a bounded plan
 for native presentation evidence after the chooser checkpoint `433ea64`.
 Release remains NO-GO.
 
@@ -46,7 +46,7 @@ Presentation invariants:
   `planning-document-retry`, `planning-workspace-canvas`, and
   `planning-note-source`.
 
-## Second implementation packet
+## Second implementation packet — source evidence checkpointed
 
 After the first packet is reviewed, only these files may change:
 
@@ -59,6 +59,15 @@ viewport probe must drive the same setter as native input and report every
 change; no persistence or public behavior changes. Use hosted `NSWindow` and
 visible `UIWindow` tests, controlled picker closures, continuations, and no
 fixed sleeps. Tests must close their own host and cancel tasks.
+
+The source portion is checkpointed at `c4243a3`. It adds the DEBUG probe,
+hosted Canvas lifecycle/coordinator tests, exact fixture snapshots, ticket
+supersession assertions, and mirrored macOS/iOS parity. Astra medium found no
+P0/P1/P2 issue; final macOS and iOS arm64 build-for-testing passed. These tests
+mount the Canvas component and coordinator, but do not inject the native picker
+broker, so they do not establish native picker presentation or real-vault
+runtime evidence. The presentation and mounted runtime lists below remain the
+next implementation/evidence lane.
 
 Required mounted tests in both suites:
 

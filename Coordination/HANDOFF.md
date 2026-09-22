@@ -15,7 +15,7 @@ evidence are still open.
 
 ## Current truth
 
-- `main` and `origin/main` are synchronized at source checkpoint `1df4642`;
+- `main` and `origin/main` are synchronized at source checkpoint `c4243a3`;
   the transaction workspace is `86baaa8`, the inspector is `454f4d1`, the
   chooser is `433ea64`, and picker hardening is `1df4642` in that history.
 - `codex/p06-b` is synchronized with the same source and documentation state.
@@ -44,6 +44,11 @@ evidence are still open.
   task, owner-token guarded representable teardown, ancestor-safe iOS dismissal,
   exactly-once cancellation, and AppKit sheet completion ownership. The
   bounded next plan is `tasks/p06b-mounted-picker-plan.md`.
+- `c4243a3` adds the DEBUG-only Canvas viewport probe and mirrored hosted
+  component/coordinator evidence. Fit transitions use the same production
+  viewport closure as native input; ticket supersession matches the coordinator
+  contract; fixture round trips assert no vault mutation and exact sibling/
+  symlink rejection. Astra medium's final gate found no P0/P1/P2 issue.
 
 ## Evidence
 
@@ -80,14 +85,19 @@ evidence are still open.
   `LifeOSLogic` build-for-testing. Native mounted presentation, interactive
   dismissal, viewport preservation, and real-vault mutation evidence remain
   unverified.
+- The `c4243a3` packet passed final macOS and iOS arm64 build-for-testing with
+  the mirrored tests compiled after actor-isolation and contract repairs.
+  This is source/build evidence only: native picker presentation, mounted
+  workspace UI, and real-vault runtime mutation evidence remain unverified.
 - The iPhone 17 simulator was shut down after validation; no owned xcodebuild,
   xctest, LifeOS app, or booted simulator process remains. Build outputs and
   result bundles are isolated under `/tmp` and are disposable.
 
 ## Next action
 
-Continue with the mounted picker probes and real-vault round trip defined in
-`tasks/p06b-mounted-picker-plan.md`. Keep one worker and one Apple lane at a
-time; preserve gradual commits, pushes, compact handoffs, and evidence-led
-gates. Investigate test-host network isolation separately; do not call
-qualified iOS runs green.
+Continue with the native mounted picker presentation and real-vault round trip
+defined in `tasks/p06b-mounted-picker-plan.md`; the source probe packet is
+checkpointed but does not replace runtime evidence. Keep one worker and one
+Apple lane at a time; preserve gradual commits, pushes, compact handoffs, and
+evidence-led gates. Investigate test-host network isolation separately; do not
+call qualified iOS runs green.

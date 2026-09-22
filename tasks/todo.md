@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
-Current source checkpoint: 1df4642; main and origin/main are synchronized.
+Current source checkpoint: c4243a3; main and origin/main are synchronized.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -95,6 +95,13 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   SwiftUI task gating, retry disabling, and sanitized picker errors are pushed.
   macOS and iPhone 17 arm64 build-for-testing pass; mounted/runtime evidence is
   still open. The next exact contract is `tasks/p06b-mounted-picker-plan.md`.
+
+- P06-B Canvas evidence packet: `c4243a3`. DEBUG viewport reporting is wired
+  to the production setter, mirrored hosted lifecycle/coordinator tests cover
+  cancellation, failure, unmount, reopen, ticket supersession, Markdown back,
+  fixture no-mutation, and sibling/symlink rejection. Astra medium final gate
+  found no P0/P1/P2 issue; final macOS and iOS arm64 build-for-testing pass.
+  Native picker presentation and real-vault runtime evidence remain open.
 
 ## Ordered implementation
 

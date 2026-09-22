@@ -8,7 +8,7 @@ updated 2026-09-22.
 
 ## Current checkpoint
 
-main and local origin/main match at picker-hardening checkpoint 1df4642, with
+main and local origin/main match at Canvas evidence checkpoint c4243a3, with
 chooser source 433ea64, transaction workspace 86baaa8, and inspector 454f4d1.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
 The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
@@ -74,6 +74,13 @@ prevents overlapping tasks and competing controls, representable teardown is
 static and owner-token guarded, and picker errors are sanitized. Both Apple
 arm64 build-for-testing lanes pass. The mounted probes and real-vault
 no-mutation round trip are specified in tasks/p06b-mounted-picker-plan.md.
+
+The source evidence packet is pushed at c4243a3 after Astra medium READY. The
+DEBUG viewport probe shares the production input/Fit setter; mirrored hosted
+tests cover lifecycle cancellation/failure/reopen, ticket supersession,
+Markdown back, fixture no-mutation, and sibling/symlink rejection. Both final
+macOS and iOS arm64 build-for-testing lanes passed. This does not prove native
+picker presentation or mounted real-vault runtime behavior.
 
 ## Next execution
 
