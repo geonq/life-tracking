@@ -2,7 +2,7 @@
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
 
-- Current checkpoint: `0451afb`; local `main` and `origin/main` match.
+- Current checkpoint: `80579bc`; local `main` and `origin/main` match.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
 - P01: shared sync contract/codec complete at `a21ccf3` + `673dc0a`.
@@ -16,12 +16,15 @@ Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
 - P05 D1: bounded graph/parser/spatial/session/vault work is pushed at `ca2caf1`.
 - `0451afb` restores URL-safe Base64 decoding, Xcode 27 public-key compatibility,
   and the actor-safe store URL surface.
+- `80579bc` prepares canonical calendar bytes before atomic persistence, keeps
+  v1 peer dates compatible, and preserves the global Finance `.iso8601` codec.
 - Evidence: API typecheck and 160 tests pass; gateway replication is 23 passed
   with one cryptography-dependent skip; `LifeOSMacLogic` passed 379/379 tests
   on Xcode 27/macOS 26.6.2.
 - Host: Xcode 27.0, macOS 26.6.2 arm64, and the iOS 27 runtime/iPhone 17
   simulator are available. Signing, physical iPhone, Windows, and live-provider
   evidence remain unknown or unavailable.
+- `LifeOSLogic` passed 1,837/1,837 tests on the iOS 27 iPhone 17 simulator.
 
 Next: resolve CP-B or keep the adapter lane paused, then P06 native graph/vault
 UI, visual/motion, widgets, providers, Windows, physical-device, and final

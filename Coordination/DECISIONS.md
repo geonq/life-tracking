@@ -25,7 +25,7 @@ Updated 2026-09-22 Europe/Berlin.
   unknown, failed, and pending remain separate.
 - Every accepted tranche records exact files, hashes, evidence, complexity,
   cleanup, commit, push, and local/origin parity. The current code checkpoint
-  is Xcode-27 compatibility `0451afb` after P05 D1 `ca2caf1`.
+  is native persistence `80579bc` after Xcode-27 compatibility `0451afb`.
 - Apple lanes are serialized, use owned result paths, and are not claimed from
   an interrupted or silent command.
 
@@ -95,5 +95,6 @@ Updated 2026-09-22 Europe/Berlin.
 ## P04 fitness payload checkpoint
 
 - `b0e52e1` adds strict training serialization, bounded canonical JSON, NFC wire normalization, finite/fractional numeric handling, and parser/domain regressions; it is serialization only and CP-B still blocks durable store adapters.
-- Astra static review passed. The Xcode 27 Mac lane now passes 379/379 native
-  tests; iOS simulator and physical-device evidence remain open.
+- Astra static review passed. The Xcode 27 Mac lane passes 379/379 native
+  tests and the iOS 27 simulator logic lane passes 1,837/1,837; signed UI and
+  physical-device evidence remain open.

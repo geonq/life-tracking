@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
-Current checkpoint: 0451afb.
+Current checkpoint: 80579bc.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -57,7 +57,10 @@ Use artifacts/final/completion/requirements.json instead of percentages.
 
 - Xcode 27 compatibility checkpoint: 0451afb. URL-safe Base64 decoding, actor
   isolation compatibility, and focused protocol regressions are pushed. The
-  full LifeOSMacLogic suite passes 379/379.
+  full LifeOSMacLogic suite passes 379/379. The follow-up native persistence
+  checkpoint 80579bc canonicalizes calendar bytes before commit and keeps the
+  global Finance date codec unchanged; LifeOSLogic passes 1,837/1,837 on the
+  iOS 27 iPhone 17 simulator.
 
 ## Ordered implementation
 
@@ -74,7 +77,7 @@ Use artifacts/final/completion/requirements.json instead of percentages.
 ## Release gates still open
 
 - iOS 27 simulator/runtime UI, signing, App Group, Shortcuts, and physical
-  iPhone behavior.
+  iPhone behavior. Logic tests pass; UI/device evidence is still open.
 - Windows identity/ACL/service/Serve/health/readiness/restart/rollback.
 - Enable Banking, Trade Republic, Robinhood/net-worth, outage/rejoin and live
   provider readback.

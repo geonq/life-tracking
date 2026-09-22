@@ -71,9 +71,10 @@ security.
 ## Current external blockers
 
 The Windows host was not contacted by P00 and remains unavailable by task
-constraint. Xcode 27 and SDK settings are installed, but the Xcode license is
-not accepted; no valid signing identity or provisioning profile is present.
-Simulator and physical runtime evidence is therefore unknown. Banking consent,
+constraint. Xcode 27 and SDK settings are installed and the Xcode license is
+accepted, but no valid signing identity or provisioning profile is present.
+The iOS 27 simulator logic lane is green; signed UI and physical runtime
+evidence remain unknown. Banking consent,
 provider quotas, iCloud vault choice, HealthKit/Zepp permissions, App Group
 registration and personal-device signing are also unknown.
 

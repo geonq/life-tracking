@@ -7,18 +7,20 @@ updated 2026-09-22.
 
 ## Current checkpoint
 
-main and local origin/main match at 0451afb.
+main and local origin/main match at 80579bc.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
 The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
 75 missing states. It is evidence-led, not a completion percentage.
 
-## Uncommitted candidate state
+## Current native checkpoint
 
 P05 D1 is accepted and pushed at ca2caf1. It covers bounded graph/parser/
 spatial primitives, Canvas edit/session state, atomic vault access-context
 checks, and focused regression sources. The follow-up 0451afb restores
-URL-safe sync decoding and Xcode 27 compatibility; LifeOSMacLogic now passes
-379/379 native tests on macOS 26.6.2.
+URL-safe sync decoding and Xcode 27 compatibility. The follow-up 80579bc
+prepares canonical calendar bytes before commit and keeps the global Finance
+date codec unchanged. LifeOSMacLogic passes 379/379 native tests on macOS
+26.6.2; LifeOSLogic passes 1,837/1,837 on the iOS 27 iPhone 17 simulator.
 
 P01 is pushed at a21ccf3 with the shared contract correction at 673dc0a. P02
 is pushed through 038cd37 and includes authenticated exchange integration,
@@ -33,8 +35,8 @@ at 9d222ac. API evidence is 160/160
 tests and focused gateway evidence is 23 passed with one crypto-dependent skip.
 P04 training payload serialization, bounded local canonical JSON, NFC and
 numeric/domain/parser regressions are pushed at b0e52e1 after Astra static PASS.
-No durable fitness store adapter is claimed yet; the native Mac lane is green,
-while iOS and physical-device evidence remain open.
+No durable fitness store adapter is claimed yet; native logic lanes are green,
+while signed UI, physical-device, and external-provider evidence remain open.
 The next adapter attempt is blocked by CP-B: SyncStoreKind, replication
 metadata migration, command-to-wire identity persistence, signing/sequence
 ownership, and training tombstone semantics are absent or unsealed. P05 graph

@@ -6,13 +6,13 @@ Updated 2026-09-22 Europe/Berlin.
 
 P00/P01/P02/P03, P04 training serialization, P05 D1 graph/session, and the
 Xcode 27 native compatibility checkpoint are pushed. Release remains NO-GO:
-CP-B adapters, iOS simulator/device evidence, Windows/live providers,
+CP-B adapters, signed UI/device evidence, Windows/live providers,
 physical-device comparison, remaining UI/motion work, and final security
 evidence are still open.
 
 ## Current truth
 
-- `main` and `origin/main` point to `0451afb` (`fix: restore native sync compatibility`).
+- `main` and `origin/main` point to `80579bc` (`fix: harden native persistence boundaries`).
 - The P00 ledger remains acceptance truth: 258 leaves, 7 aliases, pending evidence.
 - P01: `a21ccf3`, `673dc0a`; P02: `038cd37`; P03 durable calendar: `9d222ac`.
 - P04 payload boundary: `b0e52e1`; durable fitness adapters remain open.
@@ -20,6 +20,9 @@ evidence are still open.
   edit reducer, canvas session, vault access-context checks, and regressions.
 - `0451afb` fixes Xcode 27 public-key decoding, exposes the immutable store URL
   safely across actors, and adds the URL-safe Base64 regression coverage.
+- `80579bc` canonicalizes calendar persistence before commit, preserves the
+  v1 peer date path, and repairs Xcode 27 test assumptions without widening
+  the global Finance date codec.
 
 ## Evidence
 
@@ -29,7 +32,8 @@ evidence are still open.
 - `LifeOSMacLogic` on Xcode 27/macOS 26.6.2 passed all 379 tests, including
   DomainSync, planning durability/filesystem/graph, finance, fitness, widgets,
   snapshots, and usage suites. Native warnings remain in snapshot setup only.
-- iOS 27 simulator, signing/profile, physical iPhone, Windows, and live-provider
+- `LifeOSLogic` on the restored iPhone 17 iOS 27 simulator passed all 1,837
+  tests. Signed UI, App Group, physical iPhone, Windows, and live-provider
   evidence remain pending; no claim is made for those lanes.
 
 ## Next action
