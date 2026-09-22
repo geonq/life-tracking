@@ -21,18 +21,28 @@ import UIKit
 import UniformTypeIdentifiers
 
 @MainActor
-private final class PlanningNativeDocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate {
+private final class PlanningNativeDocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
+    private enum PresentationPhase: Equatable {
+        case idle
+        case presenting
+        case presented
+        case dismissing
+        case finished
+    }
+
+    private var phase: PresentationPhase = .idle
     private var continuation: CheckedContinuation<URL?, Error>?
     private var picker: UIDocumentPickerViewController?
+    private var pendingResult: Result<URL?, Error>?
 
     func select(
         from presenter: UIViewController,
         contentTypes: [UTType]
     ) async throws -> URL? {
-        guard continuation == nil else {
+        guard phase == .idle, continuation == nil, picker == nil else {
             throw PlanningFilesystemError.unavailable("pickerBusy")
         }
-        try Task.checkCancellation()
+        guard !Task.isCancelled else { return nil }
         guard presenter.viewIfLoaded?.window != nil else {
             throw PlanningFilesystemError.unavailable("pickerPresenter")
         }
@@ -42,6 +52,12 @@ private final class PlanningNativeDocumentPickerCoordinator: NSObject, UIDocumen
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 self.continuation = continuation
+                guard !Task.isCancelled else {
+                    self.phase = .finished
+                    self.continuation = nil
+                    continuation.resume(returning: nil)
+                    return
+                }
                 let picker = UIDocumentPickerViewController(
                     forOpeningContentTypes: contentTypes,
                     asCopy: false
@@ -49,14 +65,30 @@ private final class PlanningNativeDocumentPickerCoordinator: NSObject, UIDocumen
                 picker.delegate = self
                 picker.allowsMultipleSelection = false
                 self.picker = picker
-                presenter.present(picker, animated: true)
+                guard !Task.isCancelled else {
+                    self.phase = .finished
+                    self.continuation = nil
+                    self.picker = nil
+                    continuation.resume(returning: nil)
+                    return
+                }
+                self.phase = .presenting
+                presenter.present(picker, animated: true) { [weak self, weak picker] in
+                    guard let self, let picker, self.picker === picker else { return }
+                    guard self.phase != .finished else { return }
+                    if self.phase == .presenting {
+                        self.phase = .presented
+                    }
+                    self.dismissOwnedPickerIfNeeded()
+                }
+                picker.presentationController?.delegate = self
                 if Task.isCancelled {
-                    self.finish(.success(nil))
+                    self.settle(.success(nil))
                 }
             }
         } onCancel: {
             Task { @MainActor [weak self] in
-                self?.finish(.success(nil))
+                self?.settle(.success(nil))
             }
         }
     }
@@ -65,27 +97,54 @@ private final class PlanningNativeDocumentPickerCoordinator: NSObject, UIDocumen
         _ controller: UIDocumentPickerViewController,
         didPickDocumentsAt urls: [URL]
     ) {
-        finish(.success(urls.count == 1 ? urls[0] : nil))
+        guard controller === picker else { return }
+        settle(.success(urls.count == 1 ? urls[0] : nil))
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        finish(.success(nil))
+        guard controller === picker else { return }
+        settle(.success(nil))
     }
 
-    private func finish(_ result: Result<URL?, Error>) {
-        guard let continuation else { return }
-        self.continuation = nil
-        let presentedPicker = picker
-        guard let presentedPicker,
-              presentedPicker.presentingViewController != nil else {
-            picker = nil
-            continuation.resume(with: result)
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        guard let picker, picker.presentationController === presentationController else { return }
+        if pendingResult == nil {
+            pendingResult = .success(nil)
+        }
+        finalizeAfterDismissal()
+    }
+
+    private func settle(_ result: Result<URL?, Error>) {
+        guard phase != .finished, pendingResult == nil else { return }
+        pendingResult = result
+        dismissOwnedPickerIfNeeded()
+    }
+
+    private func dismissOwnedPickerIfNeeded() {
+        guard phase != .finished, pendingResult != nil else { return }
+        guard phase != .presenting else { return }
+
+        phase = .dismissing
+        guard let picker, picker.presentingViewController != nil else {
+            finalizeAfterDismissal()
             return
         }
-        presentedPicker.dismiss(animated: true) { [weak self] in
-            self?.picker = nil
-            continuation.resume(with: result)
+
+        picker.dismiss(animated: true) { [weak self, weak picker] in
+            guard let self, let picker, self.picker === picker else { return }
+            self.finalizeAfterDismissal()
         }
+    }
+
+    private func finalizeAfterDismissal() {
+        guard phase != .finished,
+              let pendingResult,
+              let continuation else { return }
+        phase = .finished
+        self.pendingResult = nil
+        self.continuation = nil
+        self.picker = nil
+        continuation.resume(with: pendingResult)
     }
 }
 
@@ -146,18 +205,46 @@ import UniformTypeIdentifiers
 
 @MainActor
 private final class PlanningNativeDocumentPanelCoordinator {
-    private var continuation: CheckedContinuation<URL?, Error>?
-    private var panel: NSOpenPanel?
+    private enum PresentationPhase: Equatable {
+        case idle
+        case presenting
+        case presented
+        case dismissing
+        case finished
+    }
 
-    func select(presenting window: NSWindow) async throws -> URL? {
-        guard continuation == nil else {
+    private var phase: PresentationPhase = .idle
+    private var continuation: CheckedContinuation<URL?, Error>?
+    private weak var hostWindow: NSWindow?
+    private var panel: NSOpenPanel?
+    private var pendingResult: Result<URL?, Error>?
+    private var hostWindowCloseObserver: NSObjectProtocol?
+    private var sheetCompletionOutstanding = false
+
+    func select(presenting window: NSWindow?) async throws -> URL? {
+        guard phase == .idle, continuation == nil, panel == nil else {
             throw PlanningFilesystemError.unavailable("pickerBusy")
         }
-        try Task.checkCancellation()
+        guard !Task.isCancelled else { return nil }
+        guard let window, window.isVisible else {
+            throw PlanningFilesystemError.unavailable("pickerPresenter")
+        }
+        guard window.attachedSheet == nil else {
+            throw PlanningFilesystemError.unavailable("pickerPresenterBusy")
+        }
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 self.continuation = continuation
+                self.hostWindow = window
+                guard !Task.isCancelled else {
+                    self.phase = .finished
+                    self.continuation = nil
+                    self.hostWindow = nil
+                    self.sheetCompletionOutstanding = false
+                    continuation.resume(returning: nil)
+                    return
+                }
                 let panel = NSOpenPanel()
                 panel.canChooseFiles = true
                 panel.canChooseDirectories = false
@@ -168,32 +255,90 @@ private final class PlanningNativeDocumentPanelCoordinator {
                     UTType(filenameExtension: "md") ?? .data
                 ]
                 panel.prompt = "Choose document"
+                guard !Task.isCancelled else {
+                    self.phase = .finished
+                    self.continuation = nil
+                    self.hostWindow = nil
+                    self.sheetCompletionOutstanding = false
+                    continuation.resume(returning: nil)
+                    return
+                }
                 self.panel = panel
+                self.phase = .presenting
+                self.observeHostWindowClosure(window)
+                self.sheetCompletionOutstanding = true
                 panel.beginSheetModal(for: window) { [weak self, weak panel] response in
-                    guard let self else { return }
-                    let url = response == .OK && panel?.urls.count == 1 ? panel?.urls[0] : nil
-                    self.finish(.success(url))
+                    guard let self, let panel, self.panel === panel else { return }
+                    let url = response == .OK && panel.urls.count == 1 ? panel.urls[0] : nil
+                    self.handleSheetCompletion(.success(url))
+                }
+                if self.phase == .presenting {
+                    self.phase = .presented
                 }
                 if Task.isCancelled {
-                    self.finish(.success(nil))
+                    self.settle(.success(nil))
                 }
             }
         } onCancel: {
             Task { @MainActor [weak self] in
-                self?.finish(.success(nil))
+                self?.settle(.success(nil))
             }
         }
     }
 
-    private func finish(_ result: Result<URL?, Error>) {
-        guard let continuation else { return }
-        self.continuation = nil
-        let panel = self.panel
-        self.panel = nil
-        if let panel, let parent = panel.sheetParent {
-            parent.endSheet(panel, returnCode: .cancel)
+    private func observeHostWindowClosure(_ window: NSWindow) {
+        hostWindowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.settle(.success(nil))
+            }
         }
-        continuation.resume(with: result)
+    }
+
+    private func handleSheetCompletion(_ result: Result<URL?, Error>) {
+        guard phase != .finished else { return }
+        if pendingResult == nil {
+            pendingResult = result
+        }
+        sheetCompletionOutstanding = false
+        finalizeAfterDismissal()
+    }
+
+    private func settle(_ result: Result<URL?, Error>) {
+        guard phase != .finished, pendingResult == nil else { return }
+        pendingResult = result
+        phase = .dismissing
+
+        guard sheetCompletionOutstanding else {
+            finalizeAfterDismissal()
+            return
+        }
+
+        guard let panel, let hostWindow, panel.sheetParent === hostWindow else {
+            return
+        }
+
+        hostWindow.endSheet(panel, returnCode: .cancel)
+    }
+
+    private func finalizeAfterDismissal() {
+        guard phase != .finished,
+              let pendingResult,
+              let continuation else { return }
+        phase = .finished
+        if let hostWindowCloseObserver {
+            NotificationCenter.default.removeObserver(hostWindowCloseObserver)
+        }
+        self.hostWindowCloseObserver = nil
+        self.sheetCompletionOutstanding = false
+        self.pendingResult = nil
+        self.continuation = nil
+        self.panel = nil
+        self.hostWindow = nil
+        continuation.resume(with: pendingResult)
     }
 }
 
@@ -220,9 +365,6 @@ extension PlanningVaultSelectionBroker {
     public static func selectDocument(
         presenting window: NSWindow?
     ) async throws -> PlanningUserSelectedDocument? {
-        guard let window else {
-            throw PlanningFilesystemError.unavailable("pickerPresenter")
-        }
         let coordinator = PlanningNativeDocumentPanelCoordinator()
         return try await PlanningNativeDocumentPanelLifetime.shared.withCoordinator(coordinator) {
             let url = try await coordinator.select(presenting: window)

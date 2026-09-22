@@ -16,10 +16,13 @@ public struct PlanningWorkspaceView: View {
     @State private var pickerError: String?
     @State private var pickerTask: Task<Void, Never>?
     @State private var pickerGeneration = UUID()
+    @State private var activeDocumentTicket: PlanningDocumentSelectionTicket?
 #if os(iOS)
     @State private var pickerPresenter: UIViewController?
+    @State private var pickerPresenterOwnerID: UUID?
 #elseif os(macOS)
     @State private var pickerWindow: NSWindow?
+    @State private var pickerWindowOwnerID: UUID?
 #endif
 
     public init(
@@ -39,15 +42,27 @@ public struct PlanningWorkspaceView: View {
         .background(LifeOSTokens.canvas)
 #if os(iOS)
         .background {
-            PlanningWorkspacePresenterBridge { presenter in
-                pickerPresenter = presenter
+            PlanningWorkspacePresenterBridge { presenter, ownerID in
+                if let presenter {
+                    pickerPresenter = presenter
+                    pickerPresenterOwnerID = ownerID
+                } else if pickerPresenterOwnerID == ownerID {
+                    pickerPresenter = nil
+                    pickerPresenterOwnerID = nil
+                }
             }
             .frame(width: 0, height: 0)
         }
 #elseif os(macOS)
         .background {
-            PlanningWorkspaceWindowBridge { window in
-                pickerWindow = window
+            PlanningWorkspaceWindowBridge { window, ownerID in
+                if let window {
+                    pickerWindow = window
+                    pickerWindowOwnerID = ownerID
+                } else if pickerWindowOwnerID == ownerID {
+                    pickerWindow = nil
+                    pickerWindowOwnerID = nil
+                }
             }
             .frame(width: 0, height: 0)
         }
@@ -56,9 +71,7 @@ public struct PlanningWorkspaceView: View {
             coordinator.requestMount()
         }
         .onDisappear {
-            pickerGeneration = UUID()
-            pickerTask?.cancel()
-            pickerTask = nil
+            cancelPickerPresentation()
             coordinator.requestUnmount()
         }
     }
@@ -84,6 +97,7 @@ public struct PlanningWorkspaceView: View {
                     .background(LifeOSTokens.surface, in: Capsule())
             }
             Button("Done") {
+                cancelPickerPresentation()
                 coordinator.closeDocument()
                 onDone?()
             }
@@ -163,6 +177,7 @@ public struct PlanningWorkspaceView: View {
                 .frame(maxWidth: 360)
             Button(buttonTitle, action: chooseVault)
                 .buttonStyle(.borderedProminent)
+                .disabled(pickerTask != nil)
                 .accessibilityIdentifier("planning-choose-vault")
             if let pickerError = pickerError ?? coordinator.lastError {
                 Text(pickerError)
@@ -170,6 +185,7 @@ public struct PlanningWorkspaceView: View {
                     .foregroundStyle(LifeOSTokens.danger)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 360)
+                    .accessibilityIdentifier("planning-picker-error")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -209,7 +225,10 @@ public struct PlanningWorkspaceView: View {
                     Task { await coordinator.openCanvas(relativePath: coordinator.pathInput) }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(coordinator.pathInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    pickerTask != nil ||
+                    coordinator.pathInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
                 .accessibilityIdentifier("planning-open-canvas")
 
                 Button("Choose document", action: chooseDocument)
@@ -219,6 +238,7 @@ public struct PlanningWorkspaceView: View {
 
                 Button("Change vault", action: chooseVault)
                     .buttonStyle(.bordered)
+                    .disabled(pickerTask != nil)
                     .accessibilityIdentifier("planning-change-vault")
             }
 
@@ -226,8 +246,11 @@ public struct PlanningWorkspaceView: View {
                 Text(pickerError)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(LifeOSTokens.danger)
+                    .accessibilityIdentifier("planning-picker-error")
                 if coordinator.canRetryDocumentSelection {
                     Button("Retry") { Task { await coordinator.retry() } }
+                        .disabled(pickerTask != nil)
+                        .accessibilityIdentifier("planning-document-retry")
                 }
             }
             Spacer(minLength: 0)
@@ -260,15 +283,21 @@ public struct PlanningWorkspaceView: View {
                 .padding(.horizontal, LifeOSTokens.Space.md)
                 .padding(.vertical, LifeOSTokens.Space.xs)
                 if let error = pickerError ?? coordinator.lastError {
-                    Text(error).font(.caption).foregroundStyle(LifeOSTokens.danger)
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(LifeOSTokens.danger)
+                        .accessibilityIdentifier("planning-picker-error")
                     if coordinator.canRetryDocumentSelection {
                         Button("Retry") { Task { await coordinator.retry() } }
+                            .disabled(pickerTask != nil)
+                            .accessibilityIdentifier("planning-document-retry")
                     }
                 }
                 PlanningWorkspaceCanvasContent(
                     workspace: coordinator,
                     project: project
                 )
+                .accessibilityIdentifier("planning-workspace-canvas")
             }
         } else {
             progressState
@@ -287,6 +316,14 @@ public struct PlanningWorkspaceView: View {
                 .foregroundStyle(LifeOSTokens.secondaryText)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 380)
+            if let pickerError {
+                Text(pickerError)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(LifeOSTokens.danger)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 380)
+                    .accessibilityIdentifier("planning-picker-error")
+            }
             HStack(spacing: 0) {
                 Text("LifeOS/")
                     .font(.system(size: 14, weight: .medium))
@@ -310,17 +347,36 @@ public struct PlanningWorkspaceView: View {
                     Task { await coordinator.retry() }
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(pickerTask != nil)
                 Button("Choose vault", action: chooseVault)
                     .buttonStyle(.bordered)
+                    .disabled(pickerTask != nil)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(LifeOSTokens.Space.xl)
     }
 
-    private func chooseVault() {
-        pickerError = nil
+    private func cancelPickerPresentation() {
+        pickerGeneration = UUID()
         pickerTask?.cancel()
+        pickerTask = nil
+        if let activeDocumentTicket {
+            coordinator.cancelDocumentSelection(activeDocumentTicket)
+            self.activeDocumentTicket = nil
+        }
+    }
+
+    private func pickerErrorDescription(_ error: Error) -> String {
+        guard let planningError = error as? PlanningFilesystemError else {
+            return "The selected planning item could not be opened."
+        }
+        return planningError.localizedDescription
+    }
+
+    private func chooseVault() {
+        guard pickerTask == nil else { return }
+        pickerError = nil
         let generation = UUID()
         pickerGeneration = generation
 #if os(iOS)
@@ -341,7 +397,7 @@ public struct PlanningWorkspaceView: View {
                 }
             } catch {
                 guard !Task.isCancelled, pickerGeneration == generation else { return }
-                pickerError = error.localizedDescription
+                pickerError = pickerErrorDescription(error)
             }
         }
 #elseif os(macOS)
@@ -358,25 +414,27 @@ public struct PlanningWorkspaceView: View {
                 }
             } catch {
                 guard !Task.isCancelled, pickerGeneration == generation else { return }
-                pickerError = error.localizedDescription
+                pickerError = pickerErrorDescription(error)
             }
         }
 #endif
     }
 
     private func chooseDocument() {
+        guard pickerTask == nil else { return }
         pickerError = nil
-        pickerTask?.cancel()
         let generation = UUID()
         pickerGeneration = generation
         guard let ticket = coordinator.beginDocumentSelection() else {
             pickerError = "Choose a ready planning workspace before selecting a document."
             return
         }
+        activeDocumentTicket = ticket
 
 #if os(iOS)
         guard let pickerPresenter else {
             coordinator.cancelDocumentSelection(ticket)
+            activeDocumentTicket = nil
             pickerError = PlanningFilesystemError.unavailable("pickerPresenter").localizedDescription
             return
         }
@@ -384,6 +442,9 @@ public struct PlanningWorkspaceView: View {
             defer {
                 if pickerGeneration == generation {
                     pickerTask = nil
+                    if activeDocumentTicket == ticket {
+                        activeDocumentTicket = nil
+                    }
                 }
                 coordinator.cancelDocumentSelection(ticket)
             }
@@ -394,12 +455,13 @@ public struct PlanningWorkspaceView: View {
                 }
             } catch {
                 guard !Task.isCancelled, pickerGeneration == generation else { return }
-                pickerError = error.localizedDescription
+                pickerError = pickerErrorDescription(error)
             }
         }
 #elseif os(macOS)
         guard let pickerWindow else {
             coordinator.cancelDocumentSelection(ticket)
+            activeDocumentTicket = nil
             pickerError = PlanningFilesystemError.unavailable("pickerPresenter").localizedDescription
             return
         }
@@ -407,6 +469,9 @@ public struct PlanningWorkspaceView: View {
             defer {
                 if pickerGeneration == generation {
                     pickerTask = nil
+                    if activeDocumentTicket == ticket {
+                        activeDocumentTicket = nil
+                    }
                 }
                 coordinator.cancelDocumentSelection(ticket)
             }
@@ -417,7 +482,7 @@ public struct PlanningWorkspaceView: View {
                 }
             } catch {
                 guard !Task.isCancelled, pickerGeneration == generation else { return }
-                pickerError = error.localizedDescription
+                pickerError = pickerErrorDescription(error)
             }
         }
 #endif
@@ -570,6 +635,7 @@ private struct PlanningWorkspaceInspectorView: View {
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(LifeOSTokens.Space.sm)
+                        .accessibilityIdentifier("planning-note-source")
                 }
                 .background(LifeOSTokens.canvas, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay {
@@ -672,16 +738,38 @@ private final class PlanningWorkspacePresenterController: UIViewController {
         super.viewDidAppear(animated)
         onAppear?(self)
     }
+
+    func clearCallbacks() {
+        onAppear = nil
+    }
 }
 
 private struct PlanningWorkspacePresenterBridge: UIViewControllerRepresentable {
-    let onMount: (UIViewController) -> Void
+    let onMount: (UIViewController?, UUID) -> Void
 
     final class Coordinator {
-        var onMount: (UIViewController) -> Void
+        let ownerID = UUID()
+        var onMount: (UIViewController?, UUID) -> Void
+        weak var currentPresenter: UIViewController?
 
-        init(onMount: @escaping (UIViewController) -> Void) {
+        init(onMount: @escaping (UIViewController?, UUID) -> Void) {
             self.onMount = onMount
+        }
+
+        func mount(_ presenter: UIViewController) {
+            currentPresenter = presenter
+            onMount(presenter, ownerID)
+        }
+
+        func dismantle(_ presenter: UIViewController) {
+            guard currentPresenter == nil || currentPresenter === presenter else { return }
+            currentPresenter = nil
+            onMount(nil, ownerID)
+        }
+
+        func clearCallbacks() {
+            currentPresenter = nil
+            onMount = { _, _ in }
         }
     }
 
@@ -693,13 +781,22 @@ private struct PlanningWorkspacePresenterBridge: UIViewControllerRepresentable {
         let controller = PlanningWorkspacePresenterController()
         controller.view.backgroundColor = .clear
         controller.onAppear = { [weak coordinator = context.coordinator] presenter in
-            coordinator?.onMount(presenter)
+            coordinator?.mount(presenter)
         }
         return controller
     }
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
         context.coordinator.onMount = onMount
+        if let currentPresenter = context.coordinator.currentPresenter {
+            onMount(currentPresenter, context.coordinator.ownerID)
+        }
+    }
+
+    static func dismantleUIViewController(_ uiViewController: UIViewController, coordinator: Coordinator) {
+        coordinator.dismantle(uiViewController)
+        (uiViewController as? PlanningWorkspacePresenterController)?.clearCallbacks()
+        coordinator.clearCallbacks()
     }
 }
 #elseif os(macOS)
@@ -710,16 +807,41 @@ private final class PlanningWorkspaceWindowView: NSView {
         super.viewDidMoveToWindow()
         onWindowChange?(window)
     }
+
+    func clearCallbacks() {
+        onWindowChange = nil
+    }
 }
 
 private struct PlanningWorkspaceWindowBridge: NSViewRepresentable {
-    let onWindow: (NSWindow?) -> Void
+    let onWindow: (NSWindow?, UUID) -> Void
 
     final class Coordinator {
-        var onWindow: (NSWindow?) -> Void
+        let ownerID = UUID()
+        var onWindow: (NSWindow?, UUID) -> Void
+        weak var currentWindow: NSWindow?
+        weak var currentView: NSView?
 
-        init(onWindow: @escaping (NSWindow?) -> Void) {
+        init(onWindow: @escaping (NSWindow?, UUID) -> Void) {
             self.onWindow = onWindow
+        }
+
+        func mount(_ window: NSWindow?) {
+            currentWindow = window
+            onWindow(window, ownerID)
+        }
+
+        func dismantle(_ view: NSView) {
+            guard currentView == nil || currentView === view else { return }
+            currentView = nil
+            currentWindow = nil
+            onWindow(nil, ownerID)
+        }
+
+        func clearCallbacks() {
+            currentView = nil
+            currentWindow = nil
+            onWindow = { _, _ in }
         }
     }
 
@@ -729,14 +851,25 @@ private struct PlanningWorkspaceWindowBridge: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let view = PlanningWorkspaceWindowView(frame: .zero)
+        context.coordinator.currentView = view
         view.onWindowChange = { [weak coordinator = context.coordinator] window in
-            coordinator?.onWindow(window)
+            coordinator?.mount(window)
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.onWindow = onWindow
+        context.coordinator.currentView = nsView
+        if let currentWindow = context.coordinator.currentWindow {
+            onWindow(currentWindow, context.coordinator.ownerID)
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.dismantle(nsView)
+        (nsView as? PlanningWorkspaceWindowView)?.clearCallbacks()
+        coordinator.clearCallbacks()
     }
 }
 #endif
