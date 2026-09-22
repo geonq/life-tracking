@@ -2,8 +2,9 @@
 
 Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
 
-- Current source checkpoint: `4436211`; `main` and `origin/main` are synchronized.
-  `codex/p06-b` is synchronized with main.
+- Current native picker source checkpoint: `7cc189f`; main, origin/main,
+  and codex/p06-b are synchronized after the follow-up status commit. Native
+  picker runtime and vault-manifest evidence remain pending.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
 - P01: shared sync contract/codec complete at `a21ccf3` + `673dc0a`.
@@ -54,14 +55,21 @@ Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
   updates. Hosted macOS tests passed 15/15 with zero runtime warnings; fresh
   macOS and iPhone 17 arm64 build-for-testing passed. Native picker presentation
   and real-vault runtime mutation evidence remain pending.
+- P06-B native picker probes are checkpointed at `7cc189f`. Astra medium
+  returned READY TO CHECKPOINT; mirrored Swift suites parse and match, and
+  macOS 27 / iOS Simulator arm64 build-for-testing passed. Runtime remains
+  pending: XCTest canceled the earlier macOS launch before any test, and simctl
+  currently cannot connect to CoreSimulatorService.
 - Evidence: API typecheck and 160 tests pass; gateway replication is 23 passed
   with one cryptography-dependent skip; `LifeOSMacLogic` passed 405/405 tests
   on Xcode 27/macOS 26.6.2.
-- Host: Xcode 27 and macOS 27.0 arm64 are available. CoreSimulator was
-  intermittent after the final run; signing, physical iPhone, Windows, and
-  live-provider evidence remain unknown or unavailable.
+- Host: Xcode 27 and macOS 27.0 arm64 are available. CoreSimulatorService
+  is currently unreachable and no simulator runtimes are discoverable. Signing,
+  physical iPhone, Windows, and live-provider evidence remain unknown or
+  unavailable.
 
-Next: continue native graph/vault UI with actual mounted picker presentation and
-a real-vault round trip from `tasks/p06b-mounted-picker-plan.md`, then visual/
-motion, widgets, providers, Windows, physical-device, and final security
-evidence gates. Release remains NO-GO until those gates close.
+Next: add the closed SyncStoreKind registry and protocol tests, then have
+Astra seal the CP-B training adapter bridge before durable P04 adapters.
+Retry P06-B native picker runtime and isolated vault-manifest evidence when
+Apple test services recover; then continue visual/motion, widgets, providers,
+Windows, physical-device, and final security gates. Release remains NO-GO.

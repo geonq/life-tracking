@@ -4,12 +4,13 @@ Status: IN PROGRESS — P00/P01/P02/P03 calendar, P04 training payload, P05
 D1 graph/session, Xcode 27 compatibility, bounded P06-A native Canvas, and
 P06-B planning workspace transaction checkpoint complete; CP-B adapters paused;
 release NO-GO,
-updated 2026-09-22.
+updated 2026-09-23.
 
 ## Current checkpoint
 
-main and local origin/main match at Canvas evidence checkpoint c4243a3, with
-chooser source 433ea64, transaction workspace 86baaa8, and inspector 454f4d1.
+main, origin/main, and codex/p06-b are synchronized. The native picker
+implementation checkpoint is 7cc189f, following chooser 433ea64, workspace
+86baaa8, inspector 454f4d1, and lifecycle checkpoint 4436211.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
 The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
 75 missing states. It is evidence-led, not a completion percentage.
@@ -75,25 +76,35 @@ static and owner-token guarded, and picker errors are sanitized. Both Apple
 arm64 build-for-testing lanes pass. The mounted probes and real-vault
 no-mutation round trip are specified in tasks/p06b-mounted-picker-plan.md.
 
-The source evidence packet is pushed at c4243a3 after Astra medium READY. The
-DEBUG viewport probe shares the production input/Fit setter; mirrored hosted
-tests cover lifecycle cancellation/failure/reopen, ticket supersession,
-Markdown back, fixture no-mutation, and sibling/symlink rejection. Both final
-macOS and iOS arm64 build-for-testing lanes passed. This does not prove native
-picker presentation or mounted real-vault runtime behavior.
+The source evidence packet at c4243a3 adds the DEBUG viewport probe and
+mirrored hosted lifecycle/fixture tests. Follow-up 4436211 removes SwiftUI
+presenter state writes during representable reconciliation using weak
+owner-token storage. Astra medium READY; Xcode 27/macOS 27 hosted tests passed
+15/15 with zero runtime warnings; fresh macOS and iPhone 17 arm64
+build-for-testing passed. Controlled selection still does not prove native
+picker presentation or the real-vault round trip.
+
+P06-B native picker tests are added at 7cc189f: four macOS cases cover
+owner-sheet presentation, occupied-sheet rejection, host closure, and task
+cancellation/lifetime reacquisition; four iOS cases cover mounted presentation,
+occupied-presenter rejection, adaptive-dismissal callback, and task
+cancellation/lifetime reacquisition. Astra medium returned READY TO CHECKPOINT.
+Mirrored suites parse and match; serial macOS 27 and iOS Simulator arm64
+build-for-testing passed. Runtime and isolated vault-manifest evidence remain
+pending because XCTest previously canceled before starting and CoreSimulator
+is currently unavailable.
 
 ## Next execution
 
-1. P04: finance, fitness, nutrition and local-record adapters
-   with local durability before acknowledgement.
-2. P06-B: mounted native picker probes and real-vault round trip from
-   tasks/p06b-mounted-picker-plan.md; retain the CP-B adapter pause
-   until shared persistence identities and tombstones are sealed.
-3. P07-P16: visual/motion system, screen migration, widgets, providers,
-   security cleanup, and target composition.
-4. P17/P18: Windows/live-provider, physical-device, and final evidence only
-   when the environments are available.
-
-Every tranche must state base SHA, exclusive files, named symbols, invariants,
-tests, evidence, complexity, stop conditions, review result, commit/push and
-remote parity. No source/build changes were made by P00.
+1. P04 prerequisite: add the closed SyncStoreKind enum, exhaustive domain
+   mapping, and serialization/rejection tests in SyncContract.swift and
+   SyncProtocolTests.swift. Do not alter storeID, signed bytes, adapters,
+   sequence allocation, or migrations in this packet.
+2. Keep durable P04 adapters paused until Astra seals the CP-B training bridge
+   contract, especially migration/bootstrap keys, command identity, signing/
+   sequence ownership, and tombstone retention.
+3. Retry P06-B native picker tests and the isolated fixture-vault manifest
+   round trip when LaunchServices and CoreSimulator are available.
+4. Continue P07-P16 visual/motion, screen migration, widgets, providers,
+   security cleanup, and target composition; then P17/P18 Windows/live-provider,
+   physical-device, and final evidence gates.

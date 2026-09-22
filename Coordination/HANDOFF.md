@@ -4,14 +4,14 @@ Updated 2026-09-23 Europe/Berlin.
 
 ## Active task
 
-P06-B native mounted picker presentation and real-vault round-trip evidence,
-per tasks/p06b-mounted-picker-plan.md. Release remains NO-GO.
+P06-B native picker implementation is checkpointed; runtime presentation
+and isolated vault round-trip evidence remain open. Release remains NO-GO.
 
 ## Current source state
 
-- main and origin/main are synchronized at 4436211. This checkpoint fixes
-  SwiftUI presenter ownership during representable updates and adds hosted
-  lifecycle regressions. codex/p06-b is synchronized with main.
+- main, origin/main, and codex/p06-b are synchronized. Native picker source
+  and mirrored tests are checkpointed at 7cc189f. Runtime evidence remains
+  open as described below.
 - P01–P05 foundations are in main: authenticated sync, durable calendar,
   fitness payload boundary, graph/session, and native Canvas viewport.
 - P06-B prior checkpoints: workspace transaction 86baaa8, inspector
@@ -29,8 +29,15 @@ per tasks/p06b-mounted-picker-plan.md. Release remains NO-GO.
 - Xcode 27 / macOS 27.0 focused hosted suite: 15 passed, 0 failed,
   0 runtime warnings. This includes the idle-hosted restore regression and
   ten mounted chooser/workspace cases.
-- Fresh macOS and iPhone 17 arm64 build-for-testing passed. No iOS runtime
-  picker evidence is claimed.
+- Astra medium returned READY TO CHECKPOINT with no actionable findings.
+  Swift parse, diff-check, and mirrored-suite parity pass. Serial arm64
+  build-for-testing passes for LifeOSMacLogic on macOS 27 and LifeOSLogic for
+  iOS Simulator.
+- Runtime remains unverified. The prior macOS picker run was canceled during
+  XCTest LaunchServices worker startup with zero tests executed. Current
+  simctl cannot connect to CoreSimulatorService or discover runtimes. No
+  native picker runtime result or real-vault round trip is claimed.
+- Both serial build sessions exited; 24 GiB remained available on the volume.
 - Earlier mainline evidence remains: LifeOSMacLogic 405/405; focused iPhone 17
   P06-B suite 62/62. API tests 160/160; gateway replication 23 passed with
   one crypto-dependent skip.
@@ -47,8 +54,9 @@ registry evidence remain open. The hosted chooser tests use controlled
 selection closures and fixture vaults; they do not prove native picker
 presentation or access to the user's real vault.
 
-Implement the six platform presentation tests in the active plan, then run the
-bounded hosted macOS/iOS lanes and compare a unique fixture vault manifest
-before/after. Keep one Luna xhigh implementation worker and one Apple test
-lane active at a time; have Astra medium review before checkpoint. Do not call
-build evidence runtime acceptance.
+Next implement the closed SyncStoreKind registry and exhaustive domain/
+wire tests in SyncContract.swift and SyncProtocolTests.swift. Keep durable P04
+adapters paused until Astra seals the CP-B training bridge contract. Retry
+native picker runtime and isolated vault-manifest evidence when LaunchServices
+and CoreSimulator are available. Keep Apple lanes serial; builds are not runtime
+acceptance.
