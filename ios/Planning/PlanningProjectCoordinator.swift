@@ -143,13 +143,14 @@ public enum PlanningCanvasRetryMode: String, Equatable, Sendable {
     case pendingMutation
 }
 
-/// Main-actor presentation boundary for the native Canvas interaction tranche.
+/// Main-actor presentation boundary for the native Canvas interaction.
 /// The injected session remains the only persistence owner. This object caches
 /// projection data and keeps drag preview state out of the session until the
 /// pointer is released.
 @MainActor
 public final class PlanningProjectCoordinator: ObservableObject {
     public let session: PlanningCanvasSession
+    public let allowsEditing: Bool
 
     @Published public private(set) var document: PlanningCanvasDocument?
     @Published public private(set) var status: PlanningCanvasPresentationStatus = .idle
@@ -203,14 +204,16 @@ public final class PlanningProjectCoordinator: ObservableObject {
 
     public init(
         session: PlanningCanvasSession,
-        accessContext: PlanningCanvasAccessContext? = nil
+        accessContext: PlanningCanvasAccessContext? = nil,
+        allowsEditing: Bool = true
     ) {
         self.session = session
         self.expectedAccessContext = accessContext
+        self.allowsEditing = allowsEditing
     }
 
     public var canEdit: Bool {
-        guard session.currentState != nil else { return false }
+        guard allowsEditing, session.currentState != nil else { return false }
         switch session.state {
         case .ready, .published, .savedOnDevice:
             return true
@@ -420,7 +423,7 @@ public final class PlanningProjectCoordinator: ObservableObject {
 
     @discardableResult
     public func retryPending() async throws -> PlanningCanvasCommitOutcome? {
-        guard transientDrag == nil else { return nil }
+        guard allowsEditing, transientDrag == nil else { return nil }
         retryMode = .pendingMutation
         status = .saving
         do {

@@ -237,6 +237,13 @@ public final class PlanningMutationJournal: @unchecked Sendable {
         closeLocked()
     }
 
+    /// Returns true only while the journal owns a live database handle.
+    public var isReady: Bool {
+        operationLock.lock()
+        defer { operationLock.unlock() }
+        return isOpen && !isClosed && database != nil
+    }
+
     private func closeLocked() {
         guard !isClosed else { return }
         isClosed = true

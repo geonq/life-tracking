@@ -921,15 +921,18 @@ public enum PlanningSafeFileIO {
 
     internal static func removePrivateFile(
         in directory: PlanningPrivateDirectoryLease,
-        name: String
+        name: String,
+        beforeDirectoryFlush: (() throws -> Void)? = nil
     ) throws {
 #if canImport(Darwin)
         guard !directory.closed else { throw PlanningFilesystemError.unavailable("privateDirectoryClosed") }
         try validatePrivateComponent(name)
-        guard unlinkat(directory.fileDescriptor, name, 0) == 0 else {
+        if unlinkat(directory.fileDescriptor, name, 0) != 0 {
             guard errno == ENOENT else { throw mapErrno(errno) }
-            return
         }
+        // Also barrier an absent entry: a prior unlink may have failed to flush.
+        // Instance-scoped injection exercises the actual unlink-to-flush boundary.
+        try beforeDirectoryFlush?()
         try flush(directory.fileDescriptor, directory: true)
 #else
         throw PlanningFilesystemError.unsupportedFilesystem

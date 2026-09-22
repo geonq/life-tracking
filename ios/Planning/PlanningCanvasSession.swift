@@ -132,6 +132,19 @@ public enum PlanningCanvasSessionError: Error, Equatable, LocalizedError, Sendab
     case persistence(String)
     case noOp
 
+    public var stableCode: String {
+        switch self {
+        case .notLoaded: return "notLoaded"
+        case .staleGeneration: return "staleGeneration"
+        case .pendingCommit: return "pendingCommit"
+        case .interactionNotFound: return "interactionNotFound"
+        case .conflictingEdit: return "conflictingEdit"
+        case .persistence(let reason):
+            return "persistence." + planningStableDiagnosticReason(reason, fallback: "operation")
+        case .noOp: return "noOp"
+        }
+    }
+
     public var errorDescription: String? {
         switch self {
         case .notLoaded: return "The planning document is not loaded."
@@ -274,6 +287,7 @@ public final class PlanningCanvasSession {
     public private(set) var state: PlanningCanvasSessionState = .idle
     public private(set) var lastPublication: PlanningFilesystemPublishResult?
     public private(set) var lastErrorCode: String?
+    public private(set) var lastDiagnostic: PlanningDiagnostic?
 
     public init(
         path: PlanningStoredPath,
@@ -316,21 +330,61 @@ public final class PlanningCanvasSession {
         loadInFlight = true
         defer { loadInFlight = false }
         state = .loading
+        lastDiagnostic = nil
         do {
-            let read = try await persistence.read(path)
+            let read: PlanningCanvasPersistenceRead
+            do {
+                read = try await persistence.read(path)
+            } catch {
+                let diagnostic = PlanningDiagnostic(
+                    stage: .sessionRead,
+                    code: PlanningDiagnostics.code(for: error)
+                )
+                lastDiagnostic = diagnostic
+                PlanningDiagnostics.emit(diagnostic)
+                throw error
+            }
             guard requestedLoad == loadGeneration,
                   requestedContext == accessContext,
                   read.path == path,
                   read.context == requestedContext else {
+                let diagnostic = PlanningDiagnostic(stage: .sessionContext, code: "contextMismatch")
+                lastDiagnostic = diagnostic
+                PlanningDiagnostics.emit(diagnostic)
                 throw PlanningCanvasSessionError.staleGeneration
             }
-            let decoded = try await Task.detached(priority: .userInitiated) {
-                try PlanningCanvasSessionDecoder.decode(read)
-            }.value
-            let currentContext = try await persistence.context()
+            let decoded: PlanningCanvasDecodedPayload
+            do {
+                decoded = try await Task.detached(priority: .userInitiated) {
+                    try PlanningCanvasSessionDecoder.decode(read)
+                }.value
+            } catch {
+                let diagnostic = PlanningDiagnostic(
+                    stage: .sessionDecode,
+                    code: PlanningDiagnostics.code(for: error)
+                )
+                lastDiagnostic = diagnostic
+                PlanningDiagnostics.emit(diagnostic)
+                throw error
+            }
+            let currentContext: PlanningCanvasAccessContext
+            do {
+                currentContext = try await persistence.context()
+            } catch {
+                let diagnostic = PlanningDiagnostic(
+                    stage: .sessionContext,
+                    code: PlanningDiagnostics.code(for: error)
+                )
+                lastDiagnostic = diagnostic
+                PlanningDiagnostics.emit(diagnostic)
+                throw error
+            }
             guard requestedLoad == loadGeneration,
                   requestedContext == accessContext,
                   currentContext == requestedContext else {
+                let diagnostic = PlanningDiagnostic(stage: .sessionContext, code: "contextMismatch")
+                lastDiagnostic = diagnostic
+                PlanningDiagnostics.emit(diagnostic)
                 throw PlanningCanvasSessionError.staleGeneration
             }
             acceptedState = decoded.state

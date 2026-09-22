@@ -1,4 +1,70 @@
 import Foundation
+import os
+
+private let planningDiagnosticReasonAllowlist: Set<String> = [
+    "authority.directory", "authority.identity", "authority.url",
+    "backpressure", "cache", "cache.absent", "cache.blob", "cache.observation",
+    "cacheBytes", "cacheIndex", "cacheRecords", "cacheVisited", "canvasPath",
+    "coordination", "coordination.target", "coordination.url", "coordinationTimeout",
+    "directory", "directoryName", "directoryPath", "document", "grant", "grantBookmark",
+    "initializationIntent.temporaryName", "invalid", "lifeOS.nonEmpty", "manifest",
+    "manifest.backupDigest", "manifestCount", "manifest.identity", "manifest.identityType",
+    "marker", "path", "pathComponent", "pickerAdapterUnavailable", "pickerBusy",
+    "pickerPresenter", "pickerPresenterBusy", "preservation", "preservationArtifacts",
+    "preservationBytes", "preservationDepth", "preservationEntries", "preservationFile",
+    "preservationReservation", "privateAlias", "privateComponent", "privateDirectory",
+    "privateEntries", "privateFile", "privateName", "privateShortWrite", "read",
+    "request.proposedBytes", "request.vault", "recovery.vault", "root.directory", "root.url",
+    "selection.directory", "selection.nestedLifeOS", "selection.root", "selection.symlink",
+    "selection.uni", "selection.url", "shortWrite", "test.cleanupAfterWitness", "test.delete",
+    "test.directReplay", "test.recoveryPreservation", "test.replace", "test.sameInode",
+    "test.verifiedRecovery", "unsupported", "userSelectedReadWriteUnavailable"
+]
+
+internal func planningStableDiagnosticReason(_ reason: String, fallback: String) -> String {
+    planningDiagnosticReasonAllowlist.contains(reason) ? reason : fallback
+}
+
+public enum PlanningDiagnosticStage: String, Equatable, Sendable {
+    case storeRead
+    case storeContext
+    case sessionRead
+    case sessionDecode
+    case sessionContext
+}
+
+public struct PlanningDiagnostic: Equatable, Sendable {
+    public let stage: PlanningDiagnosticStage
+    public let code: String
+
+    public init(stage: PlanningDiagnosticStage, code: String) {
+        self.stage = stage
+        self.code = code
+    }
+}
+
+internal enum PlanningDiagnostics {
+    private static let logger = Logger(subsystem: "LifeOS", category: "Planning")
+
+    static func code(for error: Error) -> String {
+        if let error = error as? PlanningFilesystemError {
+            return error.stableCode
+        }
+        if let error = error as? PlanningStorageError {
+            return planningFilesystemSafeErrorCode(error)
+        }
+        if let error = error as? PlanningCanvasSessionError {
+            return error.stableCode
+        }
+        return "unavailable.operation"
+    }
+
+    static func emit(_ diagnostic: PlanningDiagnostic) {
+        logger.error(
+            "planning stage=\(diagnostic.stage.rawValue, privacy: .public) code=\(diagnostic.code, privacy: .public)"
+        )
+    }
+}
 
 /// Errors from the filesystem adapter are deliberately content-free.  Paths,
 /// note text, bookmark bytes and provider metadata never appear in their
@@ -46,9 +112,12 @@ public enum PlanningFilesystemError: Error, Equatable, LocalizedError, Sendable 
         case .cancelled: return "cancelled"
         case .notFound: return "notFound"
         case .alreadyExists: return "alreadyExists"
-        case .backpressure(let reason): return "backpressure." + reason
-        case .invalid(let reason): return "invalid." + reason
-        case .unavailable(let reason): return "unavailable." + reason
+        case .backpressure(let reason):
+            return "backpressure." + planningStableDiagnosticReason(reason, fallback: "operation")
+        case .invalid(let reason):
+            return "invalid." + planningStableDiagnosticReason(reason, fallback: "request")
+        case .unavailable(let reason):
+            return "unavailable." + planningStableDiagnosticReason(reason, fallback: "operation")
         }
     }
 
@@ -471,10 +540,20 @@ internal func planningFilesystemSafeErrorCode(_ error: Error) -> String {
         switch error {
         case .databaseFull: return PlanningFilesystemError.diskFull.stableCode
         case .staleAccess: return PlanningFilesystemError.needsReselection.stableCode
-        case .backpressure(let reason): return "backpressure." + reason
-        default:
-            let name = String(describing: error).split(separator: "(").first ?? "error"
-            return "storage." + name
+        case .backpressure(let reason):
+            return "backpressure." + planningStableDiagnosticReason(reason, fallback: "operation")
+        case .invalid: return "storage.invalid"
+        case .corruptDatabase: return "storage.corruptDatabase"
+        case .unsupportedSchema: return "storage.unsupportedSchema"
+        case .database: return "storage.database"
+        case .writerBusy: return "storage.writerBusy"
+        case .mutationIDReused: return "storage.mutationIDReused"
+        case .duplicateRequest: return "storage.duplicateRequest"
+        case .notFound: return PlanningFilesystemError.notFound.stableCode
+        case .invalidState: return "storage.invalidState"
+        case .conflict: return PlanningFilesystemError.conflict.stableCode
+        case .closed: return "storage.closed"
+        case .unavailable: return "storage.unavailable"
         }
     }
     return "unavailable.operation"

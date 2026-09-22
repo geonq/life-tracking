@@ -327,6 +327,7 @@ public struct CalendarView: View {
     @Binding private var requestNewEvent: Bool
     private let requestNewEventID: UUID?
     private let consumeNewEventRequest: ((UUID) -> Bool)?
+    private let onOpenPlanning: (() -> Void)?
     /// The macOS shell supplies a mount identity guard for one-shot editor
     /// presentation. Deferred AppKit work must not outlive the Calendar route
     /// that scheduled it.
@@ -370,7 +371,8 @@ public struct CalendarView: View {
         requestNewEventID: UUID? = nil,
         consumeNewEventRequest: ((UUID) -> Bool)? = nil,
         isRouteActive: (() -> Bool)? = nil,
-        presentationState: CalendarPresentationState? = nil
+        presentationState: CalendarPresentationState? = nil,
+        onOpenPlanning: (() -> Void)? = nil
     ) {
         let initialDate = selectedDate ?? .now
         let initialItems = coordinator.snapshot.items.filter { !$0.isDeleted }
@@ -388,6 +390,7 @@ public struct CalendarView: View {
         self.requestNewEventID = requestNewEventID
         self.consumeNewEventRequest = consumeNewEventRequest
         self.isRouteActive = isRouteActive
+        self.onOpenPlanning = onOpenPlanning
         self.externalSelectedDate = selectedDate
         self.calendar = calendar
         self.coordinator = coordinator
@@ -1076,6 +1079,15 @@ public struct CalendarView: View {
 
             Divider()
 
+            if let onOpenPlanning {
+                Button {
+                    onOpenPlanning()
+                } label: {
+                    Label("Planning", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+                .accessibilityIdentifier("calendar-open-planning")
+            }
+
             Button("Pair nearby device…") { isPairingPresented = true }
                 .accessibilityIdentifier("calendar-pair-device")
         } label: {
@@ -1465,6 +1477,14 @@ public struct CalendarView: View {
                 Button("Month view") { setDisplayMode(.month) }
             }
             Divider()
+            if let onOpenPlanning {
+                Button {
+                    onOpenPlanning()
+                } label: {
+                    Label("Planning", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+                .accessibilityIdentifier("calendar-open-planning")
+            }
             Button("Pair nearby device…") { isPairingPresented = true }
                 .accessibilityIdentifier("calendar-pair-device")
         } label: {

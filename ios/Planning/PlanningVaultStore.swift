@@ -72,19 +72,105 @@ public actor PlanningVaultStore {
         selection: PlanningUserSelectedDirectory,
         intent: PlanningVaultSelectionIntent
     ) throws -> PlanningVaultAccessSnapshot {
-        let snapshot = try access.select(selection: selection, intent: intent)
-        try configureJournal(for: snapshot)
-        return snapshot
+        if case let .attach(expectedVaultID) = intent {
+            let identity = try access.inspectExistingSelection(selection)
+            guard identity.vaultID == expectedVaultID else {
+                throw PlanningFilesystemError.identityChanged
+            }
+            let prepared = try prepareResources(for: expectedVaultID)
+            do {
+                let snapshot = try access.select(selection: selection, intent: intent)
+                install(prepared)
+                return snapshot
+            } catch {
+                prepared.closeIfOwned()
+                if access.snapshot.state != .ready {
+                    discardResources()
+                }
+                throw error
+            }
+        }
+        var prepared: PreparedResources?
+        do {
+            let snapshot = try access.select(selection: selection, intent: intent) { vaultID in
+                prepared = try prepareResources(for: vaultID)
+            }
+            // Access has committed; installation cannot throw or suspend.
+            if let prepared {
+                install(prepared)
+            }
+            return snapshot
+        } catch {
+            prepared?.closeIfOwned()
+            if access.snapshot.state != .ready {
+                discardResources()
+            }
+            throw error
+        }
+    }
+
+    /// Attaches an existing, explicitly selected vault. Inspection is kept
+    /// separate from selection so the marker identity is checked before the
+    /// store changes its active generation; `select` then validates it again
+    /// immediately before taking authority.
+    @discardableResult
+    public func attachExisting(
+        selection: PlanningUserSelectedDirectory
+    ) throws -> PlanningVaultAccessSnapshot {
+        let identity = try access.inspectExistingSelection(selection)
+        return try select(
+            selection: selection,
+            intent: .attach(expectedVaultID: identity.vaultID)
+        )
     }
 
     @discardableResult
     public func restore() throws -> PlanningVaultAccessSnapshot {
-        let snapshot = try access.restore()
-        try configureJournal(for: snapshot)
-        return snapshot
+        var prepared: PreparedResources?
+        do {
+            let snapshot = try access.restore { vaultID in
+                prepared = try prepareResources(for: vaultID)
+            }
+            // No suspension or throwing operation between restored access and
+            // installation. Existing resources remain intact until this point.
+            if let prepared {
+                install(prepared)
+            } else {
+                discardResources()
+            }
+            return snapshot
+        } catch {
+            // Reused resources are closed by discard; newly owned candidates
+            // are distinct from the installed journal and are closed here.
+            prepared?.closeIfOwned()
+            discardResources()
+            throw error
+        }
+    }
+
+    private func discardResources() {
+        journal?.close()
+        journal = nil
+        publication = nil
+        cache = nil
+        recoveryCursor = nil
     }
 
     public func read(_ path: PlanningStoredPath) throws -> PlanningVaultReadResult {
+        do {
+            return try readImplementation(path)
+        } catch {
+            PlanningDiagnostics.emit(
+                PlanningDiagnostic(
+                    stage: .storeRead,
+                    code: PlanningDiagnostics.code(for: error)
+                )
+            )
+            throw error
+        }
+    }
+
+    private func readImplementation(_ path: PlanningStoredPath) throws -> PlanningVaultReadResult {
         guard let vaultID = access.snapshot.vaultID,
               let generation = access.snapshot.selectionGeneration else {
             throw PlanningFilesystemError.unselected
@@ -352,14 +438,25 @@ public actor PlanningVaultStore {
 
     public func currentCanvasAccessContext() throws -> PlanningCanvasAccessContext {
         let snapshot = access.snapshot
-        guard let vaultID = snapshot.vaultID,
+        guard snapshot.state == .ready,
+              let vaultID = snapshot.vaultID,
               let selectionGeneration = snapshot.selectionGeneration else {
-            throw PlanningFilesystemError.unselected
+            let error: PlanningFilesystemError = snapshot.state == .needsReselection
+                ? .needsReselection
+                : .unselected
+            PlanningDiagnostics.emit(
+                PlanningDiagnostic(stage: .storeContext, code: error.stableCode)
+            )
+            throw error
         }
         return PlanningCanvasAccessContext(
             vaultID: vaultID,
             selectionGeneration: selectionGeneration
         )
+    }
+
+    public func accessSnapshot() -> PlanningVaultAccessSnapshot {
+        access.snapshot
     }
 
     public func resolveCanvasReference(_ reference: String) throws -> PlanningVaultReadResult? {
@@ -379,40 +476,96 @@ public actor PlanningVaultStore {
         access.close()
     }
 
-    private func configureJournal(for snapshot: PlanningVaultAccessSnapshot) throws {
-        guard snapshot.state == .ready, let vaultID = snapshot.vaultID else {
-            journal?.close()
-            journal = nil
-            publication = nil
-            cache = nil
-            return
-        }
-        if journal?.vault.vaultID == vaultID { return }
+    internal func closeInstalledJournalForTesting() {
         journal?.close()
+    }
+
+    private final class PreparedResources {
+        let journal: PlanningMutationJournal
+        let publication: PlanningFilesystemPublication
+        let cache: PlanningVaultCache
+        private let ownsJournal: Bool
+
+        init(
+            journal: PlanningMutationJournal,
+            publication: PlanningFilesystemPublication,
+            cache: PlanningVaultCache,
+            ownsJournal: Bool
+        ) {
+            self.journal = journal
+            self.publication = publication
+            self.cache = cache
+            self.ownsJournal = ownsJournal
+        }
+
+        func closeIfOwned() {
+            if ownsJournal {
+                journal.close()
+            }
+        }
+    }
+
+    private func prepareResources(for vaultID: UUID) throws -> PreparedResources {
+        if let currentJournal = journal,
+           currentJournal.vault.vaultID == vaultID,
+           currentJournal.isReady,
+           let currentPublication = publication,
+           let currentCache = cache {
+            // Reattaching the already active vault can reuse the resources
+            // that are already prepared without opening the same writer lock.
+            return PreparedResources(
+                journal: currentJournal,
+                publication: currentPublication,
+                cache: currentCache,
+                ownsJournal: false
+            )
+        }
+
         let identity = try PlanningVaultIdentity(vaultID: vaultID)
-        let journal = PlanningMutationJournal(
+        let candidateJournal = PlanningMutationJournal(
             applicationSupportDirectory: applicationSupportDirectory,
             vault: identity,
             deviceID: deviceID,
             clock: clock
         )
-        try journal.openValidated()
-        self.journal = journal
-        self.publication = PlanningFilesystemPublication(
-            journal: journal,
+        do {
+            try candidateJournal.openValidated()
+        } catch {
+            candidateJournal.close()
+            throw error
+        }
+        let candidatePublication = PlanningFilesystemPublication(
+            journal: candidateJournal,
             access: access,
             applicationSupportDirectory: applicationSupportDirectory,
             coordination: coordination,
             testBarrier: testBarrier,
             clock: clock
         )
-        self.cache = PlanningVaultCache(
+        let candidateCache = PlanningVaultCache(
             directory: applicationSupportDirectory
                 .appendingPathComponent("LifeOS", isDirectory: true)
                 .appendingPathComponent("Planning", isDirectory: true)
                 .appendingPathComponent(vaultID.uuidString.lowercased(), isDirectory: true)
                 .appendingPathComponent("cache", isDirectory: true)
         )
+        return PreparedResources(
+            journal: candidateJournal,
+            publication: candidatePublication,
+            cache: candidateCache,
+            ownsJournal: true
+        )
+    }
+
+    private func install(_ prepared: PreparedResources) {
+        if let currentJournal = journal, currentJournal === prepared.journal {
+            return
+        }
+        let oldJournal = journal
+        journal = prepared.journal
+        publication = prepared.publication
+        cache = prepared.cache
         recoveryCursor = nil
+        oldJournal?.close()
     }
 }

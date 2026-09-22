@@ -95,7 +95,7 @@ public struct PlanningCanvasInputLifecycle: Equatable {
     }
 }
 
-/// Native SwiftUI Canvas surface for the bounded P06-A interaction tranche.
+/// Native SwiftUI Canvas surface for planning interactions.
 /// Calendar/vault routing and node creation remain outside this component.
 public struct PlanningCanvasView: View {
     @ObservedObject private var coordinator: PlanningProjectCoordinator

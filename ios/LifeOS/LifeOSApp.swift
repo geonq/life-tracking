@@ -594,6 +594,8 @@ private struct LifeOSIOSSceneRoot: View {
     @StateObject private var calendarPresentationState: CalendarPresentationState
     @StateObject private var financePresentationState: FinancePresentationState
     @StateObject private var fitnessPresentationState: FitnessPresentationState
+    @StateObject private var planningWorkspaceCoordinator: PlanningWorkspaceCoordinator
+    @State private var showingPlanningWorkspace = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var routeTransition: AnyTransition {
@@ -634,6 +636,7 @@ private struct LifeOSIOSSceneRoot: View {
         _calendarPresentationState = StateObject(wrappedValue: CalendarPresentationState())
         _financePresentationState = StateObject(wrappedValue: FinancePresentationState())
         _fitnessPresentationState = StateObject(wrappedValue: FitnessPresentationState())
+        _planningWorkspaceCoordinator = StateObject(wrappedValue: PlanningWorkspaceCoordinator())
     }
 
     var body: some View {
@@ -718,6 +721,12 @@ private struct LifeOSIOSSceneRoot: View {
             )
             .presentationDetents([.medium, .large])
         }
+        .fullScreenCover(isPresented: $showingPlanningWorkspace) {
+            PlanningWorkspaceView(
+                coordinator: planningWorkspaceCoordinator,
+                onDone: { showingPlanningWorkspace = false }
+            )
+        }
         .onChange(of: requestingNewCalendarEvent) { _, requested in
             guard !requested, selectedModuleRoute == .newCalendarEvent else { return }
             // The calendar consumes this binding immediately. Replace the
@@ -781,7 +790,10 @@ private struct LifeOSIOSSceneRoot: View {
             CalendarView(
                 coordinator: calendarCoordinator,
                 requestNewEvent: $requestingNewCalendarEvent,
-                presentationState: calendarPresentationState
+                presentationState: calendarPresentationState,
+                onOpenPlanning: {
+                    showingPlanningWorkspace = true
+                }
             )
             .transition(routeTransition)
         case .finance:

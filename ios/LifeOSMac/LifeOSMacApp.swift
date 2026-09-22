@@ -308,6 +308,8 @@ struct LifeOSMacRootView: View {
     @StateObject private var calendarPresentationState: CalendarPresentationState
     @StateObject private var financePresentationState: FinancePresentationState
     @StateObject private var fitnessPresentationState: FitnessPresentationState
+    @StateObject private var planningWorkspaceCoordinator: PlanningWorkspaceCoordinator
+    @State private var showingPlanningWorkspace = false
     private let onSceneStateChange: ((LifeOSMacSceneState) -> Void)?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -353,6 +355,7 @@ struct LifeOSMacRootView: View {
         }
         _financePresentationState = StateObject(wrappedValue: financePresentationState)
         _fitnessPresentationState = StateObject(wrappedValue: fitnessPresentationState)
+        _planningWorkspaceCoordinator = StateObject(wrappedValue: PlanningWorkspaceCoordinator())
         self.onSceneStateChange = onSceneStateChange
     }
 
@@ -411,6 +414,13 @@ struct LifeOSMacRootView: View {
         .sheet(isPresented: $showingCommandPalette) {
             LifeOSMacCommandPalette(onSelect: { module in select(module) })
                 .frame(width: 560, height: 420)
+        }
+        .sheet(isPresented: $showingPlanningWorkspace) {
+            PlanningWorkspaceView(
+                coordinator: planningWorkspaceCoordinator,
+                onDone: { showingPlanningWorkspace = false }
+            )
+            .frame(minWidth: 760, minHeight: 560)
         }
         .sheet(isPresented: $showingUsageConnections) {
             UsageConnectionsView(
@@ -657,7 +667,14 @@ struct LifeOSMacRootView: View {
                         expectedMountedIdentity: expectedMountedIdentity
                     )
                 } : nil,
-                presentationState: calendarPresentationState
+                presentationState: calendarPresentationState,
+                onOpenPlanning: interactive ? {
+                    guard isCalendarMountActive(
+                        expectedMountGeneration: expectedMountGeneration,
+                        expectedMountedIdentity: expectedMountedIdentity
+                    ) else { return }
+                    showingPlanningWorkspace = true
+                } : nil
             )
         case .finance:
             financeDetail(for: route, interactive: interactive)
