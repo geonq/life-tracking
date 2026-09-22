@@ -88,6 +88,43 @@ public enum SyncDomain: String, Codable, Sendable {
     case tax
 }
 
+public enum SyncStoreKind: String, Codable, CaseIterable, Sendable {
+    case calendar
+    case financeImports
+    case financeRecurring
+    case financeInvestments
+    case financeBudgets
+    case financeAllocations
+    case financePreferences
+    case training
+    case trainingTemplates
+    case meals
+    case nutritionGoals
+    case supplements
+    case journal
+    case lifestyle
+    case barcodeRecords
+    case vault
+    case tax
+
+    public var domain: SyncDomain {
+        switch self {
+        case .calendar:
+            .calendar
+        case .financeImports, .financeRecurring, .financeInvestments,
+             .financeBudgets, .financeAllocations, .financePreferences:
+            .finance
+        case .training, .trainingTemplates, .meals, .nutritionGoals,
+             .supplements, .journal, .lifestyle, .barcodeRecords:
+            .fitness
+        case .vault:
+            .planning
+        case .tax:
+            .tax
+        }
+    }
+}
+
 public enum SyncOperationKind: String, Codable, Sendable {
     case put
     case delete
