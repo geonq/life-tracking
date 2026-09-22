@@ -2,7 +2,7 @@
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
 
-- Current source checkpoint: `454f4d1`; `main`, `origin/main`, and
+- Current source checkpoint: `433ea64`; `main`, `origin/main`, and
   `codex/p06-b` are synchronized with the validated P06-B documentation.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
@@ -38,6 +38,12 @@ Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
 - P06-B evidence: Xcode 27 macOS focused suites passed 107/107; fresh iOS
   27 build-for-testing succeeded and the serial simulator rerun passed 62/62
   focused tests. The simulator was shut down afterward.
+- P06-B existing-document chooser is pushed at `433ea64` after Astra medium
+  READY TO CHECKPOINT. It validates one existing `.canvas` or `.md` in the
+  attached vault's `LifeOS/` root, keeps the old Canvas on failure, and gives
+  Markdown a read-only preview. Swift parsing and macOS/iPhone 17 arm64
+  build-for-testing passed; runtime picker/viewport evidence remains open
+  because testmanagerd/CoreSimulator refused execution.
 - Evidence: API typecheck and 160 tests pass; gateway replication is 23 passed
   with one cryptography-dependent skip; `LifeOSMacLogic` passed 405/405 tests
   on Xcode 27/macOS 26.6.2.
@@ -45,7 +51,7 @@ Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
   intermittent after the final run; signing, physical iPhone, Windows, and
   live-provider evidence remain unknown or unavailable.
 
-Next: continue native graph/vault UI with the existing-document chooser plan,
-visual/motion, widgets, providers,
+Next: continue native graph/vault UI with mounted picker presentation and a
+real-vault round trip, visual/motion, widgets, providers,
 Windows, physical-device, and final security evidence gates. Release remains
 NO-GO until those gates close.

@@ -8,8 +8,8 @@ updated 2026-09-22.
 
 ## Current checkpoint
 
-main and local origin/main match and include P06-B inspector source checkpoint
-454f4d1, with the transaction workspace at 86baaa8.
+main and local origin/main match and include P06-B chooser source checkpoint
+433ea64, with the transaction workspace at 86baaa8 and inspector at 454f4d1.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
 The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
 75 missing states. It is evidence-led, not a completion percentage.
@@ -61,12 +61,19 @@ tests but four older workspace tests failed after offline-host network timeouts.
 Treat that iOS run as qualified, not green; mounted UI and test-host isolation
 remain open.
 
+The existing-document chooser is pushed at 433ea64 after Astra medium review.
+It validates one existing Canvas or Markdown file inside the attached vault's
+LifeOS directory, preserves the current Canvas on failure/cancellation, and
+keeps Markdown read-only. Swift parsing plus macOS and iPhone 17 arm64
+build-for-testing passed. Mac testmanagerd and iOS CoreSimulator blocked
+runtime execution, so mounted picker/viewport evidence remains pending.
+
 ## Next execution
 
 1. P04: finance, fitness, nutrition and local-record adapters
    with local durability before acknowledgement.
-2. P06-B: native graph/vault routing, existing-document chooser, and real-vault round trip
-   after the transaction workspace checkpoint; retain the CP-B adapter pause
+2. P06-B: mounted native picker presentation and real-vault round trip after
+   the chooser checkpoint; retain the CP-B adapter pause
    until shared persistence identities and tombstones are sealed.
 3. P07-P16: visual/motion system, screen migration, widgets, providers,
    security cleanup, and target composition.

@@ -6,18 +6,18 @@ Updated 2026-09-22 Europe/Berlin.
 
 P00/P01/P02/P03, P04 training serialization, P05 D1 graph/session, the Xcode
 27 native compatibility checkpoint, the bounded P06-A native Canvas
-viewport/input checkpoint, the P06-B planning workspace transaction
-checkpoint, and the read-only P06-B node inspector are pushed. Release remains
-NO-GO:
+viewport/input checkpoint, the P06-B planning workspace transaction,
+read-only node inspector, and existing-document chooser are pushed. Release
+remains NO-GO:
 CP-B adapters, signed UI/device evidence, Windows/live providers,
 physical-device comparison, remaining UI/motion work, and final security
 evidence are still open.
 
 ## Current truth
 
-- `main` and `origin/main` are synchronized through the source and documentation
-  checkpoint; the transaction workspace is `86baaa8` and the inspector is
-  `454f4d1` in that history.
+- `main` and `origin/main` are synchronized at source checkpoint `433ea64`;
+  the transaction workspace is `86baaa8`, the inspector is `454f4d1`, and the
+  chooser is `433ea64` in that history.
 - `codex/p06-b` is synchronized with the same source and documentation state.
 - The P00 ledger remains acceptance truth: 258 leaves, 7 aliases, pending evidence.
 - P01: `a21ccf3`, `673dc0a`; P02: `038cd37`; P03 durable calendar: `9d222ac`.
@@ -35,6 +35,11 @@ evidence are still open.
 - `454f4d1` adds read-only selected-node metadata, exact in-vault `LifeOS/*.md`
   validation, bounded Markdown preview/refresh, Mac trailing inspection,
   iPhone sheet presentation, and late-result authority guards.
+- `433ea64` adds the native existing-document chooser. It accepts exactly one
+  existing `.canvas` or `.md` inside the attached vault's `LifeOS/` root,
+  preserves the mounted Canvas on cancellation/failure, and routes Markdown to
+  a read-only preview. It adds no enumeration, indexing, network, vault write,
+  or CP-B behavior.
 
 ## Evidence
 
@@ -60,13 +65,19 @@ evidence are still open.
   tests and every new inspector test; four older workspace tests failed after
   offline-host backend/websocket timeouts. Astra classified the patch READY TO
   CHECKPOINT with no P1/P2 blocker; mounted UI evidence remains open.
+- The chooser patch passed Swift parsing, macOS `LifeOSMacLogic`
+  build-for-testing, and iPhone 17 arm64 simulator build-for-testing. Direct
+  macOS execution was blocked by the testmanagerd sandbox; the iOS simulator
+  service refused the focused run. The generic x86_64 simulator build still
+  has the pre-existing `PlanningGraphTests` type-check failure. These are
+  qualified environment/build facts, not runtime acceptance.
 - The iPhone 17 simulator was shut down after validation; no owned xcodebuild,
   xctest, LifeOS app, or booted simulator process remains. Build outputs and
   result bundles are isolated under `/tmp` and are disposable.
 
 ## Next action
 
-Continue native graph/vault routing with the bounded existing-document chooser
-plan. Keep one worker and one Apple lane at a time; preserve gradual commits,
-pushes, compact handoffs, and evidence-led gates. Investigate test-host network
-isolation separately; do not call the qualified iOS run green.
+Continue native graph/vault routing with mounted picker presentation and a
+real-vault round trip. Keep one worker and one Apple lane at a time; preserve
+gradual commits, pushes, compact handoffs, and evidence-led gates. Investigate
+test-host network isolation separately; do not call qualified iOS runs green.

@@ -2,8 +2,8 @@
 
 Updated 2026-09-22 Europe/Berlin. Authoritative design remains in
 artifacts/blueprint/20260921, with R20-06-DISPATCH as the latest contract
-precedence. Current implementation checkpoint is 454f4d1; the transaction
-workspace base is 86baaa8.
+precedence. Current implementation checkpoint is 433ea64; the transaction
+workspace base is 86baaa8 and the inspector base is 454f4d1.
 Release is NO-GO.
 
 ## Rules
@@ -35,8 +35,10 @@ P05 depends on P00/P01 and reviews the eight untracked D1 files. P06 depends on
 P01/P05 and owns native planning Canvas, inspector, viewport, gesture bridge,
 vault observer/project coordinator and planning transport seam. The read-only
 inspector checkpoint `454f4d1` covers selected-node metadata and in-vault
-Markdown preview; the next bounded tranche is the existing-document chooser
-and typed Canvas/Markdown opening path.
+Markdown preview. The chooser checkpoint `433ea64` adds the typed
+Canvas/Markdown opening path for one existing document under attached
+`LifeOS/`; the next bounded tranche is mounted picker presentation and a
+real-vault round trip.
 
 P07 establishes the shared visual/motion/orb primitives. P08 repairs calendar
 interaction. P09 integrates finance and live-readback boundaries. P10 owns
@@ -77,8 +79,10 @@ security.
 The Windows host was not contacted by P00 and remains unavailable by task
 constraint. Xcode 27 and SDK settings are installed and the Xcode license is
 accepted, but no valid signing identity or provisioning profile is present.
-The iOS 27 simulator logic lane is green; signed UI and physical runtime
-evidence remain unknown. Banking consent,
+The iOS 27 simulator logic lane is green for its previously completed focused
+lanes; the current chooser build-for-testing passed, while runtime execution
+was blocked by CoreSimulator. Signed UI and physical runtime evidence remain
+unknown. Banking consent,
 provider quotas, iCloud vault choice, HealthKit/Zepp permissions, App Group
 registration and personal-device signing are also unknown.
 

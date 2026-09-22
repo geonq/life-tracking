@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
-Current source checkpoint: 454f4d1; main and origin/main are synchronized.
+Current source checkpoint: 433ea64; main and origin/main are synchronized.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -82,13 +82,20 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   workspace tests failed after offline-host network timeouts; no full iOS green
   claim is made.
 
+- P06-B existing-document chooser: `433ea64`. Native Mac/iPhone selection of
+  one existing `.canvas` or `.md` under attached `LifeOS/`, bounded path and
+  symlink checks, cancellation/failure preservation, read-only Markdown preview,
+  retry-state cleanup, and mirrored contract regressions are pushed after Astra
+  medium READY TO CHECKPOINT. Swift parsing and both arm64 build-for-testing
+  lanes pass; testmanagerd/CoreSimulator blocked runtime picker evidence.
+
 ## Ordered implementation
 
 1. P04 adapts finance, fitness, nutrition,
    supplements and lifestyle stores with local durability before acknowledgement.
-2. P06-B continues with native Canvas routing/document chooser/vault integration after
-   the accepted transaction workspace checkpoint; no worker may guess CP-B
-   adapter identities.
+2. P06-B continues with mounted picker presentation and a real-vault round trip
+   after the accepted chooser checkpoint; no worker may guess CP-B adapter
+   identities.
 3. P07 shared visual/motion primitives; P08 calendar; P09 finance; P10 fitness;
    P11 HealthKit/Zepp provenance; P12 usage; P13 tax; P14 widgets/intents.
 4. P15 security/dead-path hardening; P16 composition and target membership.
@@ -103,6 +110,8 @@ Use artifacts/final/completion/requirements.json instead of percentages.
 - Enable Banking, Trade Republic, Robinhood/net-worth, outage/rejoin and live
   provider readback.
 - Obsidian real-vault/iCloud round trip, native graph gestures and transport.
+- Mounted native document picker, viewport preservation, and retry/cancellation
+  behavior on Mac and iPhone.
 - LifeOS workouts plus physical HealthKit/Zepp comparison; proprietary Zepp
   metrics remain unavailable without legitimate provenance.
 - Whole-app visual/motion review, measured performance, adversarial security,

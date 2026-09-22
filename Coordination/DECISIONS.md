@@ -163,3 +163,21 @@ Updated 2026-09-22 Europe/Berlin.
   test-host isolation issue stays qualified and separate from this checkpoint.
 - Mounted native presentation, signed/App Group behavior, physical-device
   input, real-vault round trip, and final visual review remain open.
+
+## 2026-09-22 P06-B existing-document chooser
+
+- `433ea64` is pushed on `main` and `origin/main` after Astra medium's
+  post-correction READY TO CHECKPOINT review. The chooser accepts one existing
+  `.canvas` or `.md` selected inside the attached vault's exact `LifeOS/`
+  directory; component containment, traversal/query/fragment, extension,
+  symlink, generation, and lifecycle checks remain mandatory.
+- Canvas selection keeps the current project and viewport until a candidate
+  opens successfully. Markdown is a read-only inspector preview. Cancellation,
+  failure, stale results, and retry preserve or clear state deliberately; a
+  successful retry clears all four prior error/retry fields.
+- The tranche introduces no vault mutation, enumeration, indexing, network,
+  or CP-B adapter behavior. The six-file source allowlist and mirrored
+  contract tests are the accepted scope.
+- Swift parsing, macOS and iPhone 17 arm64 build-for-testing passed. Mac test
+  execution was blocked by testmanagerd sandboxing and the iOS focused run by
+  CoreSimulator refusal; mounted picker/viewport runtime evidence is pending.
