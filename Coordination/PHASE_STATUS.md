@@ -15,9 +15,11 @@ Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
   at `e76be67` and `9d222ac`.
 - P04 strict training payload serialization is pushed at `b0e52e1`.
   The closed 17-case SyncStoreKind registry and exhaustive domain mapping are
-  pushed at `ebef1ac`; Astra medium READY and macOS/iOS arm64 build-for-testing
-  passed. Protocol tests compiled but were not executed. Durable adapters remain
-  paused on CP-B migration, command identity, signing/sequence, and tombstones.
+  pushed at `ebef1ac`; Astra medium READY and macOS/iOS arm64
+  build-for-testing passed. Protocol tests compiled but were not executed.
+  The CP-B training contract is in tasks/p04-cpb-training-adapter-contract.md.
+  Batches A-D may use injected bindings; production registration is blocked by
+  trusted descriptor membership and legacy remote reconciliation.
 - P05 D1: bounded graph/parser/spatial/session/vault work is pushed at `ca2caf1`.
 - `0451afb` restores URL-safe Base64 decoding, Xcode 27 public-key compatibility,
   and the actor-safe store URL surface.
@@ -71,10 +73,10 @@ Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
   physical iPhone, Windows, and live-provider evidence remain unknown or
   unavailable.
 
-Next: Astra medium seals the CP-B training adapter contract, including
-migration/bootstrap keys, command-to-wire identity, signing/sequence ownership,
-deletion/tombstone retention, and clearReceiptJournalAfterExport interaction.
-Then Luna xhigh implements that contract. Keep P06-B native picker runtime and
-isolated vault-manifest evidence pending until Apple test services recover.
-Continue visual/motion, widgets, providers, Windows, physical-device, and final
-security gates after the adapter bridge. Release remains NO-GO.
+Next: execute P04 training batches A-D from
+tasks/p04-cpb-training-adapter-contract.md against injected bindings. Keep
+production registration blocked until trusted membership and legacy remote
+reconciliation are sealed. Retry P06-B native picker runtime and isolated
+vault-manifest evidence when Apple test services recover, then continue
+visual/motion, widgets, providers, Windows, device and final security gates.
+Release remains NO-GO.

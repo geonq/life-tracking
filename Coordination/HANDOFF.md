@@ -4,15 +4,16 @@ Updated 2026-09-23 Europe/Berlin.
 
 ## Active task
 
-P04 CP-B training adapter contract seal is next. P06-B native picker runtime
-and isolated vault round-trip evidence remain open. Release remains NO-GO.
+The P04 CP-B contract is sealed for injected batches A-D; batch A starts
+next. Production registration remains blocked by trusted-descriptor membership
+and legacy reconciliation. P06-B native picker runtime and isolated vault
+round-trip evidence remain open. Release remains NO-GO.
 
 ## Current source state
 
-- main, origin/main, and codex/p06-b are synchronized at 7cc189f's
-  coordination follow-up. The latest implementation is the P04
-  SyncStoreKind registry at ebef1ac; native picker source/tests remain at
-  7cc189f.
+- main, origin/main, and codex/p06-b are synchronized. P04
+  SyncStoreKind is at ebef1ac; native picker tests are at 7cc189f. The
+  execution contract is tasks/p04-cpb-training-adapter-contract.md.
 - P01–P05 foundations are in main: authenticated sync, durable calendar,
   fitness payload boundary, graph/session, and native Canvas viewport.
 - P06-B prior checkpoints: workspace transaction 86baaa8, inspector
@@ -59,9 +60,8 @@ registry evidence remain open. The hosted chooser tests use controlled
 selection closures and fixture vaults; they do not prove native picker
 presentation or access to the user's real vault.
 
-Next Astra medium seals the CP-B training adapter contract: migration/bootstrap
-keys, command-to-wire identity, signing and sequence allocation, deletion/
-tombstone retention, and the relation to clearReceiptJournalAfterExport().
-Then Luna xhigh can implement only the approved bridge. Retry P06-B native
-picker runtime and isolated vault-manifest evidence when Apple test services
-recover. Keep Apple lanes serial; builds are not runtime acceptance.
+Start Luna xhigh batch A under tasks/p04-cpb-training-adapter-contract.md.
+Keep A-D bound to injected identities and tests. Do not register production
+sync until trusted descriptor membership and populated-remote reconciliation
+are independently resolved. Continue P06-B native runtime/vault evidence when
+Apple test services recover; builds are not runtime acceptance.

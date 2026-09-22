@@ -45,12 +45,13 @@ P04 training payload serialization, bounded local canonical JSON, NFC and
 numeric/domain/parser regressions are pushed at b0e52e1 after Astra static PASS.
 No durable fitness store adapter is claimed yet; native logic lanes are green,
 while signed UI, physical-device, and external-provider evidence remain open.
-The closed 17-case SyncStoreKind registry and exhaustive domain switch
-are pushed at ebef1ac. Both macOS and iOS arm64 build-for-testing pass; the
-protocol tests compile but runtime execution remains unverified. Durable
-adapters are still blocked by CP-B replication metadata migration, command-to-
-wire identity persistence, signing/sequence ownership, and training tombstone
-semantics. No worker may guess these interfaces.
+The closed 17-case SyncStoreKind registry is pushed at ebef1ac; macOS and
+iOS arm64 builds pass and protocol tests compile, but runtime is unverified.
+Astra sealed tasks/p04-cpb-training-adapter-contract.md: batches A-D may run
+against injected bindings. Production registration E remains blocked by
+trusted descriptor membership and populated-remote legacy reconciliation.
+The plan defines schema-3 bootstrap, intents, sequence/signing, remote apply,
+receipt retention, exact tests and complexity limits; no worker may guess.
 
 P06-B now has a pushed read-only Calendar-to-Obsidian Canvas workspace with
 durable selection transaction recovery and prepare-before-publish journal
@@ -99,14 +100,17 @@ is currently unavailable.
 
 ## Next execution
 
-1. Astra medium seals the CP-B training adapter bridge: migration/bootstrap
-   key map, command-to-wire identity persistence, exact signing/sequence
-   allocation, delete/tombstone retention, and clearReceiptJournalAfterExport
-   interaction.
-2. Luna xhigh implements only that approved bridge, then Astra medium reviews
-   the batch before checkpoint. No durable adapter is registered before the
-   contract is sealed.
-3. Retry P06-B native picker runtime and isolated fixture-vault manifest
-   comparison when LaunchServices and CoreSimulator recover.
-4. Continue P07-P16 visual/motion, widgets, providers, and security cleanup;
-   then Windows/live-provider, physical-device, and final evidence gates.
+1. Luna xhigh batch A: schema-3 replication state, stable entity-key hash,
+   migration validation, explicit bind/bootstrap transaction, and restart/
+   collision tests from tasks/p04-cpb-training-adapter-contract.md.
+2. Batch B captures each successful local training command as a durable intent
+   in the same transaction as its local receipt; export never means sync ACK.
+3. Batch C seals intents with the replication key and commits signed bytes,
+   entity heads and contiguous sequence allocation atomically.
+4. Batch D applies verified operations and persists receipts before ACKs; do
+   not compact tombstones or replay evidence in CP-B.
+5. Keep batch E production registration blocked until trusted descriptor
+   membership and populated-remote legacy reconciliation are resolved.
+6. Retry P06-B native picker runtime and isolated vault-manifest evidence when
+   LaunchServices and CoreSimulator recover; continue remaining visual, widget,
+   provider, Windows, device and security gates afterward.
