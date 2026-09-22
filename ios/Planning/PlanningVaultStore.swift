@@ -6,6 +6,7 @@ public actor PlanningVaultStore {
 
     private let access: PlanningVaultAccess
     private let coordination: PlanningCoordinatedAccess
+    private let documentSelectionScope: PlanningSecurityScopeStrategy
     private let testBarrier: ((PlanningFilesystemBarrier) throws -> Void)?
     private let clock: () -> Date
     private var journal: PlanningMutationJournal?
@@ -24,6 +25,7 @@ public actor PlanningVaultStore {
             deviceID: deviceID
         )
         self.coordination = PlanningCoordinatedAccess()
+        self.documentSelectionScope = .system
         self.testBarrier = nil
         self.clock = { Date() }
     }
@@ -34,12 +36,14 @@ public actor PlanningVaultStore {
         deviceID: UUID,
         coordination: PlanningCoordinatedAccess = PlanningCoordinatedAccess(),
         testBarrier: ((PlanningFilesystemBarrier) throws -> Void)? = nil,
-        clock: @escaping () -> Date = { Date() }
+        clock: @escaping () -> Date = { Date() },
+        documentSelectionScope: PlanningSecurityScopeStrategy = .system
     ) {
         self.applicationSupportDirectory = applicationSupportDirectory
         self.deviceID = deviceID
         self.access = access
         self.coordination = coordination
+        self.documentSelectionScope = documentSelectionScope
         self.testBarrier = testBarrier
         self.clock = clock
     }
@@ -50,7 +54,8 @@ public actor PlanningVaultStore {
         deviceID: UUID = UUID(),
         coordination: PlanningCoordinatedAccess = PlanningCoordinatedAccess(),
         testBarrier: ((PlanningFilesystemBarrier) throws -> Void)? = nil,
-        clock: @escaping () -> Date = { Date() }
+        clock: @escaping () -> Date = { Date() },
+        documentSelectionScope: PlanningSecurityScopeStrategy = .system
     ) throws -> PlanningVaultStore {
         let access = try PlanningVaultAccess.makeTesting(
             rootURL: rootURL,
@@ -63,7 +68,8 @@ public actor PlanningVaultStore {
             deviceID: deviceID,
             coordination: coordination,
             testBarrier: testBarrier,
-            clock: clock
+            clock: clock,
+            documentSelectionScope: documentSelectionScope
         )
     }
 
@@ -453,6 +459,82 @@ public actor PlanningVaultStore {
             vaultID: vaultID,
             selectionGeneration: selectionGeneration
         )
+    }
+
+    /// Resolves one opaque native picker result against the already attached
+    /// vault. This is deliberately a read-only authority boundary: the
+    /// picked URL never becomes a vault selection, and existence is proven by
+    /// the same coordinated descriptor-backed read used by Canvas opening.
+    public func resolveSelectedDocument(
+        _ selection: PlanningUserSelectedDocument,
+        expectedContext: PlanningCanvasAccessContext
+    ) throws -> PlanningDocumentDestination {
+        guard try currentCanvasAccessContext() == expectedContext else {
+            throw PlanningFilesystemError.needsReselection
+        }
+        guard let rootURL = access.selectedRootURL else {
+            throw PlanningFilesystemError.unselected
+        }
+
+        let selectedURL = selection.url
+        let scopeStarted = documentSelectionScope.start(selectedURL)
+        defer {
+            if scopeStarted {
+                documentSelectionScope.stop(selectedURL)
+            }
+        }
+        guard selectedURL.isFileURL,
+              selectedURL.query == nil,
+              selectedURL.fragment == nil else {
+            throw PlanningFilesystemError.invalid("document.url")
+        }
+        guard !selectedURL.pathComponents.contains(where: {
+            $0 == "." || $0 == ".."
+        }) else {
+            throw PlanningFilesystemError.invalid("document.traversal")
+        }
+
+        let lifeOSURL = rootURL.standardizedFileURL
+            .appendingPathComponent("LifeOS", isDirectory: true)
+            .standardizedFileURL
+        let standardizedSelection = selectedURL.standardizedFileURL
+        let lifeOSComponents = lifeOSURL.pathComponents
+        let selectionComponents = standardizedSelection.pathComponents
+        guard selectionComponents.count > lifeOSComponents.count,
+              Array(selectionComponents.prefix(lifeOSComponents.count)) == lifeOSComponents else {
+            throw PlanningFilesystemError.invalid("document.containment")
+        }
+
+        let suffixComponents = Array(selectionComponents.dropFirst(lifeOSComponents.count))
+        guard !suffixComponents.isEmpty,
+              suffixComponents.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw PlanningFilesystemError.invalid("document.path")
+        }
+        let path = try PlanningStoredPath(suffixComponents.joined(separator: "/"))
+        let token = PlanningCoordinationToken(generation: expectedContext.selectionGeneration)
+        let raw = try coordination.read(
+            targetURL: standardizedSelection,
+            namespaceURL: rootURL,
+            token: token
+        ) { _ in
+            try self.access.withLease(
+                coordinatedRootURL: rootURL,
+                expectedGeneration: expectedContext.selectionGeneration
+            ) { lease in
+                try PlanningSafeFileIO.readBounded(lease, path: path)
+            }
+        }
+        guard raw != nil else {
+            throw PlanningFilesystemError.notFound
+        }
+        guard try currentCanvasAccessContext() == expectedContext else {
+            throw PlanningFilesystemError.needsReselection
+        }
+
+        if path.isCanvas {
+            return .canvas(path)
+        }
+        return .markdown(path)
     }
 
     public func accessSnapshot() -> PlanningVaultAccessSnapshot {

@@ -107,17 +107,28 @@ public enum PlanningInspectorFailureCategory: String, Equatable, Sendable {
 private enum PlanningWorkspaceRetryIntent: Equatable {
     case restore
     case openPath(String)
+    case openDocument(PlanningDocumentDestination, PlanningCanvasAccessContext)
 }
 
 private struct PlanningWorkspacePresentationToken: Equatable, Sendable {
     let id: UUID
 }
 
+public struct PlanningDocumentSelectionTicket: Equatable, Sendable {
+    fileprivate let id: UUID
+    fileprivate let presentationTokenID: UUID
+    fileprivate let accessContext: PlanningCanvasAccessContext
+}
+
+private enum PlanningInspectorOrigin: Equatable, Sendable {
+    case canvasNode(nodeID: String, documentPath: PlanningStoredPath)
+    case pickedDocument
+}
+
 private struct PlanningInspectorReadRequest: Equatable, Sendable {
     let id: UUID
     let documentTokenID: UUID
-    let nodeID: String
-    let documentPath: PlanningStoredPath
+    let origin: PlanningInspectorOrigin
     let notePath: PlanningStoredPath
     let accessContext: PlanningCanvasAccessContext
 }
@@ -221,9 +232,12 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     private var cleanupID: UUID?
     private var retryIntent: PlanningWorkspaceRetryIntent = .restore
     private var presentationTokenID = UUID()
+    @Published public private(set) var canRetryDocumentSelection = false
+    private var documentSelectionTicket: PlanningDocumentSelectionTicket?
     private var inspectorDocumentTokenID = UUID()
     private var inspectorRequest: PlanningInspectorReadRequest?
     private var inspectorProject: PlanningProjectCoordinator?
+    private var inspectorOrigin: PlanningInspectorOrigin?
     private var inspectorTask: Task<Void, Never>?
     private var inspectorReadsBlocked = false
     private var inspectorSelection: AnyCancellable?
@@ -238,6 +252,8 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     internal var beforeCleanupClose: (@Sendable () async -> Void)?
     /// Test-only suspension point before a candidate inspector session reads.
     internal var beforeInspectorRead: (@Sendable () async -> Void)?
+    internal var beforeDocumentSelectionResolution: (@Sendable () async -> Void)?
+    internal var afterDocumentSelectionResolution: (@Sendable () async -> Void)?
     internal var afterInspectorRead: (@Sendable () async -> Void)?
 #endif
 
@@ -527,14 +543,217 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
         }
     }
 
+    public func beginDocumentSelection() -> PlanningDocumentSelectionTicket? {
+        guard isMounted,
+              phase == .ready || phase == .showingCanvas,
+              let vaultID = accessSnapshot.vaultID,
+              let selectionGeneration = accessSnapshot.selectionGeneration,
+              accessSnapshot.state == .ready else {
+            return nil
+        }
+        if documentSelectionTicket != nil, inspectorOrigin == .pickedDocument {
+            invalidateInspectorWork()
+        }
+        canRetryDocumentSelection = false
+        let ticket = PlanningDocumentSelectionTicket(
+            id: UUID(),
+            presentationTokenID: presentationTokenID,
+            accessContext: PlanningCanvasAccessContext(
+                vaultID: vaultID,
+                selectionGeneration: selectionGeneration
+            )
+        )
+        documentSelectionTicket = ticket
+        return ticket
+    }
+
+    public func cancelDocumentSelection(_ ticket: PlanningDocumentSelectionTicket) {
+        guard documentSelectionTicket == ticket else { return }
+        documentSelectionTicket = nil
+        if inspectorOrigin == .pickedDocument, inspectorNoteStatus == .loading {
+            invalidateInspectorWork()
+        }
+    }
+
+    public func openSelectedDocument(
+        _ selection: PlanningUserSelectedDocument,
+        ticket: PlanningDocumentSelectionTicket
+    ) async {
+        guard isCurrentDocumentSelectionTicket(ticket) else { return }
+        await withTaskCancellationHandler {
+            await enqueue { [weak self] generation in
+                guard let self,
+                      self.isCurrentDocumentSelectionTicket(ticket) else { return }
+                do {
+#if DEBUG
+                    if let hook = self.beforeDocumentSelectionResolution { await hook() }
+#endif
+                    guard self.isCurrentDocumentSelectionTicket(ticket) else { return }
+                    let destination = try await self.store.resolveSelectedDocument(
+                        selection,
+                        expectedContext: ticket.accessContext
+                    )
+                    guard self.isCurrent(generation),
+                          self.isCurrentDocumentSelectionTicket(ticket) else { return }
+#if DEBUG
+                    if let hook = self.afterDocumentSelectionResolution { await hook() }
+#endif
+                    guard self.isCurrentDocumentSelectionTicket(ticket) else { return }
+                    self.lastError = nil
+                    self.lastFailure = nil
+                    self.lastDiagnostic = nil
+                    self.retryIntent = .openDocument(destination, ticket.accessContext)
+                    self.canRetryDocumentSelection = true
+                    switch destination {
+                    case .canvas(let path):
+                        await self.openSelectedCanvas(
+                            path: path,
+                            expectedContext: ticket.accessContext,
+                            ticket: ticket,
+                            generation: generation
+                        )
+                    case .markdown(let path):
+                        await self.openPickedMarkdown(
+                            path: path,
+                            expectedContext: ticket.accessContext,
+                            ticket: ticket,
+                            generation: generation
+                        )
+                    }
+                } catch {
+                    guard self.isCurrent(generation),
+                          self.isCurrentDocumentSelectionTicket(ticket) else { return }
+                    self.documentSelectionTicket = nil
+                    self.lastDiagnostic = self.diagnostic(for: error)
+                    self.lastError = error.localizedDescription
+                    self.lastFailure = self.failureCategory(for: error)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.cancelDocumentSelection(ticket) }
+        }
+    }
+
+    private func openSelectedCanvas(
+        path: PlanningStoredPath,
+        expectedContext: PlanningCanvasAccessContext,
+        ticket: PlanningDocumentSelectionTicket,
+        generation: UInt64
+    ) async {
+        guard isCurrent(generation), isCurrentDocumentSelectionTicket(ticket) else { return }
+
+        var session: PlanningCanvasSession?
+        do {
+            let persistence = PlanningReadOnlyCanvasPersistence(store: store)
+            let candidate = PlanningCanvasSession(
+                path: path,
+                context: expectedContext,
+                persistence: persistence
+            )
+            session = candidate
+            let presentation = PlanningProjectCoordinator(
+                session: candidate,
+                accessContext: expectedContext,
+                allowsEditing: false
+            )
+            try await presentation.open()
+            guard isCurrent(generation),
+                  isCurrentDocumentSelectionTicket(ticket) else { return }
+
+            let currentContext = try await store.currentCanvasAccessContext()
+            guard isCurrent(generation),
+                  isCurrentDocumentSelectionTicket(ticket) else { return }
+            guard currentContext == expectedContext else {
+                throw PlanningFilesystemError.needsReselection
+            }
+
+            let snapshot = await store.accessSnapshot()
+            guard isCurrent(generation),
+                  isCurrentDocumentSelectionTicket(ticket) else { return }
+            guard snapshot.state == .ready,
+                  snapshot.vaultID == expectedContext.vaultID,
+                  snapshot.selectionGeneration == expectedContext.selectionGeneration else {
+                throw PlanningFilesystemError.needsReselection
+            }
+            invalidateInspectorWork()
+            openedPath = path
+            pathInput = path.value
+            project = presentation
+            apply(snapshot: snapshot)
+            phase = .showingCanvas
+            documentSelectionTicket = nil
+            lastError = nil
+            lastFailure = nil
+            lastDiagnostic = nil
+            canRetryDocumentSelection = false
+        } catch {
+            guard isCurrent(generation),
+                  isCurrentDocumentSelectionTicket(ticket) else { return }
+            documentSelectionTicket = nil
+            lastDiagnostic = session?.lastDiagnostic ?? diagnostic(for: error)
+            lastError = error.localizedDescription
+            lastFailure = failureCategory(for: error)
+            // Keep the previous project, selection, viewport, inspector, path,
+            // and phase mounted when the candidate document cannot open.
+        }
+    }
+
+    private func openPickedMarkdown(
+        path: PlanningStoredPath,
+        expectedContext: PlanningCanvasAccessContext,
+        ticket: PlanningDocumentSelectionTicket,
+        generation: UInt64
+    ) async {
+        guard isCurrent(generation), isCurrentDocumentSelectionTicket(ticket) else { return }
+
+        invalidateInspectorWork()
+        inspectorProject = project
+        inspectorOrigin = .pickedDocument
+        if let project {
+            let selectedID = project.selectedNodeID
+            inspectorSelection = project.$selectedNodeID.sink { [weak self] newID in
+                guard newID != selectedID else { return }
+                self?.closeInspector()
+            }
+        }
+        inspectorNode = nil
+        inspectorReference = "LifeOS/\(path.value)"
+        inspectorReferencePath = path
+        inspectorNotePath = path
+        inspectorReferenceFragment = nil
+        inspectorNoteSource = nil
+        inspectorNoteStatus = .loading
+        inspectorError = nil
+        inspectorFailure = nil
+        isInspectorPresented = true
+        isInspectorNotePresented = true
+        await readInspectorNote(
+            origin: .pickedDocument,
+            notePath: path,
+            accessContext: expectedContext
+        )
+        guard isCurrent(generation),
+              isCurrentDocumentSelectionTicket(ticket) else { return }
+        documentSelectionTicket = nil
+        if inspectorNoteStatus == .ready {
+            lastError = nil
+            lastFailure = nil
+            lastDiagnostic = nil
+            canRetryDocumentSelection = false
+        }
+    }
+
     public func inspectNode(id: String) {
         guard let project,
-              let node = project.nodesByID[id] else { return }
+              let node = project.nodesByID[id],
+              let documentPath = openedPath else { return }
 
+        documentSelectionTicket = nil
         invalidateInspectorWork()
         project.selectNode(id)
         let route = inspectorReferenceRoute(for: node.file)
         inspectorProject = project
+        inspectorOrigin = .canvasNode(nodeID: id, documentPath: documentPath)
         inspectorNode = node
         inspectorReference = node.file
         inspectorReferencePath = route?.path
@@ -583,8 +802,7 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
 
         isInspectorNotePresented = true
         await readInspectorNote(
-            nodeID: node.id,
-            documentPath: documentPath,
+            origin: .canvasNode(nodeID: node.id, documentPath: documentPath),
             notePath: notePath,
             accessContext: accessContext
         )
@@ -594,13 +812,21 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
         guard isInspectorPresented,
               !inspectorReadsBlocked,
               isInspectorNotePresented,
-              let project,
-              let node = project.selectedNode,
-              node.id == inspectorNode?.id,
-              let documentPath = openedPath,
+              let origin = inspectorOrigin,
               let notePath = inspectorNotePath,
               notePath.isMarkdown else {
             return
+        }
+
+        switch origin {
+        case .canvasNode(let nodeID, let documentPath):
+            guard let project,
+                  let node = project.selectedNode,
+                  node.id == nodeID,
+                  inspectorNode?.id == nodeID,
+                  openedPath == documentPath else { return }
+        case .pickedDocument:
+            break
         }
 
         guard let accessContext = inspectorAccessContext() else {
@@ -609,14 +835,14 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
         }
 
         await readInspectorNote(
-            nodeID: node.id,
-            documentPath: documentPath,
+            origin: origin,
             notePath: notePath,
             accessContext: accessContext
         )
     }
 
     public func closeInspectorNote() {
+        let origin = inspectorOrigin
         inspectorTask?.cancel()
         inspectorTask = nil
         inspectorRequest = nil
@@ -625,6 +851,9 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
         inspectorError = nil
         inspectorFailure = nil
         inspectorNoteStatus = inspectorNotePath?.isMarkdown == true ? .idle : .unsupported
+        if origin == .pickedDocument {
+            invalidateInspectorWork()
+        }
     }
 
     public func closeInspector() {
@@ -632,8 +861,7 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     }
 
     private func readInspectorNote(
-        nodeID: String,
-        documentPath: PlanningStoredPath,
+        origin: PlanningInspectorOrigin,
         notePath: PlanningStoredPath,
         accessContext: PlanningCanvasAccessContext
     ) async {
@@ -648,12 +876,12 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
         inspectorNoteStatus = .loading
         inspectorError = nil
         inspectorFailure = nil
+        inspectorOrigin = origin
 
         let request = PlanningInspectorReadRequest(
             id: UUID(),
             documentTokenID: inspectorDocumentTokenID,
-            nodeID: nodeID,
-            documentPath: documentPath,
+            origin: origin,
             notePath: notePath,
             accessContext: accessContext
         )
@@ -765,7 +993,14 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
     }
 
     public func retry() async {
-        let token = beginPresentationOperation()
+        let token: PlanningWorkspacePresentationToken
+        if case .openDocument = retryIntent {
+            documentSelectionTicket = nil
+            presentationTokenID = UUID()
+            token = PlanningWorkspacePresentationToken(id: presentationTokenID)
+        } else {
+            token = beginPresentationOperation()
+        }
         switch retryIntent {
         case .openPath(let failedPath):
             let requestedPath = pathInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -787,6 +1022,46 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
 #endif
             guard ownsPresentation(token) else { return }
             await openCanvas(relativePath: requestedPath, ownedBy: token)
+        case .openDocument(let destination, let expectedContext):
+            do {
+                let currentContext = try await store.currentCanvasAccessContext()
+                guard ownsPresentation(token) else { return }
+                guard currentContext == expectedContext else {
+                    lastError = PlanningFilesystemError.needsReselection.localizedDescription
+                    lastFailure = .needsReselection
+                    blockInspectorReads(error: PlanningFilesystemError.needsReselection)
+                    phase = .needsReselection
+                    return
+                }
+            } catch {
+                guard ownsPresentation(token) else { return }
+                lastError = error.localizedDescription
+                lastFailure = failureCategory(for: error)
+                return
+            }
+
+            switch destination {
+            case .canvas(let path):
+                let retryTicket = PlanningDocumentSelectionTicket(
+                    id: UUID(), presentationTokenID: token.id, accessContext: expectedContext
+                )
+                documentSelectionTicket = retryTicket
+                await openSelectedCanvas(path: path, expectedContext: expectedContext,
+                                         ticket: retryTicket, generation: operationGeneration)
+            case .markdown(let path):
+                let retryTicket = PlanningDocumentSelectionTicket(
+                    id: UUID(),
+                    presentationTokenID: token.id,
+                    accessContext: expectedContext
+                )
+                documentSelectionTicket = retryTicket
+                await openPickedMarkdown(
+                    path: path,
+                    expectedContext: expectedContext,
+                    ticket: retryTicket,
+                    generation: operationGeneration
+                )
+            }
         case .restore:
             await restore(ownedBy: token)
         }
@@ -797,6 +1072,22 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
         let task = cleanupTask
         guard let task else { return }
         await task.value
+    }
+
+    private func isCurrentDocumentSelectionTicket(
+        _ ticket: PlanningDocumentSelectionTicket
+    ) -> Bool {
+        guard !Task.isCancelled,
+              isMounted,
+              documentSelectionTicket == ticket,
+              presentationTokenID == ticket.presentationTokenID,
+              accessSnapshot.state == .ready,
+              accessSnapshot.vaultID == ticket.accessContext.vaultID,
+              accessSnapshot.selectionGeneration == ticket.accessContext.selectionGeneration,
+              phase == .ready || phase == .showingCanvas else {
+            return false
+        }
+        return true
     }
 
     private func inspectorAccessContext() -> PlanningCanvasAccessContext? {
@@ -853,13 +1144,19 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
               !inspectorReadsBlocked,
               inspectorDocumentTokenID == request.documentTokenID,
               inspectorRequest == request,
-              let project,
-              project === inspectorProject,
-              project.selectedNodeID == request.nodeID,
-              openedPath == request.documentPath,
+              inspectorOrigin == request.origin,
               accessSnapshot.vaultID == request.accessContext.vaultID,
               accessSnapshot.selectionGeneration == request.accessContext.selectionGeneration else {
             return false
+        }
+        switch request.origin {
+        case .canvasNode(let nodeID, let documentPath):
+            guard let project,
+                  project === inspectorProject,
+                  project.selectedNodeID == nodeID,
+                  openedPath == documentPath else { return false }
+        case .pickedDocument:
+            break
         }
         return true
     }
@@ -872,6 +1169,7 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
         inspectorTask?.cancel()
         inspectorTask = nil
         inspectorProject = nil
+        inspectorOrigin = nil
         inspectorReadsBlocked = false
         isInspectorPresented = false
         isInspectorNotePresented = false
@@ -969,6 +1267,7 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
 
     private func invalidatePresentation(markIdle: Bool = false) {
         invalidateInspectorWork()
+        documentSelectionTicket = nil
         presentationTokenID = UUID()
         operationGeneration &+= 1
         project = nil
@@ -1061,6 +1360,7 @@ public final class PlanningWorkspaceCoordinator: ObservableObject {
 
     private func beginPresentationOperation() -> PlanningWorkspacePresentationToken {
         invalidateInspectorWork()
+        documentSelectionTicket = nil
         let token = PlanningWorkspacePresentationToken(id: UUID())
         presentationTokenID = token.id
         return token

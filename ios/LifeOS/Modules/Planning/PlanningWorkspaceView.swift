@@ -113,7 +113,11 @@ public struct PlanningWorkspaceView: View {
                 buttonTitle: "Choose another vault"
             )
         case .ready:
-            canvasPathState
+            if coordinator.isInspectorPresented {
+                PlanningWorkspaceInspectorView(workspace: coordinator)
+            } else {
+                canvasPathState
+            }
         case .showingCanvas:
             canvasState
         case .unavailable:
@@ -160,7 +164,7 @@ public struct PlanningWorkspaceView: View {
             Button(buttonTitle, action: chooseVault)
                 .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("planning-choose-vault")
-            if let pickerError {
+            if let pickerError = pickerError ?? coordinator.lastError {
                 Text(pickerError)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(LifeOSTokens.danger)
@@ -208,15 +212,23 @@ public struct PlanningWorkspaceView: View {
                 .disabled(coordinator.pathInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .accessibilityIdentifier("planning-open-canvas")
 
+                Button("Choose document", action: chooseDocument)
+                    .buttonStyle(.bordered)
+                    .disabled(pickerTask != nil)
+                    .accessibilityIdentifier("planning-choose-document")
+
                 Button("Change vault", action: chooseVault)
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("planning-change-vault")
             }
 
-            if let pickerError {
+            if let pickerError = pickerError ?? coordinator.lastError {
                 Text(pickerError)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(LifeOSTokens.danger)
+                if coordinator.canRetryDocumentSelection {
+                    Button("Retry") { Task { await coordinator.retry() } }
+                }
             }
             Spacer(minLength: 0)
         }
@@ -240,14 +252,19 @@ public struct PlanningWorkspaceView: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(LifeOSTokens.warning)
                     }
-                    Button("Change document") {
-                        coordinator.closeDocument()
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityIdentifier("planning-change-document")
+                    Button("Choose document", action: chooseDocument)
+                        .buttonStyle(.borderless)
+                        .disabled(pickerTask != nil)
+                        .accessibilityIdentifier("planning-change-document")
                 }
                 .padding(.horizontal, LifeOSTokens.Space.md)
                 .padding(.vertical, LifeOSTokens.Space.xs)
+                if let error = pickerError ?? coordinator.lastError {
+                    Text(error).font(.caption).foregroundStyle(LifeOSTokens.danger)
+                    if coordinator.canRetryDocumentSelection {
+                        Button("Retry") { Task { await coordinator.retry() } }
+                    }
+                }
                 PlanningWorkspaceCanvasContent(
                     workspace: coordinator,
                     project: project
@@ -338,6 +355,65 @@ public struct PlanningWorkspaceView: View {
                 if let selection = try PlanningVaultSelectionBroker.selectDirectory(presenting: pickerWindow) {
                     guard !Task.isCancelled, pickerGeneration == generation else { return }
                     await coordinator.attach(selection)
+                }
+            } catch {
+                guard !Task.isCancelled, pickerGeneration == generation else { return }
+                pickerError = error.localizedDescription
+            }
+        }
+#endif
+    }
+
+    private func chooseDocument() {
+        pickerError = nil
+        pickerTask?.cancel()
+        let generation = UUID()
+        pickerGeneration = generation
+        guard let ticket = coordinator.beginDocumentSelection() else {
+            pickerError = "Choose a ready planning workspace before selecting a document."
+            return
+        }
+
+#if os(iOS)
+        guard let pickerPresenter else {
+            coordinator.cancelDocumentSelection(ticket)
+            pickerError = PlanningFilesystemError.unavailable("pickerPresenter").localizedDescription
+            return
+        }
+        pickerTask = Task { @MainActor in
+            defer {
+                if pickerGeneration == generation {
+                    pickerTask = nil
+                }
+                coordinator.cancelDocumentSelection(ticket)
+            }
+            do {
+                if let selection = try await PlanningVaultSelectionBroker.selectDocument(from: pickerPresenter) {
+                    guard !Task.isCancelled, pickerGeneration == generation else { return }
+                    await coordinator.openSelectedDocument(selection, ticket: ticket)
+                }
+            } catch {
+                guard !Task.isCancelled, pickerGeneration == generation else { return }
+                pickerError = error.localizedDescription
+            }
+        }
+#elseif os(macOS)
+        guard let pickerWindow else {
+            coordinator.cancelDocumentSelection(ticket)
+            pickerError = PlanningFilesystemError.unavailable("pickerPresenter").localizedDescription
+            return
+        }
+        pickerTask = Task { @MainActor in
+            defer {
+                if pickerGeneration == generation {
+                    pickerTask = nil
+                }
+                coordinator.cancelDocumentSelection(ticket)
+            }
+            do {
+                if let selection = try await PlanningVaultSelectionBroker.selectDocument(presenting: pickerWindow) {
+                    guard !Task.isCancelled, pickerGeneration == generation else { return }
+                    await coordinator.openSelectedDocument(selection, ticket: ticket)
                 }
             } catch {
                 guard !Task.isCancelled, pickerGeneration == generation else { return }

@@ -147,6 +147,293 @@ private final class PlanningWorkspaceSelectionCommitFailure: @unchecked Sendable
 
 @MainActor
 final class PlanningWorkspaceTests: XCTestCase {
+    private func chooserWorkspace(_ fixture: Fixture, canvas: Bool = true) async -> PlanningWorkspaceCoordinator {
+        let workspace = PlanningWorkspaceCoordinator(store: fixture.store, localGrantOwnerID: fixture.ownerID)
+        await workspace.attach(fixture.selection)
+        if canvas { await workspace.openCanvas(relativePath: "Projects/Personal.canvas") }
+        return workspace
+    }
+
+    private func choose(_ path: String, fixture: Fixture, workspace: PlanningWorkspaceCoordinator) async throws {
+        let ticket = try XCTUnwrap(workspace.beginDocumentSelection())
+        let selection = try PlanningUserSelectedDocument(pickerURL: noteURL(fixture, path: path))
+        await workspace.openSelectedDocument(selection, ticket: ticket)
+    }
+
+    private func assertSelectionRejected(_ url: URL, store: PlanningVaultStore,
+                                         context: PlanningCanvasAccessContext,
+                                         file: StaticString = #filePath, line: UInt = #line) async throws {
+        let selection = try PlanningUserSelectedDocument(pickerURL: url)
+        do {
+            _ = try await store.resolveSelectedDocument(selection, expectedContext: context)
+            XCTFail("Unexpectedly accepted \(url)", file: file, line: line)
+        } catch { /* Rejection is the required boundary behavior. */ }
+    }
+
+    func testDocumentSelectionRoutesExistingCanvasAndMarkdown() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/A.md", source: "# A")
+        let w = await chooserWorkspace(f, canvas: false)
+        let context = try await f.store.currentCanvasAccessContext()
+        for (path, expected) in [
+            ("Projects/Personal.canvas", PlanningDocumentDestination.canvas(try PlanningStoredPath("Projects/Personal.canvas"))),
+            ("Projects/A.md", PlanningDocumentDestination.markdown(try PlanningStoredPath("Projects/A.md")))
+        ] {
+            let result = try await f.store.resolveSelectedDocument(
+                PlanningUserSelectedDocument(pickerURL: noteURL(f, path: path)), expectedContext: context)
+            XCTAssertEqual(result, expected)
+        }
+        try await choose("Projects/Personal.canvas", fixture: f, workspace: w)
+        XCTAssertEqual(w.phase, .showingCanvas)
+        try await choose("Projects/A.md", fixture: f, workspace: w)
+        XCTAssertEqual(w.inspectorNoteSource, "# A")
+    }
+
+    func testDocumentSelectionRejectsOutsideSiblingAndTraversalPaths() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let workspace = await chooserWorkspace(f)
+        defer { withExtendedLifetime(workspace) {} }
+        let context = try await f.store.currentCanvasAccessContext()
+        let urls = [f.root.appendingPathComponent("Outside.md"),
+                    f.root.appendingPathComponent("LifeOS-other/A.md"),
+                    URL(string: f.root.absoluteString + "LifeOS/Projects/../A.md")!,
+                    URL(string: noteURL(f, path: "Projects/Personal.canvas").absoluteString + "?x=1")!,
+                    URL(string: noteURL(f, path: "Projects/Personal.canvas").absoluteString + "#node")!]
+        for url in urls { try await assertSelectionRejected(url, store: f.store, context: context) }
+    }
+
+    func testDocumentSelectionRejectsDirectoryUnsupportedMissingAndSymlink() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let w = await chooserWorkspace(f)
+        let context = try await f.store.currentCanvasAccessContext()
+        try writeNote(f, path: "Projects/file.txt", source: "unsupported")
+        try FileManager.default.createSymbolicLink(at: noteURL(f, path: "Projects/link.md"),
+                                                  withDestinationURL: noteURL(f, path: "Projects/Personal.canvas"))
+        for path in ["Projects", "Projects/file.txt", "Projects/Missing.md", "Projects/link.md"] {
+            try await assertSelectionRejected(noteURL(f, path: path), store: f.store, context: context)
+        }
+        XCTAssertNotNil(w.project)
+    }
+
+    func testDocumentSelectionBalancesTemporaryScopeOnSuccessAndFailure() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let counter = PlanningWorkspaceScopeCounter()
+        let store = try PlanningVaultStore.makeTesting(rootURL: f.root,
+            applicationSupportDirectory: f.support, deviceID: f.ownerID,
+            documentSelectionScope: PlanningSecurityScopeStrategy(start: { _ in counter.start() }, stop: { _ in counter.stop() }))
+        _ = try await store.attachExisting(selection: f.selection)
+        let context = try await store.currentCanvasAccessContext()
+        _ = try await store.resolveSelectedDocument(PlanningUserSelectedDocument(
+            pickerURL: noteURL(f, path: "Projects/Personal.canvas")), expectedContext: context)
+        try await assertSelectionRejected(noteURL(f, path: "Missing.md"), store: store, context: context)
+        XCTAssertEqual(counter.counts.starts, 2)
+        XCTAssertEqual(counter.counts.stops, 2)
+        XCTAssertEqual(counter.counts.active, 0)
+        await store.close()
+    }
+
+    func testDocumentSelectionScopeFalseStillRequiresAttachedVaultAuthority() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let store = try PlanningVaultStore.makeTesting(rootURL: f.root,
+            applicationSupportDirectory: f.support, deviceID: f.ownerID,
+            documentSelectionScope: PlanningSecurityScopeStrategy(start: { _ in false }, stop: { _ in XCTFail("No scope to stop") }))
+        _ = try await store.attachExisting(selection: f.selection)
+        let context = try await store.currentCanvasAccessContext()
+        let url = noteURL(f, path: "Projects/Personal.canvas")
+        let result = try await store.resolveSelectedDocument(PlanningUserSelectedDocument(pickerURL: url), expectedContext: context)
+        XCTAssertEqual(result, .canvas(try PlanningStoredPath("Projects/Personal.canvas")))
+        await store.close()
+        try await assertSelectionRejected(url, store: store, context: context)
+    }
+
+    func testDocumentSelectionRejectsDifferentVaultGeneration() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let w = await chooserWorkspace(f)
+        let context = try await f.store.currentCanvasAccessContext()
+        let replacement = try fixture(); registerTeardown(for: replacement)
+        await w.attach(replacement.selection)
+        try await assertSelectionRejected(noteURL(f, path: "Projects/Personal.canvas"), store: f.store, context: context)
+    }
+
+    func testDocumentPickerCancellationPreservesCanvasAndInspector() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let w = await chooserWorkspace(f)
+        w.inspectNode(id: "root")
+        let project = try XCTUnwrap(w.project)
+        let ticket = try XCTUnwrap(w.beginDocumentSelection())
+        w.cancelDocumentSelection(ticket)
+        XCTAssertTrue(w.project === project)
+        XCTAssertEqual(project.selectedNodeID, "root")
+        XCTAssertTrue(w.isInspectorPresented)
+    }
+
+    func testPickedCanvasFailurePreservesExistingProjectAndSelection() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let w = await chooserWorkspace(f)
+        w.inspectNode(id: "root")
+        let project = try XCTUnwrap(w.project)
+        try writeNote(f, path: "Projects/Broken.canvas", source: "not canvas")
+        try await choose("Projects/Broken.canvas", fixture: f, workspace: w)
+        XCTAssertTrue(w.project === project)
+        XCTAssertEqual(project.selectedNodeID, "root")
+        XCTAssertEqual(w.openedPath?.value, "Projects/Personal.canvas")
+        XCTAssertNotNil(w.lastError)
+        await w.retry()
+        XCTAssertTrue(w.project === project)
+        XCTAssertTrue(w.isInspectorPresented)
+    }
+
+    func testPickedCanvasRetrySuccessClearsFailureState() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let w = await chooserWorkspace(f)
+        let previousProject = try XCTUnwrap(w.project)
+        let repairedSource = try String(contentsOf: noteURL(f, path: "Projects/Personal.canvas"), encoding: .utf8)
+        try writeNote(f, path: "Projects/Broken.canvas", source: "not canvas")
+        try await choose("Projects/Broken.canvas", fixture: f, workspace: w)
+        XCTAssertTrue(w.project === previousProject)
+        XCTAssertNotNil(w.lastError)
+        XCTAssertNotNil(w.lastFailure)
+        XCTAssertNotNil(w.lastDiagnostic)
+        XCTAssertTrue(w.canRetryDocumentSelection)
+
+        try writeNote(f, path: "Projects/Broken.canvas", source: repairedSource)
+        await w.retry()
+
+        let repairedProject = try XCTUnwrap(w.project)
+        XCTAssertFalse(repairedProject === previousProject)
+        XCTAssertEqual(w.phase, .showingCanvas)
+        XCTAssertEqual(w.openedPath?.value, "Projects/Broken.canvas")
+        XCTAssertNotNil(repairedProject.nodesByID["root"])
+        XCTAssertNil(w.lastError)
+        XCTAssertNil(w.lastFailure)
+        XCTAssertNil(w.lastDiagnostic)
+        XCTAssertFalse(w.canRetryDocumentSelection)
+    }
+
+    func testPickedMarkdownWithoutCanvasUsesReadOnlyPreview() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/A.md", source: "# Picked")
+        let w = await chooserWorkspace(f, canvas: false)
+        try await choose("Projects/A.md", fixture: f, workspace: w)
+        XCTAssertNil(w.project)
+        XCTAssertNil(w.openedPath)
+        XCTAssertNil(w.inspectorNode)
+        XCTAssertEqual(w.phase, .ready)
+        XCTAssertEqual(w.inspectorNoteSource, "# Picked")
+        w.closeInspectorNote()
+        XCTAssertFalse(w.isInspectorPresented)
+    }
+
+    func testPickedMarkdownBackPreservesCanvasIdentityAndViewport() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/A.md", source: "# A")
+        let w = await chooserWorkspace(f)
+        let project = try XCTUnwrap(w.project)
+        project.selectNode("root")
+        try await choose("Projects/A.md", fixture: f, workspace: w)
+        w.closeInspectorNote()
+        XCTAssertTrue(w.project === project)
+        XCTAssertEqual(project.selectedNodeID, "root")
+        XCTAssertEqual(w.phase, .showingCanvas)
+        // Viewport belongs to the mounted Canvas view; identity preservation is
+        // the logic guarantee. Mounted UI viewport verification is separate.
+    }
+
+    func testPickedMarkdownRefreshRetainsOnlySameRouteStaleSource() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/A.md", source: "# Original")
+        let w = await chooserWorkspace(f)
+        try await choose("Projects/A.md", fixture: f, workspace: w)
+        try Data([0xff, 0xfe, 0xff]).write(to: noteURL(f, path: "Projects/A.md"))
+        await w.refreshInspectorNote()
+        XCTAssertEqual(w.inspectorNoteSource, "# Original")
+        XCTAssertEqual(w.inspectorNoteStatus, .stale)
+        try writeNote(f, path: "Projects/B.md", source: "# Other")
+        try await choose("Projects/B.md", fixture: f, workspace: w)
+        XCTAssertEqual(w.inspectorNoteSource, "# Other")
+    }
+
+    func testDocumentSelectionLateResultCannotPublishAfterLifecycleChange() async throws {
+        for action in ["close", "unmount", "picker", "vault", "cancel"] {
+            let f = try fixture(); registerTeardown(for: f)
+            try writeNote(f, path: "Projects/A.md", source: "# Late")
+            let w = await chooserWorkspace(f)
+            let ticket = try XCTUnwrap(w.beginDocumentSelection())
+            let gate = PlanningWorkspaceTestGate()
+            w.afterDocumentSelectionResolution = { await gate.wait() }
+            let selection = try PlanningUserSelectedDocument(pickerURL: noteURL(f, path: "Projects/A.md"))
+            let task = Task { await w.openSelectedDocument(selection, ticket: ticket) }
+            await gate.waitForEntry()
+            var lifecycle: Task<Void, Never>?
+            switch action {
+            case "close": w.closeDocument()
+            case "unmount":
+                w.requestUnmount()
+                lifecycle = Task { await w.unmount() }
+            case "picker": _ = w.beginDocumentSelection()
+            case "vault":
+                let replacement = try fixture(); registerTeardown(for: replacement)
+                _ = try await f.store.attachExisting(selection: replacement.selection)
+            default: w.cancelDocumentSelection(ticket)
+            }
+            await gate.release()
+            await task.value
+            await lifecycle?.value
+            XCTAssertNil(w.inspectorNoteSource, action)
+        }
+    }
+
+    func testPickedMarkdownLateReadCannotReplaceNewSelection() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/A.md", source: "# Late")
+        let w = await chooserWorkspace(f)
+        let gate = PlanningWorkspaceTestGate()
+        w.afterInspectorRead = { await gate.wait() }
+        let task = Task { try await choose("Projects/A.md", fixture: f, workspace: w) }
+        await gate.waitForEntry()
+        w.inspectNode(id: "root")
+        await gate.release()
+        try await task.value
+        XCTAssertNil(w.inspectorNoteSource)
+        XCTAssertEqual(w.inspectorNode?.id, "root")
+    }
+
+    func testDocumentRetryCannotCrossVaultGeneration() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        let w = await chooserWorkspace(f)
+        try writeNote(f, path: "Projects/Broken.canvas", source: "broken")
+        try await choose("Projects/Broken.canvas", fixture: f, workspace: w)
+        let replacement = try fixture(); registerTeardown(for: replacement)
+        _ = try await f.store.attachExisting(selection: replacement.selection)
+        await w.retry()
+        XCTAssertEqual(w.lastFailure, .needsReselection)
+        XCTAssertNotEqual(w.openedPath?.value, "Projects/Broken.canvas")
+    }
+
+    func testDocumentChooserDoesNotMutateVaultContents() async throws {
+        let f = try fixture(); registerTeardown(for: f)
+        try writeNote(f, path: "Projects/A.md", source: "# Untouched")
+        let w = await chooserWorkspace(f)
+        func contents() throws -> [String: Data] {
+            let base = f.root.appendingPathComponent("LifeOS")
+            var result: [String: Data] = [:]
+            for path in try FileManager.default.subpathsOfDirectory(atPath: base.path) {
+                let url = base.appendingPathComponent(path)
+                let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+                result[path] = values.isRegularFile == true ? try Data(contentsOf: url) : Data()
+            }
+            return result
+        }
+        let before = try contents()
+        try await choose("Projects/A.md", fixture: f, workspace: w)
+        await w.refreshInspectorNote()
+        w.closeInspectorNote()
+        try await choose("Projects/Personal.canvas", fixture: f, workspace: w)
+        XCTAssertEqual(try contents(), before)
+        let status = try await f.store.status()
+        XCTAssertEqual(status.pendingMutationCount, 0)
+    }
+
     private struct Fixture {
         let root: URL
         let support: URL
