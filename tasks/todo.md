@@ -1,7 +1,7 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-22 Europe/Berlin. Release: NO-GO.
-Current checkpoint: 4ff27e3.
+Current source checkpoint: 86baaa8; main and origin/main are synchronized.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -68,12 +68,20 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   after Astra PASS. Main macOS evidence is 405/405 full and 19/19 focused;
   final worker iOS focused evidence is 18/18 and generic iOS builds pass.
 
+- P06-B planning workspace transaction checkpoint: `86baaa8` source with
+  synchronized documentation. Read-only Calendar-to-Obsidian Canvas routing,
+  bounded composite/pending/decision selection persistence, revoke durability,
+  initialize/attach/restore resource ordering, journal readiness, and mirrored
+  failure regressions are implemented. Astra medium review passed; focused
+  Xcode 27 evidence is 107/107 macOS and 62/62 iOS simulator tests.
+
 ## Ordered implementation
 
 1. P04 adapts finance, fitness, nutrition,
    supplements and lifestyle stores with local durability before acknowledgement.
-2. P06-B adds native Canvas routing/inspector/vault integration after accepted P01/P05
-   contracts; no worker may guess CP-B adapter identities.
+2. P06-B continues with native Canvas routing/inspector/vault integration after
+   the accepted transaction workspace checkpoint; no worker may guess CP-B
+   adapter identities.
 3. P07 shared visual/motion primitives; P08 calendar; P09 finance; P10 fitness;
    P11 HealthKit/Zepp provenance; P12 usage; P13 tax; P14 widgets/intents.
 4. P15 security/dead-path hardening; P16 composition and target membership.

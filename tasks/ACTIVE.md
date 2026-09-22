@@ -1,13 +1,14 @@
 # Active LifeOS execution
 
 Status: IN PROGRESS — P00/P01/P02/P03 calendar, P04 training payload, P05
-D1 graph/session, Xcode 27 compatibility, and bounded P06-A native Canvas
-checkpoint complete; CP-B adapters paused; release NO-GO,
+D1 graph/session, Xcode 27 compatibility, bounded P06-A native Canvas, and
+P06-B planning workspace transaction checkpoint complete; CP-B adapters paused;
+release NO-GO,
 updated 2026-09-22.
 
 ## Current checkpoint
 
-main and local origin/main match at 4ff27e3.
+main and local origin/main match and include P06-B source checkpoint 86baaa8.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
 The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
 75 missing states. It is evidence-led, not a completion percentage.
@@ -46,12 +47,19 @@ metadata migration, command-to-wire identity persistence, signing/sequence
 ownership, and training tombstone semantics are absent or unsealed. P05 graph
 review may advance independently; no worker may guess these interfaces.
 
+P06-B now has a pushed read-only Calendar-to-Obsidian Canvas workspace with
+durable selection transaction recovery and prepare-before-publish journal
+handoff. Mac focused evidence is 107/107 and iOS simulator focused evidence is
+62/62; real vault round trip, native graph gestures, CP-B transport, and device
+evidence remain open.
+
 ## Next execution
 
 1. P04: finance, fitness, nutrition and local-record adapters
    with local durability before acknowledgement.
-2. P06-B: native graph/vault routing and inspector UI after P01/P05; retain the CP-B adapter pause until
-   shared persistence identities and tombstones are sealed.
+2. P06-B: native graph/vault routing, inspector UI, and real-vault round trip
+   after the transaction workspace checkpoint; retain the CP-B adapter pause
+   until shared persistence identities and tombstones are sealed.
 3. P07-P16: visual/motion system, screen migration, widgets, providers,
    security cleanup, and target composition.
 4. P17/P18: Windows/live-provider, physical-device, and final evidence only

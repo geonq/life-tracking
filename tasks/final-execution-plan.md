@@ -1,8 +1,8 @@
 # LifeOS final execution plan
 
-Updated 2026-09-21 Europe/Berlin. Authoritative design remains in
+Updated 2026-09-22 Europe/Berlin. Authoritative design remains in
 artifacts/blueprint/20260921, with R20-06-DISPATCH as the latest contract
-precedence. Current base is 328b18e16bcbb5856db40b0ffd3f90101a051096.
+precedence. Current implementation checkpoint is 86baaa8.
 Release is NO-GO.
 
 ## Rules

@@ -14,10 +14,9 @@ evidence are still open.
 
 ## Current truth
 
-- `main` and `origin/main` point to `80c5663` (`docs: record P06-B
-  transaction checkpoint`), with P06-B source at `86baaa8` immediately below.
-- The same P06-B source and documentation history is available on
-  `codex/p06-b`.
+- `main` and `origin/main` are synchronized with the validated P06-B
+  documentation checkpoint; P06-B source is `86baaa8` in that history.
+- `codex/p06-b` is synchronized with the same source and documentation state.
 - The P00 ledger remains acceptance truth: 258 leaves, 7 aliases, pending evidence.
 - P01: `a21ccf3`, `673dc0a`; P02: `038cd37`; P03 durable calendar: `9d222ac`.
 - P04 payload boundary: `b0e52e1`; durable fitness adapters remain open.
