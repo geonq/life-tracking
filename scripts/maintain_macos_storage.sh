@@ -67,8 +67,15 @@ show_size() {
     local path="$2"
     if [[ -e "$path" ]]; then
         local size
-        size="$(/usr/bin/du -sh "$path" 2>/dev/null | /usr/bin/awk '{print $1}')"
-        builtin printf '%s: %s\n' "$label" "${size:-unknown}"
+        if size="$(/usr/bin/du -sh "$path" 2>/dev/null | /usr/bin/awk 'NR == 1 {print $1; exit}')"; then
+            builtin printf '%s: %s\n' "$label" "${size:-unknown}"
+        else
+            if [[ -n "$size" ]]; then
+                builtin printf '%s: %s (partial)\n' "$label" "$size"
+            else
+                builtin printf '%s: unknown/partial\n' "$label"
+            fi
+        fi
     else
         builtin printf '%s: absent\n' "$label"
     fi
