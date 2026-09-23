@@ -178,7 +178,8 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
     private Task? monitorTask;
     private Task? startupTask;
     private Task[] pumps = Array.Empty<Task>();
-    private bool stopRequested;
+    private Task[] pumpObservers = Array.Empty<Task>();
+    private int stopRequested;
     private bool started;
 
     public ChildSupervisor(
@@ -224,6 +225,11 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
                 PumpAsync(child.StandardOutput, "stdout", stopping.Token),
                 PumpAsync(child.StandardError, "stderr", stopping.Token)
             ];
+            pumpObservers =
+            [
+                ObservePumpFailureAsync(pumps[0]),
+                ObservePumpFailureAsync(pumps[1])
+            ];
 
             // The generic host does not expose the service as started to SCM
             // until every hosted service has returned from StartAsync. Keep
@@ -253,7 +259,7 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
         }
         catch
         {
-            stopRequested = true;
+            Interlocked.Exchange(ref stopRequested, 1);
             stopping.Cancel();
             try
             {
@@ -271,7 +277,7 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        stopRequested = true;
+        Interlocked.Exchange(ref stopRequested, 1);
         stopping.Cancel();
         await StopChildAsync().ConfigureAwait(false);
 
@@ -306,6 +312,7 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        Interlocked.Exchange(ref stopRequested, 1);
         stopping.Cancel();
         await StopChildAsync().ConfigureAwait(false);
         stopping.Dispose();
@@ -316,10 +323,9 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
         try
         {
             await exitTask.ConfigureAwait(false);
-            if (!stopRequested)
+            if (Volatile.Read(ref stopRequested) == 0)
             {
-                failureSignal.FailService();
-                applicationLifetime.StopApplication();
+                SignalFailureAndStop();
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -333,6 +339,7 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
         var process = child;
         if (process is null)
         {
+            await DrainPumpTasksAsync().ConfigureAwait(false);
             if (logs is not null)
             {
                 await logs.DisposeAsync().ConfigureAwait(false);
@@ -374,7 +381,7 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
             {
                 try
                 {
-                    await Task.WhenAll(pumps).ConfigureAwait(false);
+                    await DrainPumpTasksAsync().ConfigureAwait(false);
                 }
                 catch (Exception)
                 {
@@ -394,6 +401,8 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
     private async Task PumpAsync(StreamReader reader, string streamName, CancellationToken cancellationToken)
     {
         var buffer = new char[4096];
+        var sink = logs;
+        var completion = LogStreamCompletion.Aborted;
         try
         {
             while (true)
@@ -401,12 +410,20 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
                 var count = await reader.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
                 if (count == 0)
                 {
+                    completion = LogStreamCompletion.EndOfStream;
                     break;
                 }
 
-                if (logs is not null)
+                try
                 {
-                    await logs.WriteAsync(streamName, buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+                    if (sink is not null)
+                    {
+                        await sink.WriteAsync(streamName, buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    Array.Clear(buffer, 0, count);
                 }
             }
         }
@@ -414,9 +431,103 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
         {
             // Expected on service stop.
         }
-        catch (ObjectDisposedException)
+        catch (ObjectDisposedException) when (Volatile.Read(ref stopRequested) != 0)
         {
             // The child stream closed while the process was being stopped.
+        }
+        finally
+        {
+            Array.Clear(buffer, 0, buffer.Length);
+            if (sink is not null)
+            {
+                await sink.CompleteAsync(streamName, completion, CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task ObservePumpFailureAsync(Task pump)
+    {
+        try
+        {
+            await pump.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+        {
+            // Expected when the service is stopping.
+        }
+        catch (ObjectDisposedException) when (Volatile.Read(ref stopRequested) != 0)
+        {
+            // The child stream closed during service shutdown.
+        }
+        catch (Exception)
+        {
+            // Never include child output or exception text in service failure handling.
+            SignalFailureAndStop();
+        }
+    }
+
+    private void SignalFailureAndStop()
+    {
+        if (Interlocked.CompareExchange(ref stopRequested, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            failureSignal.FailService();
+        }
+        catch
+        {
+            // Continue shutdown even if the failure marker cannot be written.
+        }
+
+        try
+        {
+            startupGate.ReportFailure(new InvalidOperationException("Child supervision failed."));
+        }
+        catch
+        {
+            // Keep readiness fail-closed without exposing child output.
+        }
+
+        try
+        {
+            stopping.Cancel();
+        }
+        catch
+        {
+            // Application shutdown below remains the final stop request.
+        }
+
+        try
+        {
+            applicationLifetime.StopApplication();
+        }
+        catch
+        {
+            // The host can still observe the failed service exit code.
+        }
+    }
+
+    private async Task DrainPumpTasksAsync()
+    {
+        try
+        {
+            await Task.WhenAll(pumps).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Pump failures are handled immediately by their observers.
+        }
+
+        try
+        {
+            await Task.WhenAll(pumpObservers).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Ensure no observer remains detached during child shutdown.
         }
     }
 

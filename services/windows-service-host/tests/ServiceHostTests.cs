@@ -281,6 +281,170 @@ public sealed class ServiceHostTests
     }
 
     [Fact]
+    public void RedactorRecognizesEveryAliasAndValueFormat()
+    {
+        var cases = new (string Input, string Expected, string Secret)[]
+        {
+            ("password=ALIAS_SENTINEL, safe", "password=[REDACTED], safe", "ALIAS_SENTINEL"),
+            ("passwd: 'ALIAS_SENTINEL'; safe", "passwd: '[REDACTED]'; safe", "ALIAS_SENTINEL"),
+            ("token = \"ALIAS_SENTINEL\", safe", "token = \"[REDACTED]\", safe", "ALIAS_SENTINEL"),
+            ("{\"access_token\":\"ALIAS_SENTINEL\"}", "{\"access_token\":\"[REDACTED]\"}", "ALIAS_SENTINEL"),
+            ("refresh_token:'ALIAS_SENTINEL',safe", "refresh_token:'[REDACTED]',safe", "ALIAS_SENTINEL"),
+            ("secret=ALIAS_SENTINEL; safe", "secret=[REDACTED]; safe", "ALIAS_SENTINEL"),
+            ("apikey=ALIAS_SENTINEL, safe", "apikey=[REDACTED], safe", "ALIAS_SENTINEL"),
+            ("api-key=ALIAS_SENTINEL, safe", "api-key=[REDACTED], safe", "ALIAS_SENTINEL"),
+            ("api_key=ALIAS_SENTINEL, safe", "api_key=[REDACTED], safe", "ALIAS_SENTINEL"),
+            ("Authorization: ALIAS_SENTINEL, safe", "Authorization: [REDACTED], safe", "ALIAS_SENTINEL"),
+            ("ToKeN=ALIAS_SENTINEL, safe", "ToKeN=[REDACTED], safe", "ALIAS_SENTINEL"),
+            ("Bearer ALIAS_SENTINEL, safe", "Bearer [REDACTED], safe", "ALIAS_SENTINEL"),
+            ("safe text stays visible", "safe text stays visible", "ALIAS_SENTINEL"),
+            ("x-token=ALIAS_SENTINEL", "x-token=[REDACTED]", "ALIAS_SENTINEL"),
+        };
+
+        foreach (var (input, expected, secret) in cases)
+        {
+            var output = SecretRedactor.Redact(input);
+            Assert.Equal(expected, output);
+            Assert.DoesNotContain(secret, output, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void RedactorPreservesLabelsAndRedactsMultipleValues()
+    {
+        const string input = "{\"token\":\"FIRST_SENTINEL\", password : 'SECOND_SENTINEL'; safe}";
+        const string expected = "{\"token\":\"[REDACTED]\", password : '[REDACTED]'; safe}";
+
+        var output = SecretRedactor.Redact(input);
+
+        Assert.Equal(expected, output);
+        Assert.DoesNotContain("FIRST_SENTINEL", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("SECOND_SENTINEL", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RedactorHandlesMultilineWhitespaceAndBearerCredentials()
+    {
+        var cases = new (string Input, string Expected)[]
+        {
+            ("token\n : \n MULTILINE_SENTINEL, visible", "token\n : \n [REDACTED], visible"),
+            ("{\"access_token\"\n :\n \"MULTILINE_SENTINEL\"}", "{\"access_token\"\n :\n \"[REDACTED]\"}"),
+            ("authorization=Bearer SECRET_SENTINEL tail, visible", "authorization=[REDACTED], visible"),
+            ("token=Bearer SECRET_SENTINEL tail, visible", "token=[REDACTED], visible"),
+            ("Bearer\nSECRET_SENTINEL, visible", "Bearer\n[REDACTED], visible"),
+        };
+
+        foreach (var (input, expected) in cases)
+        {
+            var output = SecretRedactor.Redact(input);
+            Assert.Equal(expected, output);
+            Assert.DoesNotContain("SECRET_SENTINEL", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("MULTILINE_SENTINEL", output, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void RedactorCarriesQuotedEscapeStateAndSuppressesUnterminatedValues()
+    {
+        const string escaped = "token=\"safe-prefix\\\"ESCAPED_SENTINEL-suffix\", visible";
+        const string unterminated = "token='UNTERMINATED_SENTINEL";
+
+        var escapedOutput = SecretRedactor.Redact(escaped);
+        var unterminatedOutput = SecretRedactor.Redact(unterminated);
+
+        Assert.Equal("token=\"[REDACTED]\", visible", escapedOutput);
+        Assert.Equal("token='[REDACTED]", unterminatedOutput);
+        Assert.DoesNotContain("ESCAPED_SENTINEL", escapedOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNTERMINATED_SENTINEL", unterminatedOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RedactorProducesIdenticalOutputAtEveryRepresentativeSplitBoundary()
+    {
+        var fixtures = new (string Input, string Expected)[]
+        {
+            ("prefix token=BOUNDARY_SENTINEL, suffix", "prefix token=[REDACTED], suffix"),
+            ("{\"access_token\" : \"BOUNDARY_SENTINEL\"}", "{\"access_token\" : \"[REDACTED]\"}"),
+            ("api-key\n=\n'BOUNDARY_SENTINEL'; safe", "api-key\n=\n'[REDACTED]'; safe"),
+            ("token=\"left\\\"BOUNDARY_SENTINEL-right\",safe", "token=\"[REDACTED]\",safe"),
+            ("Bearer BOUNDARY_SENTINEL, safe", "Bearer [REDACTED], safe"),
+        };
+
+        foreach (var (input, expected) in fixtures)
+        {
+            for (var split = 0; split <= input.Length; split++)
+            {
+                var parser = SecretRedactor.CreateStream();
+                var output = parser.Append(input.AsMemory(0, split))
+                    + parser.Append(input.AsMemory(split))
+                    + parser.Complete();
+
+                Assert.Equal(expected, output);
+                Assert.DoesNotContain("BOUNDARY_SENTINEL", output, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    [Fact]
+    public void RedactorMatchesAcrossEverySupportedBoundedChunkSize()
+    {
+        const int lineCount = 180;
+        var input = string.Join("\n", Enumerable.Repeat("event=ok token=CHUNK_SENTINEL, safe", lineCount));
+        var expected = string.Join("\n", Enumerable.Repeat("event=ok token=[REDACTED], safe", lineCount));
+
+        for (var chunkSize = 1; chunkSize <= SecretRedactor.MaximumChunkLength; chunkSize++)
+        {
+            var parser = SecretRedactor.CreateStream();
+            var output = new StringBuilder(input.Length);
+            for (var offset = 0; offset < input.Length;)
+            {
+                var count = Math.Min(chunkSize, input.Length - offset);
+                output.Append(parser.Append(input.AsMemory(offset, count)));
+                offset += count;
+            }
+
+            output.Append(parser.Complete());
+            Assert.Equal(expected, output.ToString());
+            Assert.DoesNotContain("CHUNK_SENTINEL", output.ToString(), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void RedactorStreamEnforcesBoundedChunksAndCompletion()
+    {
+        var parser = SecretRedactor.CreateStream();
+        var tooLarge = new string('x', SecretRedactor.MaximumChunkLength + 1);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => parser.Append(tooLarge.AsMemory()));
+        Assert.Equal(string.Empty, parser.Append("tok".AsMemory()));
+        var completion = parser.Complete();
+
+        Assert.Equal("tok", completion);
+        Assert.Equal(completion, parser.Complete());
+        Assert.Throws<InvalidOperationException>(() => parser.Append(ReadOnlyMemory<char>.Empty));
+
+        var valueParser = SecretRedactor.CreateStream();
+        Assert.Equal("token=[REDACTED]", valueParser.Append("token=PARTIAL".AsMemory()));
+        Assert.Equal(string.Empty, valueParser.Complete());
+    }
+
+    [Fact]
+    public void RedactorWrapperMatchesStreamingParser()
+    {
+        const string input = "safe \"access_token\" : \"WRAPPER_SENTINEL\", token=SECOND_WRAPPER_SENTINEL\nBearer THIRD_WRAPPER_SENTINEL";
+
+        var wrapped = SecretRedactor.Redact(input);
+        var parser = SecretRedactor.CreateStream();
+        var streamed = parser.Append(input.AsMemory(0, 7))
+            + parser.Append(input.AsMemory(7, 19))
+            + parser.Append(input.AsMemory(26))
+            + parser.Complete();
+
+        Assert.Equal(wrapped, streamed);
+        Assert.DoesNotContain("WRAPPER_SENTINEL", streamed, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ReadinessPayloadMustBeTheExactServiceContract()
     {
         Assert.True(LoopbackHealthProbe.IsExactReadyPayload(Encoding.UTF8.GetBytes("{\"readiness\":\"ready\"}")));
@@ -339,6 +503,131 @@ public sealed class ServiceHostTests
 
         await Assert.ThrowsAsync<TimeoutException>(() => waitTask).WaitAsync(TimeSpan.FromSeconds(3));
         Assert.True(gate.StartupCancellationToken.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task RotatingLogsRedactStreamingSplitAndCrLf()
+    {
+        using var fixture = TestFixture.Create();
+        var options = fixture.Options(maxBytes: 100_000, maxFiles: 3);
+        await using (var sink = new RotatingLogSink(options))
+        {
+            await Assert.ThrowsAsync<ArgumentException>(() =>
+                sink.WriteAsync("unknown", "ignored\n".AsMemory(), CancellationToken.None));
+
+            await sink.WriteAsync("stdout", "safe-after-unknown\n".AsMemory(), CancellationToken.None);
+            await sink.WriteAsync("stdout", "tok".AsMemory(), CancellationToken.None);
+            await sink.WriteAsync("stdout", "en=CHUNK_".AsMemory(), CancellationToken.None);
+            await sink.WriteAsync("stdout", "SECRET\r".AsMemory(), CancellationToken.None);
+            await sink.WriteAsync("stdout", "\npassword=\"MULTILINE_SECRET\r".AsMemory(), CancellationToken.None);
+            await sink.WriteAsync("stdout", "\ncontinued-MULTILINE_SECRET\"\r\nlast-safe\n".AsMemory(), CancellationToken.None);
+            await sink.CompleteAsync("stdout", LogStreamCompletion.EndOfStream, CancellationToken.None);
+        }
+
+        var files = Directory.GetFiles(fixture.LogDirectory, "child.log*");
+        var persistedText = await File.ReadAllTextAsync(Assert.Single(files));
+
+        Assert.Equal(
+            "[stdout] safe-after-unknown\n[stdout] token=[REDACTED]\n[stdout] password=\"[REDACTED]\n[stdout] \"\n[stdout] last-safe\n",
+            persistedText);
+        Assert.DoesNotContain('\r', persistedText);
+        Assert.EndsWith("\n", persistedText);
+        Assert.DoesNotContain("CHUNK_SECRET", persistedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("MULTILINE_SECRET", persistedText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RotatingLogsEofFlushAbortDiscardAndLifecycle()
+    {
+        using var fixture = TestFixture.Create();
+        var options = fixture.Options(maxBytes: 100_000, maxFiles: 3);
+        string eofContents;
+
+        await using (var sink = new RotatingLogSink(options))
+        {
+            await sink.WriteAsync("stdout", "password=EOF_SECRET".AsMemory(), CancellationToken.None);
+            await sink.CompleteAsync("stdout", LogStreamCompletion.EndOfStream, CancellationToken.None);
+            await sink.CompleteAsync("stdout", LogStreamCompletion.EndOfStream, CancellationToken.None);
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                sink.WriteAsync("stdout", "late-write\n".AsMemory(), CancellationToken.None));
+        }
+
+        var logPath = Assert.Single(Directory.GetFiles(fixture.LogDirectory, "child.log*"));
+        eofContents = await File.ReadAllTextAsync(logPath);
+        Assert.Equal("[stdout] password=[REDACTED]\n", eofContents);
+        Assert.DoesNotContain("EOF_SECRET", eofContents, StringComparison.Ordinal);
+
+        await using (var sink = new RotatingLogSink(options))
+        {
+            await sink.WriteAsync("stdout", "password=ABORT_SECRET".AsMemory(), CancellationToken.None);
+            await sink.CompleteAsync("stdout", LogStreamCompletion.Aborted, CancellationToken.None);
+        }
+
+        Assert.Equal(eofContents, await File.ReadAllTextAsync(logPath));
+        Assert.DoesNotContain("ABORT_SECRET", await File.ReadAllTextAsync(logPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RotatingLogsSuppressOverflowAndRecover()
+    {
+        using var fixture = TestFixture.Create();
+        var options = fixture.Options(maxBytes: 100_000, maxFiles: 3);
+        const string marker = "[LOG LINE SUPPRESSED: SIZE LIMIT]";
+
+        await using (var sink = new RotatingLogSink(options))
+        {
+            await sink.WriteAsync("stdout", ("token=\"" + new string('x', 9_000)).AsMemory(), CancellationToken.None);
+            await sink.WriteAsync("stdout", new string('y', 8_000).AsMemory(), CancellationToken.None);
+            await sink.WriteAsync("stdout", "OVERFLOW_SECRET_SENTINEL\"\n".AsMemory(), CancellationToken.None);
+            await sink.WriteAsync("stdout", "safe-recovery\n".AsMemory(), CancellationToken.None);
+
+            var expansionInput = string.Join(';', Enumerable.Repeat("token=Q", 1_100));
+            Assert.True(expansionInput.Length < 16_384);
+            Assert.True(1_100 * "token=[REDACTED]".Length + 1_099 > 16_384);
+            await sink.WriteAsync("stdout", (expansionInput + "\n").AsMemory(), CancellationToken.None);
+            await sink.WriteAsync("stdout", "safe-after-expansion\n".AsMemory(), CancellationToken.None);
+            await sink.CompleteAsync("stdout", LogStreamCompletion.EndOfStream, CancellationToken.None);
+        }
+
+        var logPath = Assert.Single(Directory.GetFiles(fixture.LogDirectory, "child.log*"));
+        var persistedText = await File.ReadAllTextAsync(logPath);
+        Assert.Equal(
+            new[]
+            {
+                $"[stdout] {marker}",
+                "[stdout] safe-recovery",
+                $"[stdout] {marker}",
+                "[stdout] safe-after-expansion",
+                string.Empty,
+            },
+            persistedText.Split('\n'));
+        Assert.Equal(2, persistedText.Split(marker, StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("OVERFLOW_SECRET_SENTINEL", persistedText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RotatingLogSinkFailsClosedOnOutputFileIoError()
+    {
+        using var fixture = TestFixture.Create();
+        var options = fixture.Options(maxBytes: 100_000, maxFiles: 3);
+        var logPath = Path.Combine(fixture.LogDirectory, "child.log");
+        Directory.CreateDirectory(logPath);
+
+        await using var sink = new RotatingLogSink(options);
+        var exception = await Assert.ThrowsAsync<IOException>(() =>
+            sink.WriteAsync("stdout", "token=IO_FAILURE_SECRET\n".AsMemory(), CancellationToken.None));
+
+        Assert.Equal("The log sink failed.", exception.Message);
+        Assert.DoesNotContain("IO_FAILURE_SECRET", exception.ToString(), StringComparison.Ordinal);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            sink.WriteAsync("stdout", "safe-after-failure\n".AsMemory(), CancellationToken.None));
+        await sink.DisposeAsync();
+
+        foreach (var file in Directory.GetFiles(fixture.LogDirectory, "child.log*"))
+        {
+            Assert.DoesNotContain("IO_FAILURE_SECRET", file, StringComparison.Ordinal);
+            Assert.DoesNotContain("IO_FAILURE_SECRET", await File.ReadAllTextAsync(file), StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -449,6 +738,41 @@ public sealed class ServiceHostTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => supervisor.StartAsync(CancellationToken.None));
         Assert.Equal(0, child.GracefulRequests);
         Assert.NotNull(startupGate.Failure);
+    }
+
+    [Fact]
+    public async Task SupervisorStopsOnUnexpectedLogPumpFailureWithoutLeakingOutput()
+    {
+        using var fixture = TestFixture.Create();
+        const string secret = "PUMP_FAILURE_SECRET";
+        var child = new FakeChildProcess(exitOnGraceful: true, outputText: $"token={secret}\n");
+        var health = new BlockingHealthProbe();
+        var lifetime = new FakeHostLifetime();
+        var failure = new FakeFailureSignal();
+        var startupGate = new FakeServiceStartupGate();
+        var supervisor = fixture.Supervisor(
+            new FakeChildFactory(child),
+            health,
+            lifetime,
+            failure,
+            logFactory: new FailingLogSinkFactory(secret),
+            startupGate: startupGate);
+
+        var startTask = supervisor.StartAsync(CancellationToken.None);
+        await lifetime.StopRequested.WaitAsync(TimeSpan.FromSeconds(3));
+        var startException = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => startTask.WaitAsync(TimeSpan.FromSeconds(3)));
+
+        Assert.DoesNotContain(secret, startException.ToString(), StringComparison.Ordinal);
+        Assert.True(failure.Failed);
+        Assert.True(lifetime.StopCalled);
+        Assert.True(child.GracefulRequests > 0);
+        Assert.False(startupGate.Ready);
+        Assert.NotNull(startupGate.Failure);
+        Assert.DoesNotContain(secret, startupGate.Failure!.ToString(), StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFiles(fixture.LogDirectory, "child.log*"));
+
+        await supervisor.StopAsync(CancellationToken.None);
     }
 
     [Fact]
@@ -624,6 +948,23 @@ public sealed class ServiceHostTests
     private sealed class FakeLogSink : IRotatingLogSink
     {
         public Task WriteAsync(string streamName, ReadOnlyMemory<char> text, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CompleteAsync(string streamName, LogStreamCompletion completion, CancellationToken cancellationToken) => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class FailingLogSinkFactory(string secret) : IRotatingLogSinkFactory
+    {
+        public IRotatingLogSink Create(ServiceHostOptions options) => new FailingLogSink(secret);
+    }
+
+    private sealed class FailingLogSink(string secret) : IRotatingLogSink
+    {
+        public Task WriteAsync(string streamName, ReadOnlyMemory<char> text, CancellationToken cancellationToken)
+            => Task.FromException(new IOException($"Synthetic sink failure: {secret}"));
+
+        public Task CompleteAsync(string streamName, LogStreamCompletion completion, CancellationToken cancellationToken)
+            => Task.CompletedTask;
+
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
@@ -657,10 +998,12 @@ public sealed class ServiceHostTests
     private sealed class FakeHostLifetime : IHostApplicationLifetime
     {
         private readonly CancellationTokenSource stopped = new();
+        private readonly TaskCompletionSource stopRequested = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public CancellationToken ApplicationStarted => CancellationToken.None;
         public CancellationToken ApplicationStopping => CancellationToken.None;
         public CancellationToken ApplicationStopped => stopped.Token;
         public bool StopCalled { get; private set; }
-        public void StopApplication() { StopCalled = true; stopped.Cancel(); }
+        public Task StopRequested => stopRequested.Task;
+        public void StopApplication() { StopCalled = true; stopRequested.TrySetResult(); stopped.Cancel(); }
     }
 }
