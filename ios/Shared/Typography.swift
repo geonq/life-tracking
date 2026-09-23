@@ -17,6 +17,7 @@ public enum LifeOSTypography {
     public enum Role: CaseIterable, Hashable {
         case pageTitle
         case sectionTitle
+        case sheetTitle
         case cardTitle
         case body
         case label
@@ -31,6 +32,7 @@ public enum LifeOSTypography {
             switch self {
             case .pageTitle: 22
             case .sectionTitle: 15
+            case .sheetTitle: 18
             case .cardTitle: 14
             case .body: 13
             case .label, .button: 13
@@ -43,6 +45,7 @@ public enum LifeOSTypography {
             switch self {
             case .pageTitle: 24
             case .sectionTitle: 18
+            case .sheetTitle: 20
             case .cardTitle: 16
             case .body: 17
             case .label, .button: 15
@@ -57,7 +60,7 @@ public enum LifeOSTypography {
         public var defaultWeight: Font.Weight {
             switch self {
             case .pageTitle, .inlineMonitoringValue: .semibold
-            case .sectionTitle, .cardTitle, .metric, .metricCompact, .button: .semibold
+            case .sectionTitle, .sheetTitle, .cardTitle, .metric, .metricCompact, .button: .semibold
             case .body, .metadata: .regular
             case .label: .medium
             }
@@ -66,7 +69,7 @@ public enum LifeOSTypography {
         public var dynamicTypeAnchor: Font.TextStyle {
             switch self {
             case .pageTitle: .title
-            case .sectionTitle: .title2
+            case .sectionTitle, .sheetTitle: .title2
             case .cardTitle: .headline
             case .body: .body
             case .label: .subheadline
@@ -81,9 +84,14 @@ public enum LifeOSTypography {
         public var tracking: CGFloat {
             switch self {
             case .pageTitle: -0.3
-            case .sectionTitle, .metric, .metricCompact,
+            case .metric: -0.4
+            case .sectionTitle, .sheetTitle, .metricCompact,
                  .cardTitle, .body, .label, .metadata, .inlineMonitoringValue, .button: 0
             }
+        }
+
+        public func resolvedTracking(for dynamicTypeSize: DynamicTypeSize) -> CGFloat {
+            dynamicTypeSize.isAccessibilitySize ? 0 : tracking
         }
 
         public var lineSpacing: CGFloat {
@@ -125,7 +133,7 @@ public enum LifeOSTypography {
 
         @ViewBuilder
         public func body(content: Content) -> some View {
-            let tracking = dynamicTypeSize.isAccessibilitySize ? 0 : role.tracking
+            let tracking = role.resolvedTracking(for: dynamicTypeSize)
             if role.usesMonospacedDigits {
                 content
                     .font(.system(size: scaledSize, weight: weight, design: .default))

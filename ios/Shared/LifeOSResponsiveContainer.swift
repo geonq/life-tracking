@@ -12,17 +12,14 @@ public enum LifeOSResponsiveContentAlignment: Equatable, Sendable {
 /// pure so column and viewport decisions can be unit-tested without
 /// instantiating a view.
 public struct LifeOSResponsiveMetrics: Equatable, Sendable {
-    /// Compact controls remain appropriate below this width. This is
-    /// independent from the two-column capability boundary.
-    public static let compactBreakpoint: CGFloat = 600
+    /// Content narrower than this remains in compact layout after sidebar
+    /// and page gutters have been removed.
+    public static let compactBreakpoint: CGFloat = 720
 
     /// The usable content width at which a page may choose a two-column
     /// composition. Gutters and the sidebar are removed before this threshold
     /// is evaluated.
     public static let twoColumnBreakpoint: CGFloat = 720
-
-    /// The Mac window width at which the page gutter grows from 24pt to 32pt.
-    public static let wideMacGutterBreakpoint: CGFloat = 1_512
 
     /// The maximum width for a standard page frame (1040pt on desktop).
     /// Keeping this in the shared metrics makes width decisions measurable
@@ -59,14 +56,11 @@ public struct LifeOSResponsiveMetrics: Equatable, Sendable {
         max(0, width - sidebarWidth)
     }
 
-    public var isCompact: Bool { availableWidth < Self.compactBreakpoint }
+    public var isCompact: Bool { contentWidth < Self.compactBreakpoint }
     public var supportsTwoColumnLayout: Bool { contentWidth >= Self.twoColumnBreakpoint }
 
     public var nominalHorizontalGutter: CGFloat {
-#if os(macOS)
-        if width >= Self.wideMacGutterBreakpoint { return 32 }
-#endif
-        return LifeOSTokens.pageGutter
+        LifeOSTokens.pageGutter
     }
 
     /// The rendered gutter is capped when an invalidly narrow proposal cannot

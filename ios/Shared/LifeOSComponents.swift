@@ -174,7 +174,7 @@ public struct LifeOSIconButton: View {
         action: @escaping () -> Void
     ) {
         self.init(
-            systemName: icon.systemImageName,
+            systemName: icon.resolvedSystemImageName,
             accessibilityLabel: accessibilityLabel ?? icon.accessibilityLabel,
             size: size,
             tint: tint,
@@ -205,6 +205,7 @@ public struct LifeOSIconButton: View {
         .focused($isFocused)
         .contentShape(Rectangle())
         .accessibilityLabel(Text(label))
+        .help(label)
     }
 }
 
@@ -1239,20 +1240,46 @@ public struct LifeOSEmptyStatePanel: View {
 // MARK: - Canonical sheet surface
 
 /// Pure sheet geometry constants shared by the native presentation and its
-/// regression tests. macOS measures the usable height of the presenting
-/// window and passes that value into the layout; the finite fallback keeps
+/// regression tests. macOS measures usable width and height bounds from the
+/// presenting window and passes them into the layout; finite fallbacks keep
 /// ideal-size measurement safe before the sheet is attached to a window.
 public enum LifeOSSheetGeometry {
     public static let macStandardWidth: CGFloat = 520
-    public static let macMaximumHeightFraction: CGFloat = 0.80
+    public static let macMinimumWidth: CGFloat = 420
+    public static let macMaximumWidth: CGFloat = 600
+    public static let macSafeWidthInset: CGFloat = 48
+    public static let macFallbackAvailableWidth: CGFloat = 720
+    public static let macMaximumHeightCap: CGFloat = 760
     public static let macSafeHeightInset: CGFloat = 48
     public static let macFallbackAvailableHeight: CGFloat = 720
 
-    public static func macWidth(for availableWidth: CGFloat) -> CGFloat {
-        guard availableWidth.isFinite else {
-            return availableWidth == .infinity ? macStandardWidth : 0
+    public static func macInitialAvailableWidth(screenVisibleWidth: CGFloat?) -> CGFloat {
+        guard let screenVisibleWidth,
+              screenVisibleWidth.isFinite,
+              screenVisibleWidth > 0 else {
+            return macFallbackAvailableWidth
         }
-        return min(max(0, availableWidth), macStandardWidth)
+        return screenVisibleWidth
+    }
+
+    public struct MacWidthBounds {
+        public let minimum: CGFloat
+        public let preferred: CGFloat
+        public let maximum: CGFloat
+    }
+
+    public static func macWidthBounds(for availableWidth: CGFloat) -> MacWidthBounds {
+        let clearance: CGFloat
+        if availableWidth.isFinite {
+            clearance = max(0, availableWidth - macSafeWidthInset)
+        } else {
+            clearance = availableWidth == .infinity ? .infinity : 0
+        }
+
+        let minimum = min(macMinimumWidth, clearance)
+        let maximum = min(macMaximumWidth, clearance)
+        let preferred = min(max(macStandardWidth, minimum), maximum)
+        return MacWidthBounds(minimum: minimum, preferred: preferred, maximum: maximum)
     }
 
     public static func macAvailableHeight(for measuredHeight: CGFloat?) -> CGFloat {
@@ -1271,16 +1298,18 @@ public enum LifeOSSheetGeometry {
         let boundedHeight = macAvailableHeight(for: availableHeight)
         let boundedInset = safeInset.isFinite ? max(0, safeInset) : macSafeHeightInset
         let safeHeight = max(0, boundedHeight - boundedInset)
-        return safeHeight * macMaximumHeightFraction
+        return min(macMaximumHeightCap, safeHeight)
     }
 }
 
 #if os(macOS)
 private final class LifeOSSheetWindowHeightView: NSView {
     var onHeightChange: ((CGFloat) -> Void)?
+    var onWidthChange: ((CGFloat) -> Void)?
 
     private var notificationTokens: [NSObjectProtocol] = []
     private var lastHeight: CGFloat?
+    private var lastWidth: CGFloat?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -1301,13 +1330,23 @@ private final class LifeOSSheetWindowHeightView: NSView {
     }
 
     func refresh() {
-        guard let measurementWindow = window?.sheetParent ?? window else { return }
+        guard let sheetWindow = window else { return }
+        let measurementWindow = sheetWindow.sheetParent ?? sheetWindow
         let measuredHeight = Self.usableHeight(of: measurementWindow)
-        guard measuredHeight.isFinite, measuredHeight > 0 else { return }
+        if measuredHeight.isFinite, measuredHeight > 0 {
+            if lastHeight.map({ abs($0 - measuredHeight) >= 0.5 }) ?? true {
+                lastHeight = measuredHeight
+                onHeightChange?(measuredHeight)
+            }
+        }
 
-        if let lastHeight, abs(lastHeight - measuredHeight) < 0.5 { return }
-        lastHeight = measuredHeight
-        onHeightChange?(measuredHeight)
+        guard let measuredWidth = Self.availableWidth(forSheetWindow: sheetWindow),
+              measuredWidth.isFinite,
+              measuredWidth > 0 else { return }
+        if lastWidth.map({ abs($0 - measuredWidth) >= 0.5 }) ?? true {
+            lastWidth = measuredWidth
+            onWidthChange?(measuredWidth)
+        }
     }
 
     override var intrinsicContentSize: NSSize { .zero }
@@ -1353,6 +1392,36 @@ private final class LifeOSSheetWindowHeightView: NSView {
         notificationTokens.forEach(center.removeObserver)
         notificationTokens.removeAll()
         lastHeight = nil
+        lastWidth = nil
+    }
+
+    private static func availableWidth(forSheetWindow sheetWindow: NSWindow) -> CGFloat? {
+        if let presenter = sheetWindow.sheetParent,
+           let presenterWidth = usableContentWidth(of: presenter) {
+            return presenterWidth
+        }
+
+        if let screenWidth = usableVisibleWidth(of: sheetWindow.screen) {
+            return screenWidth
+        }
+        return usableVisibleWidth(of: NSScreen.main)
+    }
+
+    private static func usableContentWidth(of presenter: NSWindow) -> CGFloat? {
+        let layoutWidth = presenter.contentLayoutRect.width
+        if layoutWidth.isFinite, layoutWidth > 0 {
+            return layoutWidth
+        }
+
+        let contentWidth = presenter.contentView?.bounds.width ?? 0
+        return contentWidth.isFinite && contentWidth > 0 ? contentWidth : nil
+    }
+
+    private static func usableVisibleWidth(of screen: NSScreen?) -> CGFloat? {
+        guard let width = screen?.visibleFrame.width,
+              width.isFinite,
+              width > 0 else { return nil }
+        return width
     }
 
     private static func usableHeight(of window: NSWindow) -> CGFloat {
@@ -1373,6 +1442,7 @@ private final class LifeOSSheetWindowHeightView: NSView {
 
 private struct LifeOSSheetWindowHeightReader: NSViewRepresentable {
     @Binding var availableHeight: CGFloat
+    @Binding var availableWidth: CGFloat
 
     func makeNSView(context: Context) -> LifeOSSheetWindowHeightView {
         LifeOSSheetWindowHeightView()
@@ -1380,20 +1450,28 @@ private struct LifeOSSheetWindowHeightReader: NSViewRepresentable {
 
     func updateNSView(_ nsView: LifeOSSheetWindowHeightView, context: Context) {
         let heightBinding = $availableHeight
+        let widthBinding = $availableWidth
         nsView.onHeightChange = { measuredHeight in
             let boundedHeight = LifeOSSheetGeometry.macAvailableHeight(for: measuredHeight)
             guard abs(heightBinding.wrappedValue - boundedHeight) >= 0.5 else { return }
             heightBinding.wrappedValue = boundedHeight
+        }
+        nsView.onWidthChange = { measuredWidth in
+            guard measuredWidth.isFinite, measuredWidth > 0,
+                  abs(widthBinding.wrappedValue - measuredWidth) >= 0.5 else { return }
+            widthBinding.wrappedValue = measuredWidth
         }
         nsView.scheduleRefresh()
     }
 
     static func dismantleNSView(_ nsView: LifeOSSheetWindowHeightView, coordinator: ()) {
         nsView.onHeightChange = nil
+        nsView.onWidthChange = nil
     }
 }
 
 private struct LifeOSSheetPresentationLayout: Layout {
+    let availableWidth: CGFloat
     let availableHeight: CGFloat
     let availableHeightInset: CGFloat
 
@@ -1404,7 +1482,22 @@ private struct LifeOSSheetPresentationLayout: Layout {
     ) -> CGSize {
         guard subviews.count >= 3 else { return .zero }
 
-        let width = proposal.width.map(LifeOSSheetGeometry.macWidth(for:))
+        let widthBounds = LifeOSSheetGeometry.macWidthBounds(for: availableWidth)
+        let candidateWidth: CGFloat
+        if let proposedWidth = proposal.width {
+            if proposedWidth.isFinite {
+                candidateWidth = proposedWidth
+            } else if proposedWidth == .infinity {
+                candidateWidth = widthBounds.maximum
+            } else if proposedWidth == -.infinity {
+                candidateWidth = widthBounds.minimum
+            } else {
+                candidateWidth = widthBounds.preferred
+            }
+        } else {
+            candidateWidth = widthBounds.preferred
+        }
+        let width = min(max(candidateWidth, widthBounds.minimum), widthBounds.maximum)
         let childProposal = ProposedViewSize(width: width, height: nil)
         let scrollSize = subviews[0].sizeThatFits(childProposal)
         let dividerSize = subviews[1].sizeThatFits(childProposal)
@@ -1416,9 +1509,7 @@ private struct LifeOSSheetPresentationLayout: Layout {
             safeInset: availableHeightInset
         )
         let height = min(safeNaturalHeight, availableBound)
-        let naturalWidth = max(scrollSize.width, max(dividerSize.width, footerSize.width))
-        let renderedWidth = width ?? LifeOSSheetGeometry.macWidth(for: naturalWidth)
-        return CGSize(width: renderedWidth, height: max(0, height))
+        return CGSize(width: width, height: max(0, height))
     }
 
     func placeSubviews(
@@ -1469,6 +1560,9 @@ public struct LifeOSSheet<Content: View, Footer: View>: View {
     @Environment(\.dismiss) private var dismiss
 #if os(macOS)
     @State private var macAvailableHeight = LifeOSSheetGeometry.macFallbackAvailableHeight
+    @State private var macAvailableWidth = LifeOSSheetGeometry.macInitialAvailableWidth(
+        screenVisibleWidth: NSScreen.main?.visibleFrame.width
+    )
 #endif
 
     public init(
@@ -1487,7 +1581,9 @@ public struct LifeOSSheet<Content: View, Footer: View>: View {
 
     public var body: some View {
 #if os(macOS)
+        let macWidthBounds = LifeOSSheetGeometry.macWidthBounds(for: macAvailableWidth)
         LifeOSSheetPresentationLayout(
+            availableWidth: macAvailableWidth,
             availableHeight: macAvailableHeight,
             availableHeightInset: LifeOSSheetGeometry.macSafeHeightInset
         ) {
@@ -1496,17 +1592,20 @@ public struct LifeOSSheet<Content: View, Footer: View>: View {
             footerContent
         }
         .frame(
-            minWidth: 0,
-            idealWidth: LifeOSSheetGeometry.macStandardWidth,
-            maxWidth: LifeOSSheetGeometry.macStandardWidth
+            minWidth: macWidthBounds.minimum,
+            idealWidth: macWidthBounds.preferred,
+            maxWidth: macWidthBounds.maximum
         )
         .background {
-            LifeOSSheetWindowHeightReader(availableHeight: $macAvailableHeight)
+            LifeOSSheetWindowHeightReader(
+                availableHeight: $macAvailableHeight,
+                availableWidth: $macAvailableWidth
+            )
                 .frame(width: 0, height: 0)
         }
 #elseif os(iOS)
         sheetStack
-            .presentationDetents([.medium, .large])
+            .presentationDetents([.large])
             .presentationDragIndicator(.visible)
 #else
         sheetStack
@@ -1541,7 +1640,7 @@ public struct LifeOSSheet<Content: View, Footer: View>: View {
         footer
             .frame(maxWidth: LifeOSTokens.proseMaxWidth, alignment: .trailing)
             .padding(.horizontal, LifeOSTokens.pageGutter)
-            .padding(.vertical, LifeOSTokens.Space.sm)
+            .padding(.vertical, LifeOSTokens.Space.md)
             .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
@@ -1550,7 +1649,7 @@ public struct LifeOSSheet<Content: View, Footer: View>: View {
         HStack(alignment: .top, spacing: LifeOSTokens.Space.md) {
             VStack(alignment: .leading, spacing: LifeOSTokens.labelHelperGap) {
                 Text(title)
-                    .lifeOSTypography(.sectionTitle)
+                    .lifeOSTypography(.sheetTitle)
                     .foregroundStyle(LifeOSTokens.primaryText)
                     .fixedSize(horizontal: false, vertical: true)
 

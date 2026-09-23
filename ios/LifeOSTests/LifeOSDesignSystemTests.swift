@@ -81,12 +81,13 @@ final class LifeOSDesignSystemTests: XCTestCase {
     }
 
     func testTypographyFacadeExposesEveryContractRole() {
-        XCTAssertEqual(LifeOSTypography.Role.allCases.count, 10)
+        XCTAssertEqual(LifeOSTypography.Role.allCases.count, 11)
         XCTAssertEqual(
             Set(LifeOSTypography.Role.allCases),
             Set([
                 .pageTitle,
                 .sectionTitle,
+                .sheetTitle,
                 .cardTitle,
                 .body,
                 .label,
@@ -188,6 +189,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
 #if os(macOS)
         let pageTitleSize: CGFloat = 22
         let sectionTitleSize: CGFloat = 15
+        let sheetTitleSize: CGFloat = 18
         let cardTitleSize: CGFloat = 14
         let bodySize: CGFloat = 13
         let labelSize: CGFloat = 13
@@ -199,6 +201,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
 #else
         let pageTitleSize: CGFloat = 24
         let sectionTitleSize: CGFloat = 18
+        let sheetTitleSize: CGFloat = 20
         let cardTitleSize: CGFloat = 16
         let bodySize: CGFloat = 17
         let labelSize: CGFloat = 15
@@ -211,11 +214,12 @@ final class LifeOSDesignSystemTests: XCTestCase {
         let contracts: [(LifeOSTypography.Role, CGFloat, Font.TextStyle, Font.Weight, CGFloat, CGFloat, Bool)] = [
             (.pageTitle, pageTitleSize, .title, .semibold, -0.3, 0, false),
             (.sectionTitle, sectionTitleSize, .title2, .semibold, 0, 0, false),
+            (.sheetTitle, sheetTitleSize, .title2, .semibold, 0, 0, false),
             (.cardTitle, cardTitleSize, .headline, .semibold, 0, 0, false),
             (.body, bodySize, .body, .regular, 0, 0, false),
             (.label, labelSize, .subheadline, .medium, 0, 0, false),
             (.metadata, metadataSize, .footnote, .regular, 0, 0, false),
-            (.metric, metricSize, .largeTitle, .semibold, 0, 0, true),
+            (.metric, metricSize, .largeTitle, .semibold, -0.4, 0, true),
             (.metricCompact, metricCompactSize, .title2, .semibold, 0, 0, true),
             (.inlineMonitoringValue, inlineMonitoringValueSize, .title2, .semibold, 0, 0, true),
             (.button, buttonSize, .headline, .semibold, 0, 0, false),
@@ -230,6 +234,20 @@ final class LifeOSDesignSystemTests: XCTestCase {
             XCTAssertEqual(role.lineSpacing, lineSpacing, "Unexpected line spacing for \(role)")
             XCTAssertEqual(role.usesMonospacedDigits, monospacedDigits, "Unexpected digit policy for \(role)")
         }
+    }
+
+    func testMetricTrackingResolvesToNegativePointFourExceptAtAccessibilitySizes() {
+        XCTAssertEqual(LifeOSTypography.Role.metric.tracking, -0.4, accuracy: 0.0001)
+        XCTAssertEqual(
+            LifeOSTypography.Role.metric.resolvedTracking(for: .large),
+            -0.4,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            LifeOSTypography.Role.metric.resolvedTracking(for: .accessibility1),
+            0,
+            accuracy: 0.0001
+        )
     }
 
     @MainActor
@@ -465,15 +483,14 @@ final class LifeOSDesignSystemTests: XCTestCase {
         }
     }
 
-    func testSelectedNavigationColorsMatchBothAppearancePairs() {
-        XCTAssertEqual(LifeOSSelectedNavigationPalette.overlayOpacity, 0.06, accuracy: 0.0001)
+    func testSelectedNavigationColorsMatchBothAppearancePairs() throws {
         XCTAssertEqual(
             LifeOSSelectedNavigationPalette.darkForegroundHex,
             LifeOSPalette.primaryTextDarkHex
         )
         XCTAssertEqual(
             LifeOSSelectedNavigationPalette.darkBackgroundHex,
-            LifeOSPalette.surfaceDarkHex
+            LifeOSPalette.raisedDarkHex
         )
         XCTAssertEqual(
             LifeOSSelectedNavigationPalette.lightForegroundHex,
@@ -481,19 +498,19 @@ final class LifeOSDesignSystemTests: XCTestCase {
         )
         XCTAssertEqual(
             LifeOSSelectedNavigationPalette.lightBackgroundHex,
-            LifeOSPalette.surfaceLightHex
+            LifeOSPalette.raisedLightHex
         )
         XCTAssertEqual(LifeOSSelectedNavigationPalette.darkIndicatorHex, LifeOSPalette.focusBlueHex)
         XCTAssertEqual(LifeOSSelectedNavigationPalette.lightIndicatorHex, LifeOSPalette.brandBlueHex)
 
-        XCTAssertNotEqual(
-            LifeOSSelectedNavigationPalette.darkForegroundHex,
-            LifeOSSelectedNavigationPalette.darkBackgroundHex
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: iosRoot.appendingPathComponent("Shared/DesignTokens.swift"),
+            encoding: .utf8
         )
-        XCTAssertNotEqual(
-            LifeOSSelectedNavigationPalette.lightForegroundHex,
-            LifeOSSelectedNavigationPalette.lightBackgroundHex
-        )
+        XCTAssertTrue(source.contains("static let lifeOSSelectedNavigationFill = lifeOSNeutralRaised"))
     }
 
     func testSharedSpacingRadiiAndTargetsUseTheFoundationContract() {
@@ -512,8 +529,13 @@ final class LifeOSDesignSystemTests: XCTestCase {
             [4, 8, 12, 16, 24, 24, 32, 48, 64]
         )
         XCTAssertEqual([LifeOSTokens.Radius.control, LifeOSTokens.Radius.card, LifeOSTokens.Radius.hero], [10, 12, 16])
+#if os(macOS)
+        XCTAssertEqual(LifeOSTokens.Control.minimumTarget, 32)
+        XCTAssertEqual(LifeOSTokens.pagePadding, 24)
+#else
         XCTAssertEqual(LifeOSTokens.Control.minimumTarget, 44)
         XCTAssertEqual(LifeOSTokens.pagePadding, 16)
+#endif
         XCTAssertEqual(LifeOSTokens.sectionGap, LifeOSTokens.Space.xl)
         XCTAssertEqual(LifeOSTokens.pageEndSpacing, LifeOSTokens.Space.xxl)
         XCTAssertEqual(LifeOSTokens.siblingGap, LifeOSTokens.Space.md)
@@ -658,12 +680,17 @@ final class LifeOSDesignSystemTests: XCTestCase {
     }
 
     func testHitTargetsAndSelectorFallbackStayBounded() {
-        XCTAssertEqual(LifeOSHitTarget.resolve(), 44)
-        XCTAssertEqual(LifeOSHitTarget.resolve(8), 44)
+#if os(macOS)
+        let minimumTarget: CGFloat = 32
+#else
+        let minimumTarget: CGFloat = 44
+#endif
+        XCTAssertEqual(LifeOSHitTarget.resolve(), minimumTarget)
+        XCTAssertEqual(LifeOSHitTarget.resolve(8), minimumTarget)
         XCTAssertEqual(LifeOSHitTarget.resolve(64), 64)
         XCTAssertEqual(LifeOSHitTarget.resolve(.infinity), 96)
-        XCTAssertEqual(LifeOSHitTarget.resolve(-.infinity), 44)
-        XCTAssertEqual(LifeOSHitTarget.resolve(.nan), 44)
+        XCTAssertEqual(LifeOSHitTarget.resolve(-.infinity), minimumTarget)
+        XCTAssertEqual(LifeOSHitTarget.resolve(.nan), minimumTarget)
         XCTAssertTrue(LifeOSSelectorLayout.usesMenu(availableWidth: 300, intrinsicPillWidth: 301))
         XCTAssertFalse(LifeOSSelectorLayout.usesMenu(availableWidth: 300, intrinsicPillWidth: 300))
         XCTAssertTrue(LifeOSSelectorLayout.usesMenu(availableWidth: 300, intrinsicPillWidth: 300, accessibilitySize: true))
@@ -672,9 +699,20 @@ final class LifeOSDesignSystemTests: XCTestCase {
     func testIconCatalogUsesContractMappingsAndMonochromeRendering() throws {
         XCTAssertEqual(LifeOSIconName.home.systemImageName, "square.grid.2x2")
         XCTAssertEqual(LifeOSIconName.usage.systemImageName, "chart.xyaxis.line")
+        XCTAssertEqual(LifeOSIconName.usage.fallbackSystemImageName, "chart.bar")
         XCTAssertEqual(LifeOSIconName.clipper.systemImageName, "rectangle.stack")
         XCTAssertEqual(LifeOSIconName.finance.systemImageName, "creditcard")
         XCTAssertEqual(LifeOSIconName.fitness.systemImageName, "waveform.path.ecg")
+        XCTAssertEqual(LifeOSIconName.biology.systemImageName, "point.3.connected.trianglepath")
+        XCTAssertEqual(LifeOSIconName.biology.fallbackSystemImageName, "circle.grid.2x2")
+        XCTAssertEqual(LifeOSIconName.biology.accessibilityLabel, "Biology")
+        XCTAssertEqual(LifeOSIconName.nutrition.systemImageName, "fork.knife")
+        XCTAssertEqual(LifeOSIconName.nutrition.accessibilityLabel, "Nutrition")
+        XCTAssertEqual(LifeOSIconName.workout.systemImageName, "dumbbell")
+        XCTAssertEqual(LifeOSIconName.workout.fallbackSystemImageName, "figure.walk")
+        XCTAssertEqual(LifeOSIconName.workout.accessibilityLabel, "Workout")
+        XCTAssertEqual(LifeOSIconName.dateExpansion.systemImageName, "chevron.down")
+        XCTAssertEqual(LifeOSIconName.dateExpansion.accessibilityLabel, "Expand date")
         XCTAssertEqual(LifeOSIconName.reports.systemImageName, "chart.bar.doc")
         XCTAssertEqual(LifeOSIconName.calendarPlus.systemImageName, "calendar.badge.plus")
         XCTAssertEqual(LifeOSIconName.close.systemImageName, "xmark")
@@ -686,7 +724,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
 #if os(macOS)
         XCTAssertEqual(LifeOSIconContext.navigation.box, 20)
         XCTAssertEqual(LifeOSIconContext.card.box, 20)
-        XCTAssertEqual(LifeOSIconContext.toolbar.box, 20)
+        XCTAssertEqual(LifeOSIconContext.toolbar.box, 18)
         XCTAssertEqual(LifeOSIconContext.navigation.glyph, 15)
         XCTAssertEqual(LifeOSIconContext.card.glyph, 14)
         XCTAssertEqual(LifeOSIconContext.toolbar.glyph, 14)
@@ -709,16 +747,25 @@ final class LifeOSDesignSystemTests: XCTestCase {
         let iosRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
+        let iconSource = try String(
             contentsOf: iosRoot.appendingPathComponent("Shared/LifeOSIcon.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(source.contains(".symbolRenderingMode(.monochrome)"))
-        XCTAssertTrue(source.contains(".font(.system(size: context.glyph, weight: context.weight, design: .default))"))
-        XCTAssertTrue(source.contains(".frame(width: context.box, height: context.box)"))
-        XCTAssertTrue(source.contains("public enum LifeOSIconContext"))
-        XCTAssertFalse(source.contains(".renderingMode(.template)"))
-        XCTAssertFalse(source.contains("case .assistant"))
+        XCTAssertTrue(iconSource.contains(".symbolRenderingMode(.monochrome)"))
+        XCTAssertTrue(iconSource.contains(".font(.system(size: context.glyph, weight: context.weight, design: .default))"))
+        XCTAssertTrue(iconSource.contains(".frame(width: context.box, height: context.box)"))
+        XCTAssertTrue(iconSource.contains("public enum LifeOSIconContext"))
+        XCTAssertTrue(iconSource.contains("public var resolvedSystemImageName: String"))
+        XCTAssertFalse(iconSource.contains(".renderingMode(.template)"))
+
+        let componentSource = try String(
+            contentsOf: iosRoot.appendingPathComponent("Shared/LifeOSComponents.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(componentSource.contains(".accessibilityLabel(Text(label))"))
+        XCTAssertTrue(componentSource.contains("icon.resolvedSystemImageName"))
+        XCTAssertTrue(componentSource.contains(".help(label)"))
+        XCTAssertTrue(componentSource.contains(".focused($isFocused)"))
     }
 
     func testUsageSourceKeepsCompactTruthfulSelectionAndControlContract() throws {
@@ -750,33 +797,38 @@ final class LifeOSDesignSystemTests: XCTestCase {
     }
 
     func testResponsiveMetricsKeepMobileAndWideDesktopContracts() {
+        let gutter = LifeOSTokens.pageGutter
         let phone = LifeOSResponsiveMetrics(width: 390)
         XCTAssertTrue(phone.isCompact)
-        XCTAssertEqual(phone.horizontalGutter, LifeOSTokens.pageGutter)
+        XCTAssertEqual(phone.horizontalGutter, gutter)
         XCTAssertEqual(phone.sectionSpacing, 24)
-        XCTAssertEqual(phone.contentWidth, 390 - (LifeOSTokens.pageGutter * 2))
+        XCTAssertEqual(phone.contentWidth, 390 - (gutter * 2))
         XCTAssertFalse(phone.supportsTwoColumnLayout)
 
-        let regularSingleColumn = LifeOSResponsiveMetrics(width: 600)
-        XCTAssertFalse(regularSingleColumn.isCompact)
-        XCTAssertFalse(regularSingleColumn.supportsTwoColumnLayout)
+        let belowBreakpoint = LifeOSResponsiveMetrics(width: 719 + (gutter * 2))
+        XCTAssertEqual(belowBreakpoint.contentWidth, 719, accuracy: 0.0001)
+        XCTAssertTrue(belowBreakpoint.isCompact)
+        XCTAssertFalse(belowBreakpoint.supportsTwoColumnLayout)
 
-        let justBelow = LifeOSResponsiveMetrics(width: 719)
-        XCTAssertFalse(justBelow.isCompact)
-        XCTAssertFalse(justBelow.supportsTwoColumnLayout)
-
-        let atBreakpoint = LifeOSResponsiveMetrics(width: 720 + (LifeOSTokens.pageGutter * 2))
+        let atBreakpoint = LifeOSResponsiveMetrics(width: 720 + (gutter * 2))
+        XCTAssertEqual(atBreakpoint.contentWidth, 720, accuracy: 0.0001)
         XCTAssertFalse(atBreakpoint.isCompact)
-        XCTAssertEqual(atBreakpoint.contentWidth, 720)
         XCTAssertTrue(atBreakpoint.supportsTwoColumnLayout)
 
-        let justAbove = LifeOSResponsiveMetrics(width: 721 + (LifeOSTokens.pageGutter * 2))
+        let justAbove = LifeOSResponsiveMetrics(width: 721 + (gutter * 2))
         XCTAssertFalse(justAbove.isCompact)
         XCTAssertTrue(justAbove.supportsTwoColumnLayout)
 
+        let sidebarBoundary = LifeOSResponsiveMetrics(
+            width: 208 + 720 + (gutter * 2),
+            sidebarWidth: 208
+        )
+        XCTAssertEqual(sidebarBoundary.contentWidth, 720, accuracy: 0.0001)
+        XCTAssertFalse(sidebarBoundary.isCompact)
+
         let wideWindow = LifeOSResponsiveMetrics(width: 1_600)
 #if os(macOS)
-        XCTAssertEqual(wideWindow.horizontalGutter, 32)
+        XCTAssertEqual(wideWindow.horizontalGutter, 24)
 #else
         XCTAssertEqual(wideWindow.horizontalGutter, 16)
 #endif
@@ -786,35 +838,22 @@ final class LifeOSDesignSystemTests: XCTestCase {
     }
 
     func testResponsiveMetricsClampStandardPageWidthAtEveryWidthClass() {
-        XCTAssertEqual(LifeOSResponsiveMetrics.compactBreakpoint, 600)
+        let gutter = LifeOSTokens.pageGutter
+        func metrics(forContentWidth contentWidth: CGFloat) -> LifeOSResponsiveMetrics {
+            LifeOSResponsiveMetrics(width: contentWidth + (gutter * 2))
+        }
+
+        XCTAssertEqual(LifeOSResponsiveMetrics.compactBreakpoint, 720)
         XCTAssertEqual(LifeOSResponsiveMetrics.twoColumnBreakpoint, 720)
         XCTAssertEqual(LifeOSTokens.contentMaxWidth, 1_040)
-        XCTAssertEqual(
-            LifeOSResponsiveMetrics(width: 320).maxContentWidth,
-            320 - (LifeOSTokens.pageGutter * 2)
-        )
-        XCTAssertEqual(
-            LifeOSResponsiveMetrics(width: 719).maxContentWidth,
-            719 - (LifeOSTokens.pageGutter * 2)
-        )
-        XCTAssertEqual(
-            LifeOSResponsiveMetrics(width: 720).maxContentWidth,
-            720 - (LifeOSTokens.pageGutter * 2)
-        )
-        XCTAssertEqual(
-            LifeOSResponsiveMetrics(width: 1_119).maxContentWidth,
-            1_040
-        )
-        XCTAssertEqual(
-            LifeOSResponsiveMetrics(width: 1_120).maxContentWidth,
-            1_040
-        )
+        XCTAssertEqual(metrics(forContentWidth: 320).maxContentWidth, 320)
+        XCTAssertEqual(metrics(forContentWidth: 719).maxContentWidth, 719)
+        XCTAssertEqual(metrics(forContentWidth: 720).maxContentWidth, 720)
+        XCTAssertEqual(metrics(forContentWidth: 1_119).maxContentWidth, 1_040)
+        XCTAssertEqual(metrics(forContentWidth: 1_120).maxContentWidth, 1_040)
         XCTAssertEqual(LifeOSResponsiveMetrics(width: 1_600).maxContentWidth, 1_040)
         XCTAssertEqual(LifeOSResponsiveMetrics(width: -.infinity).maxContentWidth, 0)
-        XCTAssertEqual(
-            LifeOSResponsiveMetrics(width: .infinity).maxContentWidth,
-            1_040
-        )
+        XCTAssertEqual(LifeOSResponsiveMetrics(width: .infinity).maxContentWidth, 1_040)
         XCTAssertEqual(LifeOSResponsiveMetrics(width: .nan).maxContentWidth, 0)
 
         let withSidebar = LifeOSResponsiveMetrics(width: 1_600, sidebarWidth: 232)
@@ -824,9 +863,11 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertLessThanOrEqual(withSidebar.renderedContentMaxX, withSidebar.width)
 
 #if os(macOS)
+        XCTAssertEqual(LifeOSResponsiveMetrics(width: 600).horizontalGutter, 24)
         XCTAssertEqual(LifeOSResponsiveMetrics(width: 1_511).horizontalGutter, 24)
-        XCTAssertEqual(LifeOSResponsiveMetrics(width: 1_512).horizontalGutter, 32)
+        XCTAssertEqual(LifeOSResponsiveMetrics(width: 1_512).horizontalGutter, 24)
 #else
+        XCTAssertEqual(LifeOSResponsiveMetrics(width: 600).horizontalGutter, 16)
         XCTAssertEqual(LifeOSResponsiveMetrics(width: 1_511).horizontalGutter, 16)
         XCTAssertEqual(LifeOSResponsiveMetrics(width: 1_512).horizontalGutter, 16)
 #endif
@@ -962,9 +1003,60 @@ final class LifeOSDesignSystemTests: XCTestCase {
 
     }
 
+    func testMacSheetWidthBoundsHonorAvailablePresenterClearance() {
+        let narrow = LifeOSSheetGeometry.macWidthBounds(for: 400)
+        XCTAssertEqual(narrow.minimum, 352)
+        XCTAssertEqual(narrow.preferred, 352)
+        XCTAssertEqual(narrow.maximum, 352)
+
+        let normal = LifeOSSheetGeometry.macWidthBounds(for: 600)
+        XCTAssertEqual(normal.minimum, 420)
+        XCTAssertEqual(normal.preferred, 520)
+        XCTAssertEqual(normal.maximum, 552)
+
+        let wide = LifeOSSheetGeometry.macWidthBounds(for: 1_200)
+        XCTAssertEqual(wide.minimum, 420)
+        XCTAssertEqual(wide.preferred, 520)
+        XCTAssertEqual(wide.maximum, 600)
+
+        let exactlyClearance = LifeOSSheetGeometry.macWidthBounds(for: 48)
+        XCTAssertEqual(exactlyClearance.minimum, 0)
+        XCTAssertEqual(exactlyClearance.preferred, 0)
+        XCTAssertEqual(exactlyClearance.maximum, 0)
+
+        let infinite = LifeOSSheetGeometry.macWidthBounds(for: .infinity)
+        XCTAssertEqual(infinite.minimum, 420)
+        XCTAssertEqual(infinite.preferred, 520)
+        XCTAssertEqual(infinite.maximum, 600)
+        let notANumber = LifeOSSheetGeometry.macWidthBounds(for: .nan)
+        XCTAssertEqual(notANumber.minimum, 0)
+        XCTAssertEqual(notANumber.preferred, 0)
+        XCTAssertEqual(notANumber.maximum, 0)
+    }
+
+    func testMacSheetInitialWidthUsesVisibleScreenAndSafeFallback() {
+        let narrowScreenWidth: CGFloat = 400
+        let initialWidth = LifeOSSheetGeometry.macInitialAvailableWidth(
+            screenVisibleWidth: narrowScreenWidth
+        )
+        XCTAssertEqual(initialWidth, narrowScreenWidth)
+
+        let narrowBounds = LifeOSSheetGeometry.macWidthBounds(for: initialWidth)
+        XCTAssertEqual(narrowBounds.maximum, 352)
+
+        XCTAssertEqual(
+            LifeOSSheetGeometry.macInitialAvailableWidth(screenVisibleWidth: nil),
+            LifeOSSheetGeometry.macFallbackAvailableWidth
+        )
+        XCTAssertEqual(
+            LifeOSSheetGeometry.macInitialAvailableWidth(screenVisibleWidth: .infinity),
+            LifeOSSheetGeometry.macFallbackAvailableWidth
+        )
+    }
+
     func testSheetGeometryIsBoundedAndKeepsNativeDetents() throws {
         XCTAssertEqual(LifeOSSheetGeometry.macStandardWidth, 520)
-        XCTAssertEqual(LifeOSSheetGeometry.macMaximumHeightFraction, 0.80, accuracy: 0.0001)
+        XCTAssertEqual(LifeOSSheetGeometry.macMaximumHeightCap, 760)
         XCTAssertEqual(LifeOSSheetGeometry.macSafeHeightInset, 48)
         XCTAssertTrue(LifeOSSheetGeometry.macFallbackAvailableHeight.isFinite)
         XCTAssertEqual(
@@ -979,32 +1071,17 @@ final class LifeOSDesignSystemTests: XCTestCase {
             LifeOSSheetGeometry.macAvailableHeight(for: .nan),
             LifeOSSheetGeometry.macFallbackAvailableHeight
         )
-        XCTAssertEqual(LifeOSSheetGeometry.macWidth(for: 400), 400)
-        XCTAssertEqual(LifeOSSheetGeometry.macWidth(for: 520), 520)
-        XCTAssertEqual(LifeOSSheetGeometry.macWidth(for: 900), 520)
-        XCTAssertEqual(LifeOSSheetGeometry.macWidth(for: .infinity), 520)
-        XCTAssertEqual(LifeOSSheetGeometry.macWidth(for: .nan), 0)
-
-        let safeMaximum = LifeOSSheetGeometry.macMaximumHeight(for: 900)
-        XCTAssertEqual(safeMaximum, (900 - 48) * 0.80, accuracy: 0.0001)
-        XCTAssertLessThanOrEqual(safeMaximum, 900 * 0.80)
-        let fallbackMaximum = LifeOSSheetGeometry.macMaximumHeight(
-            for: .infinity
-        )
-        XCTAssertTrue(fallbackMaximum.isFinite)
+        XCTAssertEqual(LifeOSSheetGeometry.macMaximumHeight(for: 900), 760)
+        XCTAssertEqual(LifeOSSheetGeometry.macMaximumHeight(for: 1_000), 760)
+        XCTAssertEqual(LifeOSSheetGeometry.macMaximumHeight(for: 700), 652)
+        XCTAssertEqual(LifeOSSheetGeometry.macMaximumHeight(for: 30), 0)
         XCTAssertEqual(
-            fallbackMaximum,
-            (LifeOSSheetGeometry.macFallbackAvailableHeight - 48) * 0.80,
-            accuracy: 0.0001
+            LifeOSSheetGeometry.macMaximumHeight(for: .infinity),
+            672
         )
         XCTAssertEqual(
             LifeOSSheetGeometry.macMaximumHeight(for: .nan),
-            fallbackMaximum,
-            accuracy: 0.0001
-        )
-        XCTAssertGreaterThan(
-            LifeOSSheetGeometry.macMaximumHeight(for: 1_000),
-            LifeOSSheetGeometry.macMaximumHeight(for: 700)
+            672
         )
 
         let iosRoot = URL(fileURLWithPath: #filePath)
@@ -1014,12 +1091,26 @@ final class LifeOSDesignSystemTests: XCTestCase {
             contentsOf: iosRoot.appendingPathComponent("Shared/LifeOSComponents.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(source.contains("idealWidth: LifeOSSheetGeometry.macStandardWidth"))
-        XCTAssertTrue(source.contains("maxWidth: LifeOSSheetGeometry.macStandardWidth"))
+        XCTAssertTrue(source.contains("minWidth: macWidthBounds.minimum"))
+        XCTAssertTrue(source.contains("idealWidth: macWidthBounds.preferred"))
+        XCTAssertTrue(source.contains("maxWidth: macWidthBounds.maximum"))
+        XCTAssertTrue(source.contains(
+            "macInitialAvailableWidth(\n        screenVisibleWidth: NSScreen.main?.visibleFrame.width\n    )"
+        ))
+        XCTAssertFalse(source.contains(
+            "@State private var macAvailableWidth = LifeOSSheetGeometry.macFallbackAvailableWidth"
+        ))
+        XCTAssertTrue(source.contains("availableWidth: macAvailableWidth"))
         XCTAssertTrue(source.contains("LifeOSSheetWindowHeightReader"))
-        XCTAssertTrue(source.contains("window?.sheetParent ?? window"))
+        XCTAssertTrue(source.contains("sheetWindow.sheetParent ?? sheetWindow"))
+        XCTAssertTrue(source.contains("presenter.contentLayoutRect.width"))
+        XCTAssertTrue(source.contains("visibleFrame.width"))
+        XCTAssertFalse(source.contains("window.frame.width"))
         XCTAssertTrue(source.contains("availableHeight: macAvailableHeight"))
-        XCTAssertTrue(source.contains(".presentationDetents([.medium, .large])"))
+        XCTAssertTrue(source.contains(".presentationDetents([.large])"))
+        XCTAssertFalse(source.contains(".presentationDetents([.medium, .large])"))
+        XCTAssertTrue(source.contains(".lifeOSTypography(.sheetTitle)"))
+        XCTAssertTrue(source.contains(".padding(.vertical, LifeOSTokens.Space.md)"))
         XCTAssertFalse(source.contains("LifeOSSheetPresentationLayout(maxHeight: 760"))
     }
 

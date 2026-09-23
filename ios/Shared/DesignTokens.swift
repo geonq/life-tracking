@@ -159,11 +159,10 @@ enum LifeOSWidgetContrastPolicy {
 /// tests can verify both appearance pairs without attempting to introspect a
 /// platform-specific adaptive `Color` provider.
 enum LifeOSSelectedNavigationPalette {
-    static let overlayOpacity: Double = 0.06
     static let darkForegroundHex: UInt32 = LifeOSPalette.primaryTextDarkHex
-    static let darkBackgroundHex: UInt32 = LifeOSPalette.surfaceDarkHex
+    static let darkBackgroundHex: UInt32 = LifeOSPalette.raisedDarkHex
     static let lightForegroundHex: UInt32 = LifeOSPalette.primaryTextLightHex
-    static let lightBackgroundHex: UInt32 = LifeOSPalette.surfaceLightHex
+    static let lightBackgroundHex: UInt32 = LifeOSPalette.raisedLightHex
     static let darkIndicatorHex: UInt32 = LifeOSPalette.focusBlueHex
     static let lightIndicatorHex: UInt32 = LifeOSPalette.brandBlueHex
 }
@@ -576,15 +575,9 @@ public extension Color {
         light: LifeOSSemanticColorPairs.disabled.lightForegroundHex
     )
 
-    /// The selected-navigation pair is deliberately distinct from focus
-    /// blue: a row needs a stable filled surface and a text color that stays
-    /// readable in both appearances.
-    /// Selection is a transient primary-text overlay over the neutral row
-    /// surface. The brand indicator remains a separate blue mark at the
-    /// navigation call site.
-    static let lifeOSSelectedNavigationFill = lifeOSPrimaryText.opacity(
-        LifeOSSelectedNavigationPalette.overlayOpacity
-    )
+    /// Selection uses the canonical raised neutral; the brand indicator
+    /// remains a separate blue mark at the navigation call site.
+    static let lifeOSSelectedNavigationFill = lifeOSNeutralRaised
     static let lifeOSSelectedNavigationText = lifeOSPrimaryText
 
     // Module identity accents. These stay vivid on the dark canvas and move
@@ -734,7 +727,7 @@ public enum LifeOSTokens {
     }
 
 #if os(macOS)
-    /// macOS page gutter; wider windows use the 32pt breakpoint in the responsive metrics.
+    /// Fixed macOS page gutter.
     public static let pageGutter: CGFloat = 24
 #else
     /// iPhone page gutter.
@@ -811,7 +804,6 @@ public enum LifeOSTokens {
     public static let accentHover = Color.lifeOSAccentHover
     public static let accentPressed = Color.lifeOSAccentPressed
     public static let accentLight = Color.lifeOSBlue50
-    public static let selectedNavigationOverlayOpacity = LifeOSSelectedNavigationPalette.overlayOpacity
     public static let selectedNavigationFill = Color.lifeOSSelectedNavigationFill
     public static let selectedNavigationText = Color.lifeOSSelectedNavigationText
 

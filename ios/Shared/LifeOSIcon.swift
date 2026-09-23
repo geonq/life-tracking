@@ -1,4 +1,9 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
 
 public enum LifeOSIconName: Sendable {
     case overview
@@ -18,6 +23,10 @@ public enum LifeOSIconName: Sendable {
     case shopping
     case reports
     case fitness
+    case biology
+    case nutrition
+    case workout
+    case dateExpansion
     case codex
     case claude
     case gemini
@@ -84,6 +93,10 @@ public enum LifeOSIconName: Sendable {
         case .shopping: "bag"
         case .reports: "chart.bar.doc"
         case .fitness: "waveform.path.ecg"
+        case .biology: "point.3.connected.trianglepath"
+        case .nutrition: "fork.knife"
+        case .workout: "dumbbell"
+        case .dateExpansion: "chevron.down"
         case .codex: "cpu"
         case .claude: "bubble.left.and.bubble.right"
         case .gemini: "sparkles"
@@ -130,6 +143,36 @@ public enum LifeOSIconName: Sendable {
         }
     }
 
+    /// Legacy-system alternatives for symbols whose availability can vary by
+    /// OS release. Views probe the native catalog instead of guessing a
+    /// minimum OS version.
+    public var fallbackSystemImageName: String? {
+        switch self {
+        case .usage: "chart.bar"
+        case .biology: "circle.grid.2x2"
+        case .workout: "figure.walk"
+        default: nil
+        }
+    }
+
+    public var resolvedSystemImageName: String {
+        guard let fallback = fallbackSystemImageName else {
+            return systemImageName
+        }
+#if os(macOS)
+        return NSImage(
+            systemSymbolName: systemImageName,
+            accessibilityDescription: nil
+        ) == nil ? fallback : systemImageName
+#elseif os(iOS)
+        return UIImage(systemName: systemImageName) == nil
+            ? fallback
+            : systemImageName
+#else
+        return systemImageName
+#endif
+    }
+
     /// Stable spoken names for icons that are exposed directly in an
     /// accessibility tree. Most instances stay decorative because their
     /// containing control supplies the complete label, but the catalog keeps
@@ -153,6 +196,10 @@ public enum LifeOSIconName: Sendable {
         case .shopping: "Shopping"
         case .reports: "Reports"
         case .fitness: "Fitness"
+        case .biology: "Biology"
+        case .nutrition: "Nutrition"
+        case .workout: "Workout"
+        case .dateExpansion: "Expand date"
         case .codex: "Codex"
         case .claude: "Claude"
         case .gemini: "Gemini"
@@ -236,7 +283,7 @@ public enum LifeOSIconContext: Sendable {
         case .standard: LifeOSTokens.Icon.box
         case .navigation: LifeOSTokens.Icon.statusBox
         case .card: LifeOSTokens.Icon.statusBox
-        case .toolbar: LifeOSTokens.Icon.statusBox
+        case .toolbar: 18
         case .disclosure: 16
         }
 #else
@@ -290,7 +337,7 @@ public struct LifeOSIcon: View {
     }
 
     public var body: some View {
-        Image(systemName: name.systemImageName)
+        Image(systemName: name.resolvedSystemImageName)
             .symbolRenderingMode(.monochrome)
             .font(.system(size: context.glyph, weight: context.weight, design: .default))
             .frame(width: context.box, height: context.box)
