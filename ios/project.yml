@@ -46,7 +46,7 @@ targets:
     sources:
       - LifeOSWidget
       - path: Shared
-        excludes: [HealthKit*.swift]
+        excludes: [HealthKit*.swift, FitnessTrainingStore.swift, TrainingReplicationState.swift]
       - Shared/FitnessMetric.swift
     resources:
       - path: Shared/Resources/Assets.xcassets
@@ -129,7 +129,7 @@ targets:
     sources:
       - LifeOSWidgetSnapshotTests
       - path: Shared
-        excludes: [HealthKit*.swift]
+        excludes: [HealthKit*.swift, FitnessTrainingStore.swift, TrainingReplicationState.swift]
       - Shared/FitnessMetric.swift
       - LifeOSWidget/CalendarWidget.swift
       - LifeOSWidget/UsageWidget.swift
@@ -151,7 +151,7 @@ targets:
     sources:
       - LifeOSMacWidget
       - path: Shared
-        excludes: [HealthKit*.swift]
+        excludes: [HealthKit*.swift, FitnessTrainingStore.swift, TrainingReplicationState.swift]
       - Shared/FitnessMetric.swift
       - LifeOSWidget/UsageWidget.swift
       - LifeOSWidget/CalendarWidget.swift

@@ -5,6 +5,643 @@ import XCTest
 final class FitnessTrainingStoreTests: XCTestCase {
     private let base = Date(timeIntervalSinceReferenceDate: 3_000_000)
 
+    func testTrainingEntityIDMatchesVersionedLiteralFixture() throws {
+        let recordID = TrainingRecordID(uuid: UUID(uuidString: "80000000-0000-0000-0000-000000000001")!)
+        XCTAssertEqual(
+            try TrainingReplicationState.entityID(for: recordID),
+            "9c8fa24e4494a1786348611a67b09bbfb47f3acd72fa699b92fe31f165ae5f30"
+        )
+    }
+
+    func testReplicationMapsRejectWellFormedButNoncanonicalEntityHashes() throws {
+        let sessionID = TrainingRecordID(uuid: UUID(uuidString: "80500000-0000-0000-0000-000000000001")!)
+        let mutationID = TrainingRecordID(uuid: UUID(uuidString: "80500000-0000-0000-0000-000000000002")!)
+        let binding = makeReplicationBinding()
+        let session = try TrainingSession(
+            id: sessionID,
+            title: "Canonical entity hash fixture",
+            createdAt: base,
+            updatedAt: base,
+            startedAt: base,
+            now: base
+        )
+        let payload = TrainingReplicationState.inlinePayload(
+            try FitnessPayloadCodec.encode(session, now: base)
+        )
+        let canonical = try TrainingReplicationState.entityID(for: sessionID)
+        let entry = TrainingBootstrapEntry(
+            recordID: sessionID,
+            mutationID: mutationID,
+            entityID: canonical,
+            payloadHash: payload.hash
+        )
+        let intent = TrainingSyncIntent(
+            mutationID: mutationID,
+            recordID: sessionID,
+            kind: .bootstrap,
+            payload: payload
+        )
+        let valid = TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [entry],
+            pendingIntents: [intent],
+            entityKeys: [TrainingEntityKey(recordID: sessionID, entityID: canonical)],
+            ledger: TrainingReplicationState.emptyLedger(for: binding)
+        )
+        XCTAssertNoThrow(try valid.validate(
+            retainedSessionIDs: [sessionID],
+            receiptMutationIDs: [],
+            retiredMutationIDs: []
+        ))
+
+        let forged = String(repeating: canonical.first == "0" ? "1" : "0", count: 64)
+        XCTAssertNotEqual(forged, canonical)
+        XCTAssertEqual(forged.count, 64)
+        let tampered = TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [TrainingBootstrapEntry(
+                recordID: entry.recordID,
+                mutationID: entry.mutationID,
+                entityID: forged,
+                payloadHash: entry.payloadHash
+            )],
+            pendingIntents: [intent],
+            entityKeys: [TrainingEntityKey(recordID: sessionID, entityID: forged)],
+            ledger: valid.ledger
+        )
+        assertReplicationInvalid(tampered, retainedSessionIDs: [sessionID])
+    }
+
+    func testEveryBootstrapEntryRequiresOneMatchingPendingBootstrapIntent() throws {
+        let binding = makeReplicationBinding()
+        let recordID = TrainingRecordID(uuid: UUID(uuidString: "80600000-0000-0000-0000-000000000001")!)
+        let mutationID = TrainingRecordID(uuid: UUID(uuidString: "80600000-0000-0000-0000-000000000002")!)
+        let session = try TrainingSession(
+            id: recordID,
+            title: "Bootstrap evidence",
+            createdAt: base,
+            updatedAt: base,
+            startedAt: base,
+            now: base
+        )
+        let payload = TrainingReplicationState.inlinePayload(try FitnessPayloadCodec.encode(session, now: base))
+        let entityID = try TrainingReplicationState.entityID(for: recordID)
+        let entry = TrainingBootstrapEntry(
+            recordID: recordID,
+            mutationID: mutationID,
+            entityID: entityID,
+            payloadHash: payload.hash
+        )
+        let intent = TrainingSyncIntent(
+            mutationID: mutationID,
+            recordID: recordID,
+            kind: .bootstrap,
+            payload: payload
+        )
+        let valid = TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [entry],
+            pendingIntents: [intent],
+            entityKeys: [TrainingEntityKey(recordID: recordID, entityID: entityID)],
+            ledger: TrainingReplicationState.emptyLedger(for: binding)
+        )
+        try valid.validate(retainedSessionIDs: [recordID], receiptMutationIDs: [], retiredMutationIDs: [])
+
+        let missingAllEvidence = TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [],
+            pendingIntents: [],
+            entityKeys: [],
+            ledger: valid.ledger
+        )
+        assertReplicationInvalid(missingAllEvidence, retainedSessionIDs: [recordID])
+
+        let missing = TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [entry],
+            pendingIntents: [],
+            entityKeys: valid.entityKeys,
+            ledger: valid.ledger
+        )
+        assertReplicationInvalid(missing, retainedSessionIDs: [recordID])
+
+        let duplicate = TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [entry],
+            pendingIntents: [intent, intent],
+            entityKeys: valid.entityKeys,
+            ledger: valid.ledger
+        )
+        assertReplicationInvalid(duplicate, retainedSessionIDs: [recordID])
+
+        let wrongRecord = TrainingSyncIntent(
+            mutationID: mutationID,
+            recordID: TrainingRecordID(uuid: UUID(uuidString: "80600000-0000-0000-0000-000000000003")!),
+            kind: .bootstrap,
+            payload: payload
+        )
+        let mismatched = TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [entry],
+            pendingIntents: [wrongRecord],
+            entityKeys: valid.entityKeys,
+            ledger: valid.ledger
+        )
+        assertReplicationInvalid(mismatched, retainedSessionIDs: [recordID])
+    }
+
+    func testBatchARejectsAdvancedSequenceAndNonemptyAdapterLedger() throws {
+        let binding = makeReplicationBinding()
+        let empty = TrainingReplicationState.emptyLedger(for: binding)
+        let state = TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [],
+            pendingIntents: [],
+            entityKeys: [],
+            ledger: empty
+        )
+        assertReplicationInvalid(TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [],
+            pendingIntents: [],
+            entityKeys: [],
+            ledger: replacingLedger(empty, nextSequence: "99")
+        ))
+
+        let placeholder = SyncOperation(
+            datasetID: binding.datasetID,
+            epoch: binding.epoch,
+            storeID: binding.storeID,
+            domain: .fitness,
+            originID: binding.localOriginID,
+            keyID: binding.keyID,
+            sequence: "1",
+            mutationID: "80600000-0000-0000-0000-000000000004",
+            entityID: String(repeating: "a", count: 64),
+            parents: [],
+            baseHash: nil,
+            kind: .put,
+            payload: SyncPayload(hash: SyncWireCodec.sha256(Data()), byteCount: 0, inline: "", blobHash: nil),
+            signature: ""
+        )
+        let withInbox = replacingLedger(empty, inbox: [placeholder])
+        assertReplicationInvalid(TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [],
+            pendingIntents: [],
+            entityKeys: [],
+            ledger: withInbox
+        ))
+        XCTAssertNotEqual(state.ledger, withInbox)
+    }
+
+    func testEmbeddedAdapterDecoderRejectsNonemptyArraysBeforeElementDecoding() throws {
+        let binding = makeReplicationBinding()
+        let state = TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [],
+            pendingIntents: [],
+            entityKeys: [],
+            ledger: TrainingReplicationState.emptyLedger(for: binding)
+        )
+        let encoded = try TrainingDateCoding.makeEncoder().encode(TrainingLedgerEnvelope(replication: state))
+
+        var inboxObject = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var inboxReplication = try XCTUnwrap(inboxObject["replication"] as? [String: Any])
+        var inboxLedger = try XCTUnwrap(inboxReplication["ledger"] as? [String: Any])
+        inboxLedger["inbox"] = [["malformed": "must not decode as SyncOperation"]]
+        inboxReplication["ledger"] = inboxLedger
+        inboxObject["replication"] = inboxReplication
+        let nonemptyInbox = try JSONSerialization.data(withJSONObject: inboxObject, options: [.sortedKeys])
+        XCTAssertThrowsError(try decodeEnvelope(nonemptyInbox))
+
+        var frontierObject = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var frontierReplication = try XCTUnwrap(frontierObject["replication"] as? [String: Any])
+        var frontierLedger = try XCTUnwrap(frontierReplication["ledger"] as? [String: Any])
+        var received = try XCTUnwrap(frontierLedger["received"] as? [String: Any])
+        received["positions"] = [["malformed": "must not decode as SyncPosition"]]
+        frontierLedger["received"] = received
+        frontierReplication["ledger"] = frontierLedger
+        frontierObject["replication"] = frontierReplication
+        let nonemptyFrontier = try JSONSerialization.data(withJSONObject: frontierObject, options: [.sortedKeys])
+        XCTAssertThrowsError(try decodeEnvelope(nonemptyFrontier))
+    }
+
+    func testEmbeddedAdapterDecoderRejectsUnknownLedgerKeys() throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: emptyReplicationEnvelopeData()) as? [String: Any])
+        var replication = try XCTUnwrap(object["replication"] as? [String: Any])
+        var ledger = try XCTUnwrap(replication["ledger"] as? [String: Any])
+        ledger["unexpectedLedgerField"] = "tampered"
+        replication["ledger"] = ledger
+        object["replication"] = replication
+
+        let tampered = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        XCTAssertThrowsError(try decodeEnvelope(tampered))
+    }
+
+    func testEmbeddedFrontierDecoderRejectsUnknownKeys() throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: emptyReplicationEnvelopeData()) as? [String: Any])
+        var replication = try XCTUnwrap(object["replication"] as? [String: Any])
+        var ledger = try XCTUnwrap(replication["ledger"] as? [String: Any])
+        var received = try XCTUnwrap(ledger["received"] as? [String: Any])
+        received["unexpectedFrontierField"] = "tampered"
+        ledger["received"] = received
+        replication["ledger"] = ledger
+        object["replication"] = replication
+
+        let tampered = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        XCTAssertThrowsError(try decodeEnvelope(tampered))
+    }
+
+    func testPersistedV3RejectsMissingBootstrapEvidenceForRetainedDiscardedSession() async throws {
+        let fixture = try makeFixture(name: "training-v3-missing-bootstrap-evidence")
+        defer { fixture.cleanup() }
+        let store = makeStore(fixture, clock: TestClock(base))
+        let begun = try await store.begin(
+            title: "Discarded but retained",
+            mutationID: UUID(uuidString: "80700000-0000-0000-0000-000000000001")!
+        )
+        let recordID = try XCTUnwrap(begun.recordID)
+        let optionalSession = try await store.session(id: recordID)
+        let session = try XCTUnwrap(optionalSession)
+        _ = try await store.discard(
+            id: recordID,
+            expectedRevision: session.revision,
+            mutationID: UUID(uuidString: "80700000-0000-0000-0000-000000000002")!
+        )
+        let committed = try await store.bindReplication(makeReplicationBinding())
+        let validEnvelope = try decodeEnvelope(Data(contentsOf: fixture.url))
+        XCTAssertEqual(validEnvelope.sessions.map(\.id), [recordID])
+        XCTAssertEqual(validEnvelope.sessions.first?.status, .discarded)
+
+        // Preserve the entity key but remove all bootstrap and pending-intent
+        // evidence for this retained session.
+        let tamperedReplication = TrainingReplicationState(
+            binding: committed.binding,
+            bootstrapMap: [],
+            pendingIntents: [],
+            entityKeys: committed.entityKeys,
+            ledger: committed.ledger
+        )
+        let tamperedEnvelope = TrainingLedgerEnvelope(
+            sessions: validEnvelope.sessions,
+            receipts: validEnvelope.receipts,
+            retiredMutationIDs: validEnvelope.retiredMutationIDs,
+            replication: tamperedReplication
+        )
+        let tamperedBytes = try TrainingDateCoding.makeEncoder().encode(tamperedEnvelope)
+        try tamperedBytes.write(to: fixture.url)
+
+        let reopened = makeStore(fixture, clock: TestClock(base))
+        do {
+            _ = try await reopened.load()
+            XCTFail("A retained session without bootstrap evidence must fail closed")
+        } catch {
+            XCTAssertEqual(error as? TrainingStoreError, .corruptLedger)
+        }
+        XCTAssertEqual(try Data(contentsOf: fixture.url), tamperedBytes)
+    }
+
+    func testSchemaTwoMigrationPreservesReceiptAndRetiredReplayBarriers() async throws {
+        let fixture = try makeFixture(name: "schema-two-migration")
+        defer { fixture.cleanup() }
+        let recordID = TrainingRecordID(uuid: UUID(uuidString: "81000000-0000-0000-0000-000000000001")!)
+        let session = try TrainingSession(
+            id: recordID,
+            title: "Schema two",
+            createdAt: base.addingTimeInterval(0.123456789),
+            updatedAt: base.addingTimeInterval(0.123456789),
+            startedAt: base.addingTimeInterval(0.123456789),
+            now: base.addingTimeInterval(10)
+        )
+        let receiptUUID = UUID(uuidString: "81000000-0000-0000-0000-000000000002")!
+        let receiptID = TrainingRecordID(uuid: receiptUUID)
+        let mutation = TrainingMutation(
+            mutationID: receiptID,
+            operation: .update,
+            recordID: recordID,
+            expectedRevision: session.revision,
+            session: session
+        )
+        let receipt = try TrainingCommitReceipt(
+            mutationID: receiptID,
+            outcome: .saved,
+            recordID: recordID,
+            revision: session.revision
+        )
+        let entry = try TrainingReceiptJournalEntry(
+            mutationID: receiptID,
+            payloadFingerprint: TrainingFingerprint.hex(for: mutation, version: .losslessNumericV2),
+            payloadFingerprintVersion: .losslessNumericV2,
+            receipt: receipt
+        )
+        let retiredID = TrainingRecordID(uuid: UUID(uuidString: "81000000-0000-0000-0000-000000000003")!)
+        let schemaTwo = TrainingLedgerEnvelope(
+            schemaVersion: 2,
+            sessions: [session],
+            receipts: [entry],
+            retiredMutationIDs: [retiredID]
+        )
+        try TrainingDateCoding.makeEncoder().encode(schemaTwo).write(to: fixture.url)
+
+        let store = makeStore(fixture, clock: TestClock(base.addingTimeInterval(10)))
+        let loaded = try await store.load()
+        XCTAssertEqual(loaded, [session])
+        let migrated = try decodeEnvelope(try await store.export())
+        XCTAssertEqual(migrated.schemaVersion, 3)
+        XCTAssertEqual(migrated.sessions, [session])
+        XCTAssertEqual(migrated.receipts, [entry])
+        XCTAssertEqual(migrated.retiredMutationIDs, [retiredID])
+        XCTAssertNil(migrated.replication)
+        let retry = try await store.update(session, expectedRevision: session.revision, mutationID: receiptUUID)
+        XCTAssertEqual(retry, receipt)
+
+        let restarted = makeStore(fixture, clock: TestClock(base.addingTimeInterval(10)))
+        _ = try await restarted.load()
+        do {
+            _ = try await restarted.begin(title: "Retired replay", mutationID: retiredID.uuid)
+            XCTFail("Schema-two retired IDs must remain protected after migration")
+        } catch {
+            XCTAssertEqual(error as? TrainingStoreError, .mutationIDRetired)
+        }
+    }
+
+    func testBindingRoundTripsAndReusesBootstrapIDsForAllRetainedSessions() async throws {
+        let fixture = try makeFixture(name: "training-bind-round-trip")
+        defer { fixture.cleanup() }
+        let clock = TestClock(base)
+        let store = makeStore(fixture, clock: clock)
+        let discarded = try await store.begin(
+            title: "Retained discarded workout",
+            mutationID: UUID(uuidString: "82000000-0000-0000-0000-000000000001")!
+        )
+        let discardedID = try XCTUnwrap(discarded.recordID)
+        let optionalDiscardedSession = try await store.session(id: discardedID)
+        let discardedSession = try XCTUnwrap(optionalDiscardedSession)
+        _ = try await store.discard(
+            id: discardedID,
+            expectedRevision: discardedSession.revision,
+            mutationID: UUID(uuidString: "82000000-0000-0000-0000-000000000002")!
+        )
+        let active = try await store.begin(
+            title: "Active workout",
+            mutationID: UUID(uuidString: "82000000-0000-0000-0000-000000000003")!
+        )
+        let activeID = try XCTUnwrap(active.recordID)
+        let binding = makeReplicationBinding()
+
+        let committed = try await store.bindReplication(binding)
+        XCTAssertEqual(committed.bootstrapMap.count, 2)
+        XCTAssertEqual(committed.pendingIntents.count, 2)
+        XCTAssertEqual(Set(committed.bootstrapMap.map(\.recordID)), [discardedID, activeID])
+        XCTAssertTrue(committed.pendingIntents.allSatisfy { $0.kind == .bootstrap })
+        let bytesAfterBind = try Data(contentsOf: fixture.url)
+        let persisted = try decodeEnvelope(bytesAfterBind)
+        XCTAssertEqual(persisted.schemaVersion, 3)
+        XCTAssertEqual(persisted.replication, committed)
+        XCTAssertEqual(
+            Set(persisted.sessions.filter { $0.status == .discarded }.map(\.id)),
+            [discardedID]
+        )
+
+        let repeated = try await store.bindReplication(binding)
+        XCTAssertEqual(repeated, committed)
+        XCTAssertEqual(try Data(contentsOf: fixture.url), bytesAfterBind)
+        let changedBindings = [
+            TrainingSyncBinding(
+                datasetID: "90000000-0000-0000-0000-000000000004",
+                epoch: binding.epoch,
+                storeID: binding.storeID,
+                localOriginID: binding.localOriginID,
+                keyID: binding.keyID
+            ),
+            TrainingSyncBinding(
+                datasetID: binding.datasetID,
+                epoch: "2",
+                storeID: binding.storeID,
+                localOriginID: binding.localOriginID,
+                keyID: binding.keyID
+            ),
+            TrainingSyncBinding(
+                datasetID: binding.datasetID,
+                epoch: binding.epoch,
+                storeID: "90000000-0000-0000-0000-000000000004",
+                localOriginID: binding.localOriginID,
+                keyID: binding.keyID
+            ),
+            TrainingSyncBinding(
+                datasetID: binding.datasetID,
+                epoch: binding.epoch,
+                storeID: binding.storeID,
+                localOriginID: "90000000-0000-0000-0000-000000000004",
+                keyID: binding.keyID
+            ),
+            TrainingSyncBinding(
+                datasetID: binding.datasetID,
+                epoch: binding.epoch,
+                storeID: binding.storeID,
+                localOriginID: binding.localOriginID,
+                keyID: String(repeating: "b", count: 64)
+            )
+        ]
+        for changedBinding in changedBindings {
+            do {
+                _ = try await store.bindReplication(changedBinding)
+                XCTFail("Changing any persisted binding field requires explicit migration")
+            } catch {
+                XCTAssertEqual(error as? TrainingStoreError, .replicationBindingMismatch)
+            }
+            XCTAssertEqual(try Data(contentsOf: fixture.url), bytesAfterBind)
+        }
+        let restarted = makeStore(fixture, clock: clock)
+        _ = try await restarted.load()
+        let reopened = try await restarted.bindReplication(binding)
+        XCTAssertEqual(reopened, committed)
+        XCTAssertEqual(try Data(contentsOf: fixture.url), bytesAfterBind)
+    }
+
+    func testBindingRejectsBootstrapMutationCollisionWithoutChangingBytes() async throws {
+        let fixture = try makeFixture(name: "training-bind-collision")
+        defer { fixture.cleanup() }
+        let collisionID = UUID(uuidString: "83000000-0000-0000-0000-000000000001")!
+        let store = FitnessTrainingStore(
+            persistenceURL: fixture.url,
+            fileManager: fixture.fileManager,
+            clock: { self.base },
+            makeBootstrapMutationID: { collisionID }
+        )
+        _ = try await store.begin(title: "Collision source", mutationID: collisionID)
+        let before = try Data(contentsOf: fixture.url)
+
+        do {
+            _ = try await store.bindReplication(makeReplicationBinding())
+            XCTFail("A bootstrap ID must not reuse a live command receipt ID")
+        } catch {
+            XCTAssertEqual(error as? TrainingStoreError, .replicationCollision)
+        }
+        XCTAssertEqual(try Data(contentsOf: fixture.url), before)
+        XCTAssertNil(try decodeEnvelope(before).replication)
+    }
+
+    func testBindingRejectsRetiredGeneratedMutationIDCollision() async throws {
+        let fixture = try makeFixture(name: "training-bind-retired-collision")
+        defer { fixture.cleanup() }
+        let originalStore = makeStore(fixture, clock: TestClock(base))
+        _ = try await originalStore.begin(
+            title: "Retired collision source",
+            mutationID: UUID(uuidString: "83100000-0000-0000-0000-000000000001")!
+        )
+        let original = try decodeEnvelope(Data(contentsOf: fixture.url))
+        let retiredID = TrainingRecordID(uuid: UUID(uuidString: "83100000-0000-0000-0000-000000000002")!)
+        let withRetiredID = TrainingLedgerEnvelope(
+            sessions: original.sessions,
+            receipts: original.receipts,
+            retiredMutationIDs: [retiredID]
+        )
+        try TrainingDateCoding.makeEncoder().encode(withRetiredID).write(to: fixture.url)
+        let before = try Data(contentsOf: fixture.url)
+        let collisionStore = FitnessTrainingStore(
+            persistenceURL: fixture.url,
+            fileManager: fixture.fileManager,
+            clock: { self.base },
+            makeBootstrapMutationID: { retiredID.uuid }
+        )
+
+        do {
+            _ = try await collisionStore.bindReplication(makeReplicationBinding())
+            XCTFail("A generated bootstrap ID must not reuse a retired command ID")
+        } catch {
+            XCTAssertEqual(error as? TrainingStoreError, .replicationCollision)
+        }
+        XCTAssertEqual(try Data(contentsOf: fixture.url), before)
+        XCTAssertNil(try decodeEnvelope(before).replication)
+    }
+
+    func testBindingRejectsDeterministicGeneratedMutationIDCollision() async throws {
+        let fixture = try makeFixture(name: "training-bind-generated-collision")
+        defer { fixture.cleanup() }
+        let setupStore = makeStore(fixture, clock: TestClock(base))
+        let first = try await setupStore.begin(
+            title: "First retained session",
+            mutationID: UUID(uuidString: "83200000-0000-0000-0000-000000000001")!
+        )
+        let firstID = try XCTUnwrap(first.recordID)
+        let optionalSession = try await setupStore.session(id: firstID)
+        let firstSession = try XCTUnwrap(optionalSession)
+        _ = try await setupStore.discard(
+            id: firstID,
+            expectedRevision: firstSession.revision,
+            mutationID: UUID(uuidString: "83200000-0000-0000-0000-000000000002")!
+        )
+        _ = try await setupStore.begin(
+            title: "Second retained session",
+            mutationID: UUID(uuidString: "83200000-0000-0000-0000-000000000003")!
+        )
+        let before = try Data(contentsOf: fixture.url)
+        let repeatedID = UUID(uuidString: "83200000-0000-0000-0000-000000000004")!
+        let generator = DeterministicBootstrapIDs([repeatedID, repeatedID])
+        let collisionStore = FitnessTrainingStore(
+            persistenceURL: fixture.url,
+            fileManager: fixture.fileManager,
+            clock: { self.base },
+            makeBootstrapMutationID: { generator.next() }
+        )
+
+        do {
+            _ = try await collisionStore.bindReplication(makeReplicationBinding())
+            XCTFail("Two retained sessions must not receive the same generated mutation ID")
+        } catch {
+            XCTAssertEqual(error as? TrainingStoreError, .replicationCollision)
+        }
+        XCTAssertEqual(generator.generatedCount, 2)
+        XCTAssertEqual(try Data(contentsOf: fixture.url), before)
+        XCTAssertNil(try decodeEnvelope(before).replication)
+    }
+
+    func testCorruptReplicationEntityCollisionIsRejectedWithoutRewritingLedger() async throws {
+        let fixture = try makeFixture(name: "training-bind-corrupt-entity")
+        defer { fixture.cleanup() }
+        let store = makeStore(fixture, clock: TestClock(base))
+        _ = try await store.begin(
+            title: "Entity collision source",
+            mutationID: UUID(uuidString: "83500000-0000-0000-0000-000000000001")!
+        )
+        let committed = try await store.bindReplication(makeReplicationBinding())
+        let validEnvelope = try decodeEnvelope(Data(contentsOf: fixture.url))
+        let entityKey = try XCTUnwrap(committed.entityKeys.first)
+        let duplicateEntityKey = TrainingEntityKey(
+            recordID: entityKey.recordID,
+            entityID: entityKey.entityID
+        )
+        let corruptState = TrainingReplicationState(
+            binding: committed.binding,
+            bootstrapMap: committed.bootstrapMap,
+            pendingIntents: committed.pendingIntents,
+            entityKeys: committed.entityKeys + [duplicateEntityKey],
+            ledger: committed.ledger
+        )
+        let corruptEnvelope = TrainingLedgerEnvelope(
+            sessions: validEnvelope.sessions,
+            receipts: validEnvelope.receipts,
+            retiredMutationIDs: validEnvelope.retiredMutationIDs,
+            replication: corruptState
+        )
+        let corruptBytes = try TrainingDateCoding.makeEncoder().encode(corruptEnvelope)
+        try corruptBytes.write(to: fixture.url)
+
+        let reopened = makeStore(fixture, clock: TestClock(base))
+        do {
+            _ = try await reopened.load()
+            XCTFail("Duplicate entity ownership must make the ledger corrupt")
+        } catch {
+            XCTAssertEqual(error as? TrainingStoreError, .corruptLedger)
+        }
+        XCTAssertEqual(try Data(contentsOf: fixture.url), corruptBytes)
+        let preserved = try await reopened.export()
+        XCTAssertEqual(preserved, corruptBytes)
+    }
+
+    func testFailedBindingWritePreservesSameStoreMemoryAndAllowsRetry() async throws {
+        let fixture = try makeFixture(name: "training-bind-write-failure")
+        defer { fixture.cleanup() }
+        let faults = PersistenceFaults()
+        let store = FitnessTrainingStore(
+            persistenceURL: fixture.url,
+            fileManager: fixture.fileManager,
+            clock: { self.base },
+            beforeReplace: {
+                if faults.failBeforeReplace { throw TrainingStoreError.persistenceFailed }
+            }
+        )
+        let begin = try await store.begin(
+            title: "Existing local state",
+            mutationID: UUID(uuidString: "84000000-0000-0000-0000-000000000001")!
+        )
+        let sessionID = try XCTUnwrap(begin.recordID)
+        let sessionsBefore = try await store.allSessions()
+        let before = try Data(contentsOf: fixture.url)
+        faults.failBeforeReplace = true
+
+        do {
+            _ = try await store.bindReplication(makeReplicationBinding())
+            XCTFail("An injected write failure must abort binding")
+        } catch {
+            XCTAssertEqual(error as? TrainingStoreError, .persistenceFailed)
+        }
+        XCTAssertEqual(try Data(contentsOf: fixture.url), before)
+        let sessionsAfterFailure = try await store.allSessions()
+        XCTAssertEqual(sessionsAfterFailure, sessionsBefore)
+        let exportAfterFailure = try await store.export()
+        XCTAssertNil(try decodeEnvelope(exportAfterFailure).replication)
+
+        faults.failBeforeReplace = false
+        let retried = try await store.bindReplication(makeReplicationBinding())
+        XCTAssertEqual(retried.bootstrapMap.map(\.recordID), [sessionID])
+        let sessionsAfterRetry = try await store.allSessions()
+        XCTAssertEqual(sessionsAfterRetry, sessionsBefore)
+        XCTAssertEqual(try decodeEnvelope(Data(contentsOf: fixture.url)).replication, retried)
+    }
+
     func testBeginFromTemplatePersistsAnImmutableDraftSnapshot() async throws {
         let fixture = try makeFixture(name: "template-start")
         defer { fixture.cleanup() }
@@ -1357,6 +1994,73 @@ final class FitnessTrainingStoreTests: XCTestCase {
         )
     }
 
+    private func emptyReplicationEnvelopeData() throws -> Data {
+        let binding = makeReplicationBinding()
+        let state = TrainingReplicationState(
+            binding: binding,
+            bootstrapMap: [],
+            pendingIntents: [],
+            entityKeys: [],
+            ledger: TrainingReplicationState.emptyLedger(for: binding)
+        )
+        return try TrainingDateCoding.makeEncoder().encode(TrainingLedgerEnvelope(replication: state))
+    }
+
+    private func assertReplicationInvalid(
+        _ state: TrainingReplicationState,
+        retainedSessionIDs: Set<TrainingRecordID> = Set(),
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertThrowsError(
+            try state.validate(
+                retainedSessionIDs: retainedSessionIDs,
+                receiptMutationIDs: [],
+                retiredMutationIDs: []
+            ),
+            file: file,
+            line: line
+        ) { error in
+            XCTAssertEqual(error as? TrainingStoreError, .corruptLedger, file: file, line: line)
+        }
+    }
+
+    private func replacingLedger(
+        _ ledger: SyncAdapterEnvelope,
+        nextSequence: String? = nil,
+        inbox: [SyncOperation]? = nil,
+        received: SyncFrontier? = nil
+    ) -> SyncAdapterEnvelope {
+        SyncAdapterEnvelope(
+            schemaVersion: ledger.schemaVersion,
+            storeID: ledger.storeID,
+            datasetID: ledger.datasetID,
+            localOriginID: ledger.localOriginID,
+            epoch: ledger.epoch,
+            nextSequence: nextSequence ?? ledger.nextSequence,
+            received: received ?? ledger.received,
+            applied: ledger.applied,
+            outbox: ledger.outbox,
+            inbox: inbox ?? ledger.inbox,
+            entities: ledger.entities,
+            conflicts: ledger.conflicts,
+            acknowledgements: ledger.acknowledgements,
+            receivedAcknowledgements: ledger.receivedAcknowledgements,
+            receipts: ledger.receipts,
+            receiptLedgerVersion: ledger.receiptLedgerVersion
+        )
+    }
+
+    private func makeReplicationBinding(epoch: String = "1") -> TrainingSyncBinding {
+        TrainingSyncBinding(
+            datasetID: "90000000-0000-0000-0000-000000000001",
+            epoch: epoch,
+            storeID: "90000000-0000-0000-0000-000000000002",
+            localOriginID: "90000000-0000-0000-0000-000000000003",
+            keyID: String(repeating: "a", count: 64)
+        )
+    }
+
     private func replacingTitle(_ session: TrainingSession, title: String, now: Date) throws -> TrainingSession {
         try TrainingSession(
             id: session.id,
@@ -1484,6 +2188,21 @@ final class FitnessTrainingStoreTests: XCTestCase {
         var failBeforeReplace = false
         var failAfterReplace = true
         var failRestore = true
+    }
+
+    private final class DeterministicBootstrapIDs {
+        private let values: [UUID]
+        private(set) var generatedCount = 0
+
+        init(_ values: [UUID]) {
+            self.values = values
+        }
+
+        func next() -> UUID {
+            precondition(generatedCount < values.count, "Unexpected bootstrap ID request")
+            defer { generatedCount += 1 }
+            return values[generatedCount]
+        }
     }
 
     private func makeFixture(name: String) throws -> Fixture {

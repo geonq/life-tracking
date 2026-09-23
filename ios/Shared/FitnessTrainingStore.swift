@@ -33,6 +33,9 @@ public enum TrainingStoreError: Error, Equatable, LocalizedError, Sendable {
     case receiptJournalFull
     case replayProtectionFull
     case invalidHistoryPage
+    case invalidReplicationBinding
+    case replicationBindingMismatch
+    case replicationCollision
 
     public var errorDescription: String? {
         switch self {
@@ -62,6 +65,9 @@ public enum TrainingStoreError: Error, Equatable, LocalizedError, Sendable {
         case .receiptJournalFull: "The local mutation receipt journal is full; export and clear receipts before continuing."
         case .replayProtectionFull: "The durable replay-protection index is full; archive this ledger before continuing."
         case .invalidHistoryPage: "The requested training history page is invalid."
+        case .invalidReplicationBinding: "The training replication binding is invalid."
+        case .replicationBindingMismatch: "The training ledger is already bound to a different replication identity."
+        case .replicationCollision: "A generated training replication identity collides with existing durable evidence."
         }
     }
 }
@@ -71,6 +77,10 @@ public enum TrainingStoreLimits {
     public static let maximumReceipts = 10_000
     public static let maximumRetiredMutationIDs = 100_000
     public static let maximumHistoryPageSize = 100
+    public static let maximumReplicationBootstrapEntries = maximumSessions
+    public static let maximumReplicationPendingIntents = maximumRetiredMutationIDs
+    public static let maximumReplicationEntityKeys = maximumRetiredMutationIDs
+    public static let maximumReplicationLedgerEntries = maximumRetiredMutationIDs
     public static let maximumLedgerBytes = 64 * 1_024 * 1_024
     /// Recovery may copy an oversized ledger to a user-selected destination,
     /// but the streaming path still refuses an unbounded source file.
@@ -82,23 +92,26 @@ public enum TrainingStoreLimits {
 }
 
 public struct TrainingLedgerEnvelope: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
 
     public let schemaVersion: Int
     public let sessions: [TrainingSession]
     public let receipts: [TrainingReceiptJournalEntry]
     public let retiredMutationIDs: [TrainingRecordID]
+    public let replication: TrainingReplicationState?
 
     public init(
         schemaVersion: Int = TrainingLedgerEnvelope.currentSchemaVersion,
         sessions: [TrainingSession] = [],
         receipts: [TrainingReceiptJournalEntry] = [],
-        retiredMutationIDs: [TrainingRecordID] = []
+        retiredMutationIDs: [TrainingRecordID] = [],
+        replication: TrainingReplicationState? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.sessions = sessions
         self.receipts = receipts
         self.retiredMutationIDs = retiredMutationIDs
+        self.replication = replication
     }
 
     public func validate(now: Date = .now) throws {
@@ -152,17 +165,28 @@ public struct TrainingLedgerEnvelope: Codable, Equatable, Sendable {
                 throw TrainingStoreError.corruptLedger
             }
         }
+        if let replication {
+            try replication.validate(
+                retainedSessionIDs: sessionIDs,
+                receiptMutationIDs: receiptIDs,
+                retiredMutationIDs: retiredIDs
+            )
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, sessions, receipts, retiredMutationIDs
+        case schemaVersion, sessions, receipts, retiredMutationIDs, replication
     }
 
     public init(from decoder: Decoder) throws {
-        try rejectUnknownTrainingStoreKeys(decoder, allowed: ["schemaVersion", "sessions", "receipts", "retiredMutationIDs"])
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let schemaVersion = try c.decode(Int.self, forKey: .schemaVersion)
+        let allowed: Set<String> = schemaVersion == Self.currentSchemaVersion
+            ? ["schemaVersion", "sessions", "receipts", "retiredMutationIDs", "replication"]
+            : ["schemaVersion", "sessions", "receipts", "retiredMutationIDs"]
+        try rejectUnknownTrainingStoreKeys(decoder, allowed: allowed)
         self.init(
-            schemaVersion: try c.decode(Int.self, forKey: .schemaVersion),
+            schemaVersion: schemaVersion,
             sessions: try decodeBoundedTrainingStoreArray(
                 TrainingSession.self,
                 forKey: .sessions,
@@ -183,7 +207,8 @@ public struct TrainingLedgerEnvelope: Codable, Equatable, Sendable {
                 from: c,
                 maximum: TrainingStoreLimits.maximumRetiredMutationIDs,
                 overflow: .replayProtectionFull
-            )
+            ),
+            replication: try c.decodeIfPresent(TrainingReplicationState.self, forKey: .replication)
         )
     }
 }
@@ -211,7 +236,7 @@ private struct TrainingSchemaProbe: Decodable {
     let schemaVersion: Int
 }
 
-private func decodeBoundedTrainingStoreArray<Element: Decodable, Key: CodingKey>(
+func decodeBoundedTrainingStoreArray<Element: Decodable, Key: CodingKey>(
     _ type: Element.Type,
     forKey key: Key,
     from container: KeyedDecodingContainer<Key>,
@@ -363,10 +388,12 @@ public actor FitnessTrainingStore {
     private let beforeReplace: (() throws -> Void)?
     private let afterReplace: (() throws -> Void)?
     private let beforeRestore: (() throws -> Void)?
+    private let makeBootstrapMutationID: () -> UUID
 
     private var sessionsByID: [TrainingRecordID: TrainingSession] = [:]
     private var receiptsByMutationID: [TrainingRecordID: TrainingReceiptJournalEntry] = [:]
     private var retiredMutationIDs: Set<TrainingRecordID> = []
+    private var replicationState: TrainingReplicationState?
     private var hasLoaded = false
     /// A valid empty ledger is still a loaded state. Track whether this store
     /// has ever observed a durable path separately from that in-memory state.
@@ -381,7 +408,8 @@ public actor FitnessTrainingStore {
         clock: @escaping @Sendable () -> Date = { Date() },
         beforeReplace: (() throws -> Void)? = nil,
         afterReplace: (() throws -> Void)? = nil,
-        beforeRestore: (() throws -> Void)? = nil
+        beforeRestore: (() throws -> Void)? = nil,
+        makeBootstrapMutationID: @escaping () -> UUID = { UUID() }
     ) {
         self.persistenceURL = (persistenceURL ?? Self.defaultPersistenceURL)?.standardizedFileURL
         self.fileManager = fileManager
@@ -389,6 +417,7 @@ public actor FitnessTrainingStore {
         self.beforeReplace = beforeReplace
         self.afterReplace = afterReplace
         self.beforeRestore = beforeRestore
+        self.makeBootstrapMutationID = makeBootstrapMutationID
     }
 
     /// Loads the disk state. A malformed, unsupported, oversized, or
@@ -399,6 +428,103 @@ public actor FitnessTrainingStore {
         try withPersistenceTransaction {
             try reloadFromDiskLocked()
             return sortedSessions()
+        }
+    }
+
+    /// Binds the local training ledger once and persists its immutable
+    /// bootstrap payloads under the same file lock as every other ledger write.
+    /// Repeating the exact binding returns the committed state without rewriting.
+    public func bindReplication(_ binding: TrainingSyncBinding) throws -> TrainingReplicationState {
+        try binding.validate()
+        return try withPersistenceTransaction {
+            guard loadFailure == nil else { throw TrainingStoreError.integrityUnavailable }
+            try reloadFromDiskLocked(persistMigration: false)
+            try ensureLoadedLocked()
+
+            if let replicationState {
+                guard replicationState.binding == binding else {
+                    throw TrainingStoreError.replicationBindingMismatch
+                }
+                return replicationState
+            }
+
+            let sessions = sortedSessions()
+            var bootstrapMap: [TrainingBootstrapEntry] = []
+            var pendingIntents: [TrainingSyncIntent] = []
+            var entityKeys: [TrainingEntityKey] = []
+            var recordIDs = Set<TrainingRecordID>()
+            var entityIDs = Set<String>()
+            var mutationIDs = Set<TrainingRecordID>()
+            bootstrapMap.reserveCapacity(sessions.count)
+            pendingIntents.reserveCapacity(sessions.count)
+            entityKeys.reserveCapacity(sessions.count)
+
+            let now = try currentTime()
+            for session in sessions {
+                guard recordIDs.insert(session.id).inserted else {
+                    throw TrainingStoreError.corruptLedger
+                }
+                let entityID = try TrainingReplicationState.entityID(for: session.id)
+                guard entityIDs.insert(entityID).inserted else {
+                    throw TrainingStoreError.replicationCollision
+                }
+                let mutationID = TrainingRecordID(uuid: makeBootstrapMutationID())
+                guard mutationIDs.insert(mutationID).inserted,
+                      receiptsByMutationID[mutationID] == nil,
+                      !retiredMutationIDs.contains(mutationID) else {
+                    throw TrainingStoreError.replicationCollision
+                }
+                let data: Data
+                do {
+                    data = try FitnessPayloadCodec.encode(session, now: now)
+                } catch SyncFailure.capacity {
+                    throw TrainingStoreError.ledgerTooLarge
+                } catch {
+                    throw TrainingStoreError.corruptLedger
+                }
+                let payload = TrainingReplicationState.inlinePayload(data)
+                let entry = TrainingBootstrapEntry(
+                    recordID: session.id,
+                    mutationID: mutationID,
+                    entityID: entityID,
+                    payloadHash: payload.hash
+                )
+                bootstrapMap.append(entry)
+                entityKeys.append(TrainingEntityKey(recordID: session.id, entityID: entityID))
+                pendingIntents.append(TrainingSyncIntent(
+                    mutationID: mutationID,
+                    recordID: session.id,
+                    kind: .bootstrap,
+                    payload: payload
+                ))
+            }
+
+            let state = TrainingReplicationState(
+                binding: binding,
+                bootstrapMap: bootstrapMap,
+                pendingIntents: pendingIntents,
+                entityKeys: entityKeys,
+                ledger: TrainingReplicationState.emptyLedger(for: binding)
+            )
+            try state.validate(
+                retainedSessionIDs: recordIDs,
+                receiptMutationIDs: Set(receiptsByMutationID.keys),
+                retiredMutationIDs: retiredMutationIDs
+            )
+            let candidate = TrainingLedgerEnvelope(
+                sessions: sessions,
+                receipts: receiptsByMutationID.values.sorted { $0.mutationID.rawValue < $1.mutationID.rawValue },
+                retiredMutationIDs: retiredMutationIDs.sorted { $0.rawValue < $1.rawValue },
+                replication: state
+            )
+            let data = try persistAndVerify(candidate, expectedPreviousData: lastDurableData)
+            replicationState = state
+            lastDurableData = data
+            preservedLedgerData = nil
+            loadFailure = nil
+            hasLoaded = true
+            if persistenceURL != nil { hasObservedDurableFile = true }
+            return state
         }
     }
 
@@ -720,7 +846,8 @@ public actor FitnessTrainingStore {
             let candidate = TrainingLedgerEnvelope(
                 sessions: sortedSessions(),
                 receipts: [],
-                retiredMutationIDs: retired.sorted { $0.rawValue < $1.rawValue }
+                retiredMutationIDs: retired.sorted { $0.rawValue < $1.rawValue },
+                replication: replicationState
             )
             let data = try persistAndVerify(candidate)
             sessionsByID = Dictionary(uniqueKeysWithValues: candidate.sessions.map { ($0.id, $0) })
@@ -1289,7 +1416,8 @@ public actor FitnessTrainingStore {
                 return $0.id.rawValue < $1.id.rawValue
             },
             receipts: nextReceipts.values.sorted { $0.mutationID.rawValue < $1.mutationID.rawValue },
-            retiredMutationIDs: retiredMutationIDs.sorted { $0.rawValue < $1.rawValue }
+            retiredMutationIDs: retiredMutationIDs.sorted { $0.rawValue < $1.rawValue },
+            replication: replicationState
         )
         do {
             let data = try persistAndVerify(envelope)
@@ -1444,13 +1572,14 @@ public actor FitnessTrainingStore {
         }
     }
 
-    private func reloadFromDiskLocked() throws {
+    private func reloadFromDiskLocked(persistMigration: Bool = true) throws {
         do {
             guard let persistenceURL else {
                 if !hasLoaded {
                     sessionsByID = [:]
                     receiptsByMutationID = [:]
                     retiredMutationIDs = []
+                    replicationState = nil
                     hasLoaded = true
                 }
                 loadFailure = nil
@@ -1465,6 +1594,7 @@ public actor FitnessTrainingStore {
                 sessionsByID = [:]
                 receiptsByMutationID = [:]
                 retiredMutationIDs = []
+                replicationState = nil
                 lastDurableData = nil
                 hasLoaded = true
                 loadFailure = nil
@@ -1484,7 +1614,9 @@ public actor FitnessTrainingStore {
             let durableData: Data
             if decoded.requiresMigration {
                 envelope = decoded.envelope
-                durableData = try persistAndVerify(envelope, expectedPreviousData: data)
+                durableData = persistMigration
+                    ? try persistAndVerify(envelope, expectedPreviousData: data)
+                    : data
             } else {
                 envelope = decoded.envelope
                 durableData = data
@@ -1492,6 +1624,7 @@ public actor FitnessTrainingStore {
             sessionsByID = Dictionary(uniqueKeysWithValues: envelope.sessions.map { ($0.id, $0) })
             receiptsByMutationID = Dictionary(uniqueKeysWithValues: envelope.receipts.map { ($0.mutationID, $0) })
             retiredMutationIDs = Set(envelope.retiredMutationIDs)
+            replicationState = envelope.replication
             lastDurableData = durableData
             preservedLedgerData = nil
             loadFailure = nil
@@ -1537,6 +1670,24 @@ public actor FitnessTrainingStore {
                     sessions: legacy.sessions,
                     receipts: try legacy.receipts.map { try $0.migrated() },
                     retiredMutationIDs: []
+                )
+                try envelope.validate(now: now)
+                return (envelope, true)
+            } catch let error as TrainingStoreError {
+                throw error
+            } catch {
+                throw TrainingStoreError.corruptLedger
+            }
+        case 2:
+            do {
+                let schemaTwo = try TrainingDateCoding.makeDecoder(now: now).decode(TrainingLedgerEnvelope.self, from: data)
+                guard schemaTwo.schemaVersion == 2, schemaTwo.replication == nil else {
+                    throw TrainingStoreError.corruptLedger
+                }
+                let envelope = TrainingLedgerEnvelope(
+                    sessions: schemaTwo.sessions,
+                    receipts: schemaTwo.receipts,
+                    retiredMutationIDs: schemaTwo.retiredMutationIDs
                 )
                 try envelope.validate(now: now)
                 return (envelope, true)
@@ -1896,7 +2047,8 @@ public actor FitnessTrainingStore {
         TrainingLedgerEnvelope(
             sessions: sortedSessions(),
             receipts: receiptsByMutationID.values.sorted { $0.mutationID.rawValue < $1.mutationID.rawValue },
-            retiredMutationIDs: retiredMutationIDs.sorted { $0.rawValue < $1.rawValue }
+            retiredMutationIDs: retiredMutationIDs.sorted { $0.rawValue < $1.rawValue },
+            replication: replicationState
         )
     }
 
