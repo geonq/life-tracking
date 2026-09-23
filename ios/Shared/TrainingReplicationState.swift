@@ -192,12 +192,13 @@ public struct TrainingReplicationState: Codable, Equatable, Sendable {
     }
 
     func validate(
-        retainedSessionIDs: Set<TrainingRecordID>,
-        receiptMutationIDs: Set<TrainingRecordID>,
-        retiredMutationIDs: Set<TrainingRecordID>
+        retainedSessions: [TrainingRecordID: TrainingSession],
+        receiptsByMutationID: [TrainingRecordID: TrainingReceiptJournalEntry],
+        retiredMutationIDs: Set<TrainingRecordID>,
+        now: Date
     ) throws {
-        // Bootstrap map entries are represented by exactly one `.bootstrap`
-        // intent until the later sealing batch emits a signed operation.
+        // Batch B keeps the adapter ledger empty while the ordered local
+        // command journal carries each record through its current post-image.
         do { try binding.validate() } catch { throw TrainingStoreError.corruptLedger }
         guard bootstrapMap.count <= TrainingStoreLimits.maximumReplicationBootstrapEntries,
               pendingIntents.count <= TrainingStoreLimits.maximumReplicationPendingIntents,
@@ -208,6 +209,7 @@ public struct TrainingReplicationState: Codable, Equatable, Sendable {
             throw TrainingStoreError.corruptLedger
         }
 
+        let retainedSessionIDs = Set(retainedSessions.keys)
         var entityIDByRecordID: [TrainingRecordID: String] = [:]
         for key in entityKeys {
             let canonicalEntityID: String
@@ -222,10 +224,13 @@ public struct TrainingReplicationState: Codable, Equatable, Sendable {
                 throw TrainingStoreError.corruptLedger
             }
         }
-        guard Set(entityIDByRecordID.keys) == retainedSessionIDs else {
+        let mappedRecordIDs = Set(entityIDByRecordID.keys)
+        guard retainedSessionIDs.isSubset(of: mappedRecordIDs) else {
             throw TrainingStoreError.corruptLedger
         }
+
         var bootstrapByMutationID: [TrainingRecordID: TrainingBootstrapEntry] = [:]
+        var bootstrapByRecordID: [TrainingRecordID: TrainingBootstrapEntry] = [:]
         var bootstrapRecordIDs = Set<TrainingRecordID>()
         for entry in bootstrapMap {
             let canonicalEntityID: String
@@ -240,40 +245,152 @@ public struct TrainingReplicationState: Codable, Equatable, Sendable {
                   entityIDByRecordID[entry.recordID] == entry.entityID,
                   bootstrapRecordIDs.insert(entry.recordID).inserted,
                   bootstrapByMutationID.updateValue(entry, forKey: entry.mutationID) == nil,
-                  !receiptMutationIDs.contains(entry.mutationID),
+                  bootstrapByRecordID.updateValue(entry, forKey: entry.recordID) == nil,
+                  receiptsByMutationID[entry.mutationID] == nil,
                   !retiredMutationIDs.contains(entry.mutationID) else {
                 throw TrainingStoreError.corruptLedger
             }
         }
-        guard bootstrapRecordIDs == retainedSessionIDs else {
+        guard bootstrapRecordIDs == mappedRecordIDs else {
             throw TrainingStoreError.corruptLedger
         }
 
         var intentMutationIDs = Set<TrainingRecordID>()
-        var intentRecordIDs = Set<TrainingRecordID>()
+        var bootstrappedRecordIDs = Set<TrainingRecordID>()
+        var deletedRecordIDs = Set<TrainingRecordID>()
+        var lastSessionByRecordID: [TrainingRecordID: TrainingSession] = [:]
+        var lastPayloadBytesByRecordID: [TrainingRecordID: Data] = [:]
         for intent in pendingIntents {
             guard intentMutationIDs.insert(intent.mutationID).inserted,
-                  intentRecordIDs.insert(intent.recordID).inserted,
-                  retainedSessionIDs.contains(intent.recordID),
                   let entityID = entityIDByRecordID[intent.recordID],
-                  let entry = bootstrapByMutationID[intent.mutationID],
-                  intent.kind == .bootstrap,
-                  entry.recordID == intent.recordID,
-                  entry.entityID == entityID,
-                  entry.payloadHash == intent.payload.hash else {
+                  let entry = bootstrapByRecordID[intent.recordID],
+                  entry.entityID == entityID else {
                 throw TrainingStoreError.corruptLedger
             }
-            do { try SyncWireCodec.validate(intent.payload) } catch { throw TrainingStoreError.corruptLedger }
-            guard intent.payload.blobHash == nil,
-                  let inline = intent.payload.inline,
-                  let bytes = try? trainingSyncData(fromBase64URL: inline),
-                  let payload = try? FitnessPayloadCodec.decode(bytes),
-                  payload.trainingSession?.id == intent.recordID else {
+
+            switch intent.kind {
+            case .bootstrap:
+                guard bootstrappedRecordIDs.insert(intent.recordID).inserted,
+                      intent.mutationID == entry.mutationID else {
+                    throw TrainingStoreError.corruptLedger
+                }
+                let decoded = try Self.decodeTrainingSession(from: intent.payload, now: now)
+                guard decoded.session.id == intent.recordID,
+                      entry.payloadHash == intent.payload.hash else {
+                    throw TrainingStoreError.corruptLedger
+                }
+                lastSessionByRecordID[intent.recordID] = decoded.session
+                lastPayloadBytesByRecordID[intent.recordID] = decoded.bytes
+
+            case .put:
+                guard bootstrappedRecordIDs.contains(intent.recordID),
+                      !deletedRecordIDs.contains(intent.recordID),
+                      intent.mutationID != entry.mutationID,
+                      let previous = lastSessionByRecordID[intent.recordID] else {
+                    throw TrainingStoreError.corruptLedger
+                }
+                let decoded = try Self.decodeTrainingSession(from: intent.payload, now: now)
+                guard decoded.session.id == intent.recordID,
+                      previous.revision < Int.max - 1,
+                      decoded.session.revision == previous.revision + 1 else {
+                    throw TrainingStoreError.corruptLedger
+                }
+                try Self.validateOrdinaryIntentReceipt(
+                    mutationID: intent.mutationID,
+                    recordID: intent.recordID,
+                    revision: decoded.session.revision,
+                    receiptsByMutationID: receiptsByMutationID,
+                    retiredMutationIDs: retiredMutationIDs
+                )
+                lastSessionByRecordID[intent.recordID] = decoded.session
+                lastPayloadBytesByRecordID[intent.recordID] = decoded.bytes
+
+            case .delete:
+                guard bootstrappedRecordIDs.contains(intent.recordID),
+                      !deletedRecordIDs.contains(intent.recordID),
+                      intent.mutationID != entry.mutationID,
+                      let previous = lastSessionByRecordID[intent.recordID],
+                      intent.payload == Self.inlinePayload(Data()) else {
+                    throw TrainingStoreError.corruptLedger
+                }
+                try Self.validateOrdinaryIntentReceipt(
+                    mutationID: intent.mutationID,
+                    recordID: intent.recordID,
+                    revision: previous.revision,
+                    receiptsByMutationID: receiptsByMutationID,
+                    retiredMutationIDs: retiredMutationIDs
+                )
+                deletedRecordIDs.insert(intent.recordID)
+
+            case .resolve:
                 throw TrainingStoreError.corruptLedger
             }
         }
-        guard intentMutationIDs.count == bootstrapByMutationID.count,
-              intentRecordIDs == retainedSessionIDs else {
+
+        guard bootstrappedRecordIDs == mappedRecordIDs else {
+            throw TrainingStoreError.corruptLedger
+        }
+        let terminalLiveRecordIDs = Set(lastSessionByRecordID.keys).subtracting(deletedRecordIDs)
+        guard terminalLiveRecordIDs == retainedSessionIDs else {
+            throw TrainingStoreError.corruptLedger
+        }
+        for (recordID, session) in retainedSessions {
+            guard let terminalBytes = lastPayloadBytesByRecordID[recordID] else {
+                throw TrainingStoreError.corruptLedger
+            }
+            let canonicalCurrentBytes: Data
+            do {
+                canonicalCurrentBytes = try FitnessPayloadCodec.encode(session, now: now)
+            } catch {
+                throw TrainingStoreError.corruptLedger
+            }
+            guard terminalBytes == canonicalCurrentBytes else {
+                throw TrainingStoreError.corruptLedger
+            }
+        }
+    }
+
+    private static func decodeTrainingSession(
+        from payload: SyncPayload,
+        now: Date
+    ) throws -> (session: TrainingSession, bytes: Data) {
+        do {
+            try SyncWireCodec.validate(payload)
+            guard payload.blobHash == nil,
+                  let inline = payload.inline else {
+                throw TrainingStoreError.corruptLedger
+            }
+            let bytes = try trainingSyncData(fromBase64URL: inline)
+            guard trainingSyncBase64URL(bytes) == inline else {
+                throw TrainingStoreError.corruptLedger
+            }
+            let decoded = try FitnessPayloadCodec.decode(bytes, now: now)
+            guard let session = decoded.trainingSession else {
+                throw TrainingStoreError.corruptLedger
+            }
+            return (session, bytes)
+        } catch {
+            throw TrainingStoreError.corruptLedger
+        }
+    }
+
+    private static func validateOrdinaryIntentReceipt(
+        mutationID: TrainingRecordID,
+        recordID: TrainingRecordID,
+        revision: Int,
+        receiptsByMutationID: [TrainingRecordID: TrainingReceiptJournalEntry],
+        retiredMutationIDs: Set<TrainingRecordID>
+    ) throws {
+        if let entry = receiptsByMutationID[mutationID] {
+            guard !retiredMutationIDs.contains(mutationID),
+                  entry.mutationID == mutationID,
+                  entry.receipt.mutationID == mutationID,
+                  entry.receipt.outcome == .saved,
+                  entry.receipt.recordID == recordID,
+                  entry.receipt.revision == revision else {
+                throw TrainingStoreError.corruptLedger
+            }
+        } else if !retiredMutationIDs.contains(mutationID) {
             throw TrainingStoreError.corruptLedger
         }
     }
@@ -314,7 +431,7 @@ public struct TrainingReplicationState: Codable, Equatable, Sendable {
     }
 }
 
-/// Batch A permits only the exact empty adapter envelope. Decode each array as
+/// Batch B permits only the exact empty adapter envelope. Decode each array as
 /// an unkeyed container and reject it while positioned before its first item,
 /// so nested operation and frontier objects are never materialized.
 private struct TrainingEmptySyncAdapterEnvelope: Decodable {

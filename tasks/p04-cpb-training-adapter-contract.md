@@ -130,9 +130,9 @@ A. Schema/key map: FitnessTrainingStore.swift, new
    ios/Shared/TrainingReplicationState.swift, FitnessTrainingStoreTests.swift.
    Tests: v1/v2 preservation, v3 round-trip, bind/restart ID stability,
    collision rejection, ambiguous legacy attachment blocked.
-B. Command capture: store execute/mutation helpers/persistCandidate and receipt
-   clearing. Tests: every command mapping, retry identity, changed-payload
-   reuse, write failure atomicity, delete survives restart and receipt export.
+B. Command capture: exact scope and invariants are in
+   tasks/p04-cpb-batch-b-amendment.md; that amendment supersedes this short
+   summary and is authoritative. Keep the embedded adapter ledger empty.
 C. Sealing: new ios/Sync/TrainingSyncAdapter.swift plus FitnessSyncTests.
    Tests: literal entity/payload/signature bytes, failed transaction no sequence
    hole, restart byte identity, key mismatch and overflow.

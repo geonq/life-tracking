@@ -129,12 +129,14 @@ public struct TrainingLedgerEnvelope: Codable, Equatable, Sendable {
         }
 
         var sessionIDs = Set<TrainingRecordID>()
+        var sessionsByID: [TrainingRecordID: TrainingSession] = [:]
         var importedOwnershipTokens = Set<String>()
         var openSessionCount = 0
         for session in sessions {
             guard sessionIDs.insert(session.id).inserted else {
                 throw TrainingStoreError.corruptLedger
             }
+            sessionsByID[session.id] = session
             try session.validate(now: now)
             if let importedRecordKey = session.importedRecordKey {
                 for token in try TrainingImportedWorkoutIdentity.stableKeyTokens(importedRecordKey) {
@@ -152,8 +154,10 @@ public struct TrainingLedgerEnvelope: Codable, Equatable, Sendable {
         }
 
         var receiptIDs = Set<TrainingRecordID>()
+        var receiptsByMutationID: [TrainingRecordID: TrainingReceiptJournalEntry] = [:]
         for entry in receipts {
             guard receiptIDs.insert(entry.mutationID).inserted,
+                  receiptsByMutationID.updateValue(entry, forKey: entry.mutationID) == nil,
                   entry.mutationID == entry.receipt.mutationID else {
                 throw TrainingStoreError.corruptLedger
             }
@@ -167,9 +171,10 @@ public struct TrainingLedgerEnvelope: Codable, Equatable, Sendable {
         }
         if let replication {
             try replication.validate(
-                retainedSessionIDs: sessionIDs,
-                receiptMutationIDs: receiptIDs,
-                retiredMutationIDs: retiredIDs
+                retainedSessions: sessionsByID,
+                receiptsByMutationID: receiptsByMutationID,
+                retiredMutationIDs: retiredIDs,
+                now: now
             )
         }
     }
@@ -389,6 +394,7 @@ public actor FitnessTrainingStore {
     private let afterReplace: (() throws -> Void)?
     private let beforeRestore: (() throws -> Void)?
     private let makeBootstrapMutationID: () -> UUID
+    private let makeTrainingRecordID: () -> TrainingRecordID
 
     private var sessionsByID: [TrainingRecordID: TrainingSession] = [:]
     private var receiptsByMutationID: [TrainingRecordID: TrainingReceiptJournalEntry] = [:]
@@ -409,7 +415,8 @@ public actor FitnessTrainingStore {
         beforeReplace: (() throws -> Void)? = nil,
         afterReplace: (() throws -> Void)? = nil,
         beforeRestore: (() throws -> Void)? = nil,
-        makeBootstrapMutationID: @escaping () -> UUID = { UUID() }
+        makeBootstrapMutationID: @escaping () -> UUID = { UUID() },
+        makeTrainingRecordID: @escaping () -> TrainingRecordID = { TrainingRecordID() }
     ) {
         self.persistenceURL = (persistenceURL ?? Self.defaultPersistenceURL)?.standardizedFileURL
         self.fileManager = fileManager
@@ -418,6 +425,7 @@ public actor FitnessTrainingStore {
         self.afterReplace = afterReplace
         self.beforeRestore = beforeRestore
         self.makeBootstrapMutationID = makeBootstrapMutationID
+        self.makeTrainingRecordID = makeTrainingRecordID
     }
 
     /// Loads the disk state. A malformed, unsupported, oversized, or
@@ -507,9 +515,10 @@ public actor FitnessTrainingStore {
                 ledger: TrainingReplicationState.emptyLedger(for: binding)
             )
             try state.validate(
-                retainedSessionIDs: recordIDs,
-                receiptMutationIDs: Set(receiptsByMutationID.keys),
-                retiredMutationIDs: retiredMutationIDs
+                retainedSessions: sessionsByID,
+                receiptsByMutationID: receiptsByMutationID,
+                retiredMutationIDs: retiredMutationIDs,
+                now: now
             )
             let candidate = TrainingLedgerEnvelope(
                 sessions: sessions,
@@ -880,6 +889,11 @@ public actor FitnessTrainingStore {
                 // receipt and makes a retry free of a second write.
                 return existing.receipt
             }
+            if let replicationState,
+               replicationState.bootstrapMap.contains(where: { $0.mutationID == mutation.mutationID })
+                || replicationState.pendingIntents.contains(where: { $0.mutationID == mutation.mutationID }) {
+                throw TrainingStoreError.replicationCollision
+            }
             let fingerprintVersion: TrainingFingerprintVersion = .losslessNumericV2
             let fingerprint = try TrainingFingerprint.hex(for: mutation, version: fingerprintVersion)
             guard receiptsByMutationID.count < TrainingStoreLimits.maximumReceipts else {
@@ -1004,6 +1018,10 @@ public actor FitnessTrainingStore {
             notes: mutation.notes,
             now: now
         )
+        guard sessionsByID[session.id] == nil,
+              replicationState?.entityKeys.contains(where: { $0.recordID == session.id }) != true else {
+            throw TrainingStoreError.replicationCollision
+        }
         var nextSessions = sessionsByID
         nextSessions[session.id] = session
         let receipt = try TrainingCommitReceipt(
@@ -1013,6 +1031,7 @@ public actor FitnessTrainingStore {
             revision: session.revision
         )
         return try persistCandidate(
+            mutation: mutation,
             sessions: nextSessions,
             receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: receipt),
             receipt: receipt
@@ -1043,6 +1062,7 @@ public actor FitnessTrainingStore {
                 message: "The durable session changed before this draft was saved."
             )
             return try persistCandidate(
+                mutation: mutation,
                 sessions: sessionsByID,
                 receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: conflict),
                 receipt: conflict
@@ -1088,6 +1108,7 @@ public actor FitnessTrainingStore {
             revision: next.revision
         )
         return try persistCandidate(
+            mutation: mutation,
             sessions: nextSessions,
             receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: receipt),
             receipt: receipt
@@ -1110,6 +1131,7 @@ public actor FitnessTrainingStore {
                 message: "The durable session changed before it was discarded."
             )
             return try persistCandidate(
+                mutation: mutation,
                 sessions: sessionsByID,
                 receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: conflict),
                 receipt: conflict
@@ -1142,6 +1164,7 @@ public actor FitnessTrainingStore {
             revision: next.revision
         )
         return try persistCandidate(
+            mutation: mutation,
             sessions: nextSessions,
             receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: receipt),
             receipt: receipt
@@ -1164,6 +1187,7 @@ public actor FitnessTrainingStore {
                 message: "The durable session changed before deletion."
             )
             return try persistCandidate(
+                mutation: mutation,
                 sessions: sessionsByID,
                 receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: conflict),
                 receipt: conflict
@@ -1179,6 +1203,7 @@ public actor FitnessTrainingStore {
             revision: current.revision
         )
         return try persistCandidate(
+            mutation: mutation,
             sessions: nextSessions,
             receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: receipt),
             receipt: receipt
@@ -1237,6 +1262,7 @@ public actor FitnessTrainingStore {
                     message: "The local session was already linked to this imported record."
                 )
                 return try persistCandidate(
+                    mutation: mutation,
                     sessions: sessionsByID,
                     receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: receipt),
                     receipt: receipt
@@ -1259,6 +1285,7 @@ public actor FitnessTrainingStore {
                 revision: next.revision
             )
             return try persistCandidate(
+                mutation: mutation,
                 sessions: nextSessions,
                 receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: receipt),
                 receipt: receipt
@@ -1294,6 +1321,7 @@ public actor FitnessTrainingStore {
             revision: next.revision
         )
         return try persistCandidate(
+            mutation: mutation,
             sessions: nextSessions,
             receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: receipt),
             receipt: receipt
@@ -1341,6 +1369,7 @@ public actor FitnessTrainingStore {
             revision: next.revision
         )
         return try persistCandidate(
+            mutation: mutation,
             sessions: nextSessions,
             receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: receipt),
             receipt: receipt
@@ -1362,6 +1391,7 @@ public actor FitnessTrainingStore {
             message: message
         )
         return try persistCandidate(
+            mutation: mutation,
             sessions: sessionsByID,
             receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: conflict),
             receipt: conflict
@@ -1385,6 +1415,7 @@ public actor FitnessTrainingStore {
             message: message
         )
         return try persistCandidate(
+            mutation: mutation,
             sessions: sessionsByID,
             receipts: receiptEntry(mutation: mutation, fingerprint: fingerprint, receipt: receipt),
             receipt: receipt
@@ -1404,25 +1435,35 @@ public actor FitnessTrainingStore {
     }
 
     private func persistCandidate(
+        mutation: TrainingMutation,
         sessions: [TrainingRecordID: TrainingSession],
         receipts: TrainingReceiptJournalEntry,
         receipt: TrainingCommitReceipt
     ) throws -> TrainingCommitReceipt {
         var nextReceipts = receiptsByMutationID
         nextReceipts[receipts.mutationID] = receipts
-        let envelope = TrainingLedgerEnvelope(
-            sessions: sessions.values.sorted {
-                if $0.startedAt != $1.startedAt { return $0.startedAt < $1.startedAt }
-                return $0.id.rawValue < $1.id.rawValue
-            },
-            receipts: nextReceipts.values.sorted { $0.mutationID.rawValue < $1.mutationID.rawValue },
-            retiredMutationIDs: retiredMutationIDs.sorted { $0.rawValue < $1.rawValue },
-            replication: replicationState
-        )
         do {
+            let now = try currentTime()
+            let nextReplication = try replicationCandidate(
+                for: mutation,
+                receipt: receipt,
+                sessions: sessions,
+                receipts: nextReceipts,
+                now: now
+            )
+            let envelope = TrainingLedgerEnvelope(
+                sessions: sessions.values.sorted {
+                    if $0.startedAt != $1.startedAt { return $0.startedAt < $1.startedAt }
+                    return $0.id.rawValue < $1.id.rawValue
+                },
+                receipts: nextReceipts.values.sorted { $0.mutationID.rawValue < $1.mutationID.rawValue },
+                retiredMutationIDs: retiredMutationIDs.sorted { $0.rawValue < $1.rawValue },
+                replication: nextReplication
+            )
             let data = try persistAndVerify(envelope)
             sessionsByID = sessions
             receiptsByMutationID = nextReceipts
+            replicationState = nextReplication
             lastDurableData = data
             preservedLedgerData = nil
             loadFailure = nil
@@ -1430,8 +1471,8 @@ public actor FitnessTrainingStore {
             if persistenceURL != nil { hasObservedDurableFile = true }
             return receipt
         } catch TrainingStoreError.ledgerTooLarge {
-            // No bytes were replaced and no receipt was published. This is a
-            // truthful blocked outcome; a retry can use the same draft/ID.
+            // Candidate domain, receipt, and replication state are all still
+            // local values here, so capacity blocks the mutation atomically.
             return try TrainingCommitReceipt(
                 mutationID: receipt.mutationID,
                 outcome: .blocked,
@@ -1440,6 +1481,119 @@ public actor FitnessTrainingStore {
                 blockReason: .ledgerSize,
                 message: TrainingStoreError.ledgerTooLarge.localizedDescription
             )
+        }
+    }
+
+    private func replicationCandidate(
+        for mutation: TrainingMutation,
+        receipt: TrainingCommitReceipt,
+        sessions: [TrainingRecordID: TrainingSession],
+        receipts: [TrainingRecordID: TrainingReceiptJournalEntry],
+        now: Date
+    ) throws -> TrainingReplicationState? {
+        guard let current = replicationState else { return nil }
+        guard receipt.outcome == .saved else { return current }
+
+        guard current.pendingIntents.count < TrainingStoreLimits.maximumReplicationPendingIntents else {
+            throw TrainingStoreError.ledgerTooLarge
+        }
+        var bootstrapMap = current.bootstrapMap
+        var pendingIntents = current.pendingIntents
+        var entityKeys = current.entityKeys
+
+        switch mutation.operation {
+        case .begin:
+            guard let recordID = receipt.recordID,
+                  let session = sessions[recordID] else {
+                throw TrainingStoreError.corruptLedger
+            }
+            guard !entityKeys.contains(where: { $0.recordID == recordID }),
+                  !bootstrapMap.contains(where: { $0.recordID == recordID }) else {
+                throw TrainingStoreError.replicationCollision
+            }
+            guard bootstrapMap.count < TrainingStoreLimits.maximumReplicationBootstrapEntries,
+                  entityKeys.count < TrainingStoreLimits.maximumReplicationEntityKeys else {
+                throw TrainingStoreError.ledgerTooLarge
+            }
+
+            let bootstrapID = TrainingRecordID(uuid: makeBootstrapMutationID())
+            var occupiedMutationIDs = Set(receipts.keys)
+            occupiedMutationIDs.formUnion(retiredMutationIDs)
+            occupiedMutationIDs.formUnion(bootstrapMap.map(\.mutationID))
+            occupiedMutationIDs.formUnion(pendingIntents.map(\.mutationID))
+            guard bootstrapID != mutation.mutationID,
+                  !occupiedMutationIDs.contains(bootstrapID) else {
+                throw TrainingStoreError.replicationCollision
+            }
+
+            let entityID = try TrainingReplicationState.entityID(for: recordID)
+            guard !entityKeys.contains(where: { $0.entityID == entityID }) else {
+                throw TrainingStoreError.replicationCollision
+            }
+            let payload = try encodedTrainingPayload(for: session, now: now)
+            bootstrapMap.append(TrainingBootstrapEntry(
+                recordID: recordID,
+                mutationID: bootstrapID,
+                entityID: entityID,
+                payloadHash: payload.hash
+            ))
+            entityKeys.append(TrainingEntityKey(recordID: recordID, entityID: entityID))
+            pendingIntents.append(TrainingSyncIntent(
+                mutationID: bootstrapID,
+                recordID: recordID,
+                kind: .bootstrap,
+                payload: payload
+            ))
+
+        case .update, .finish, .discard, .link, .unlink, .delete:
+            guard let recordID = receipt.recordID,
+                  let bootstrap = bootstrapMap.first(where: { $0.recordID == recordID }),
+                  entityKeys.contains(where: { $0.recordID == recordID }) else {
+                throw TrainingStoreError.corruptLedger
+            }
+            guard mutation.mutationID != bootstrap.mutationID,
+                  !pendingIntents.contains(where: { $0.mutationID == mutation.mutationID }) else {
+                throw TrainingStoreError.replicationCollision
+            }
+
+            let kind: SyncOperationKind
+            let payload: SyncPayload
+            if mutation.operation == .delete {
+                guard sessions[recordID] == nil else { throw TrainingStoreError.corruptLedger }
+                kind = .delete
+                payload = TrainingReplicationState.inlinePayload(Data())
+            } else {
+                guard let session = sessions[recordID] else { throw TrainingStoreError.corruptLedger }
+                kind = .put
+                payload = try encodedTrainingPayload(for: session, now: now)
+            }
+            pendingIntents.append(TrainingSyncIntent(
+                mutationID: mutation.mutationID,
+                recordID: recordID,
+                kind: kind,
+                payload: payload
+            ))
+        }
+
+        return TrainingReplicationState(
+            binding: current.binding,
+            bootstrapMap: bootstrapMap,
+            pendingIntents: pendingIntents,
+            entityKeys: entityKeys,
+            ledger: current.ledger
+        )
+    }
+
+    private func encodedTrainingPayload(
+        for session: TrainingSession,
+        now: Date
+    ) throws -> SyncPayload {
+        do {
+            return TrainingReplicationState.inlinePayload(
+                try FitnessPayloadCodec.encode(session, now: now)
+            )
+        } catch SyncFailure.capacity {
+            throw TrainingStoreError.ledgerTooLarge
         }
     }
 
@@ -1476,6 +1630,7 @@ public actor FitnessTrainingStore {
             exerciseLogs = []
         }
         return try TrainingSession(
+            id: makeTrainingRecordID(),
             revision: 0,
             activityKind: activityKind,
             title: sessionTitle,
