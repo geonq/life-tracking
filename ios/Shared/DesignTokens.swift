@@ -12,9 +12,9 @@ import UIKit
 /// place prevents a light/dark token from drifting away from the palette.
 enum LifeOSPalette {
     static let brandBlueHex: UInt32 = 0x0253C4
-    // Focus and observed data intentionally share the readable blue-300 role.
     static let observedBlueHex: UInt32 = 0x5DA0FD
-    static let focusBlueHex: UInt32 = 0x5DA0FD
+    static let focusBlueHex: UInt32 = 0x3085FD
+    static let focusBlueLightHex: UInt32 = 0x0244A2
     static let primaryTextDarkHex: UInt32 = 0xF5F5F7
     static let primaryTextLightHex: UInt32 = 0x18181B
     static let targetGreenHex: UInt32 = 0x60D386
@@ -23,12 +23,10 @@ enum LifeOSPalette {
     static let calorieOrangeHex: UInt32 = 0xFFB06E
     static let calorieOrangeLightHex: UInt32 = 0xA25A03
     static let proteinTealHex: UInt32 = 0x63D2D2
-    // Warning shares the authored calorie orange semantic in both modes.
-    static let warningOrangeHex: UInt32 = 0xFFB06E
-    static let warningOrangeLightHex: UInt32 = 0xA25A03
-    static let warningTextLightHex: UInt32 = warningOrangeLightHex
-    static let dangerRedHex: UInt32 = 0xFF8585
-    static let dangerRedLightHex: UInt32 = 0xB42335
+    static let warningYellowHex: UInt32 = 0xFBDD68
+    static let warningYellowLightHex: UInt32 = 0x806000
+    static let dangerRedHex: UInt32 = 0xFC584F
+    static let dangerRedLightHex: UInt32 = 0xB70112
     static let infoTealHex: UInt32 = 0x63D2D2
     static let infoTealLightHex: UInt32 = 0x067878
     static let metadataTextDarkHex: UInt32 = 0xA1A1AA
@@ -214,7 +212,7 @@ enum LifeOSSemanticColorPairs {
     static let focus = LifeOSColorPair(
         darkForegroundHex: LifeOSPalette.focusBlueHex,
         darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
-        lightForegroundHex: LifeOSPalette.brandBlueHex,
+        lightForegroundHex: LifeOSPalette.focusBlueLightHex,
         lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     /// The edge of an unfilled control is evaluated against the surface it
@@ -240,15 +238,15 @@ enum LifeOSSemanticColorPairs {
     )
     static let success = estimate
     static let warning = LifeOSColorPair(
-        darkForegroundHex: LifeOSPalette.warningOrangeHex,
+        darkForegroundHex: LifeOSPalette.warningYellowHex,
         darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
-        lightForegroundHex: LifeOSPalette.warningOrangeLightHex,
+        lightForegroundHex: LifeOSPalette.warningYellowLightHex,
         lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     static let warningText = LifeOSColorPair(
-        darkForegroundHex: LifeOSPalette.warningOrangeHex,
+        darkForegroundHex: LifeOSPalette.warningYellowHex,
         darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
-        lightForegroundHex: LifeOSPalette.warningTextLightHex,
+        lightForegroundHex: LifeOSPalette.warningYellowLightHex,
         lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     static let danger = LifeOSColorPair(
@@ -510,11 +508,10 @@ public extension Color {
         light: LifeOSPalette.brandBlueHex
     )
 
-    /// Focus and observed data share the readable blue-300 dark-mode pair;
-    /// both resolve to the deeper brand blue in light mode.
+    /// Focus remains distinct from observed chart data in both appearances.
     static let lifeOSFocusBlue = lifeOSAdaptiveHex(
-        dark: LifeOSPalette.focusBlueHex,
-        light: LifeOSPalette.brandBlueHex
+        dark: LifeOSSemanticColorPairs.focus.darkForegroundHex,
+        light: LifeOSSemanticColorPairs.focus.lightForegroundHex
     )
 
     // Explicit action, link, focus, and data-meaning roles. These are kept
@@ -654,7 +651,7 @@ public extension Color {
     /// Text-safe semantic green. Indicators may keep the more vivid `success`.
     static let lifeOSSuccessText = lifeOSSuccess
     /// Warning indicators and normal-size warning labels share one authored
-    /// orange pair in both appearances.
+    /// warning pair in both appearances.
     static let lifeOSWarning = lifeOSAdaptiveHex(
         dark: LifeOSSemanticColorPairs.warning.darkForegroundHex,
         light: LifeOSSemanticColorPairs.warning.lightForegroundHex
@@ -853,9 +850,9 @@ public enum LifeOSTokens {
         public static let observed = LifeOSTokens.chartObserved
         /// Current estimate — green, dashed [6,4] at 2pt.
         public static let estimate = LifeOSTokens.estimate
-        /// Goal/reference line, green and dashed [2,4].
+        /// Goal/reference line uses the neutral palette; geometry is defined by the chart contract.
         public static let target = LifeOSTokens.neutralTarget
-        /// Past estimate / account history — tertiary grey, dotted at 1.25pt.
+        /// Past estimate / account history — tertiary grey, dotted at 1.5pt.
         public static let history = LifeOSTokens.metadataText
     }
 
@@ -1007,6 +1004,7 @@ public enum LifeOSMotion {
         case spring(response: Double, damping: Double)
         case interpolatingSpring(mass: Double, stiffness: Double, damping: Double, initialVelocity: Double)
         case interactive(response: Double, damping: Double)
+        case cubicBezier(x1: Double, y1: Double, x2: Double, y2: Double, duration: Double)
         case direct
 
         public var animation: Animation {
@@ -1024,6 +1022,8 @@ public enum LifeOSMotion {
                 )
             case let .interactive(response, damping):
                 return .interactiveSpring(response: response, dampingFraction: damping)
+            case let .cubicBezier(x1, y1, x2, y2, duration):
+                return .timingCurve(x1, y1, x2, y2, duration: duration)
             case .direct:
                 return .linear(duration: 0)
             }
@@ -1032,7 +1032,9 @@ public enum LifeOSMotion {
 
     public enum Timing {
         public static let press = Curve.easeOut(0.08)
-        public static let release = Curve.easeOut(0.14)
+        public static let release = Curve.cubicBezier(
+            x1: 0.16, y1: 1, x2: 0.3, y2: 1, duration: 0.10
+        )
         public static let hover = Curve.easeOut(0.12)
         public static let feedback = Curve.easeOut(0.10)
         public static let reducedNavigation = Curve.easeOut(0.10)

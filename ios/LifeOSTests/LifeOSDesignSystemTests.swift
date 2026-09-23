@@ -134,14 +134,16 @@ final class LifeOSDesignSystemTests: XCTestCase {
     func testCanonicalPaletteValuesStayDistinctAndSourcedFromOneContract() {
         XCTAssertEqual(LifeOSPalette.brandBlueHex, 0x0253C4)
         XCTAssertEqual(LifeOSPalette.observedBlueHex, 0x5DA0FD)
-        XCTAssertEqual(LifeOSPalette.focusBlueHex, 0x5DA0FD)
+        XCTAssertEqual(LifeOSPalette.focusBlueHex, 0x3085FD)
+        XCTAssertEqual(LifeOSPalette.focusBlueLightHex, 0x0244A2)
         XCTAssertEqual(LifeOSPalette.estimateGreenHex, 0x60D386)
         XCTAssertEqual(LifeOSPalette.calorieOrangeHex, 0xFFB06E)
         XCTAssertEqual(LifeOSPalette.calorieOrangeLightHex, 0xA25A03)
         XCTAssertEqual(LifeOSPalette.proteinTealHex, 0x63D2D2)
-        XCTAssertEqual(LifeOSPalette.warningOrangeHex, 0xFFB06E)
-        XCTAssertEqual(LifeOSPalette.warningOrangeLightHex, 0xA25A03)
-        XCTAssertEqual(LifeOSPalette.warningTextLightHex, LifeOSPalette.warningOrangeLightHex)
+        XCTAssertEqual(LifeOSPalette.warningYellowHex, 0xFBDD68)
+        XCTAssertEqual(LifeOSPalette.warningYellowLightHex, 0x806000)
+        XCTAssertEqual(LifeOSPalette.dangerRedHex, 0xFC584F)
+        XCTAssertEqual(LifeOSPalette.dangerRedLightHex, 0xB70112)
         XCTAssertEqual(LifeOSPalette.fitnessVioletDarkHex, 0xB59AFF)
         XCTAssertEqual(LifeOSPalette.fitnessVioletLightHex, 0x7040B8)
         XCTAssertEqual(LifeOSPalette.taxPurpleDarkHex, 0xC853E2)
@@ -167,6 +169,18 @@ final class LifeOSDesignSystemTests: XCTestCase {
             LifeOSPalette.focusBlueHex
         )
         XCTAssertEqual(
+            LifeOSSemanticColorPairs.focus.lightForegroundHex,
+            LifeOSPalette.focusBlueLightHex
+        )
+        XCTAssertNotEqual(
+            LifeOSSemanticColorPairs.focus.darkForegroundHex,
+            LifeOSPalette.observedBlueHex
+        )
+        XCTAssertNotEqual(
+            LifeOSSemanticColorPairs.focus.lightForegroundHex,
+            LifeOSPalette.brandBlueHex
+        )
+        XCTAssertEqual(
             LifeOSSemanticColorPairs.estimate.darkForegroundHex,
             LifeOSPalette.estimateGreenHex
         )
@@ -178,6 +192,32 @@ final class LifeOSDesignSystemTests: XCTestCase {
             LifeOSSemanticColorPairs.calories.darkForegroundHex,
             LifeOSPalette.calorieOrangeHex
         )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.warning.darkForegroundHex,
+            LifeOSPalette.warningYellowHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.warning.lightForegroundHex,
+            LifeOSPalette.warningYellowLightHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.warningText.darkForegroundHex,
+            LifeOSPalette.warningYellowHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.warningText.lightForegroundHex,
+            LifeOSPalette.warningYellowLightHex
+        )
+        XCTAssertNotEqual(
+            LifeOSSemanticColorPairs.warning.darkForegroundHex,
+            LifeOSSemanticColorPairs.calories.darkForegroundHex
+        )
+        XCTAssertNotEqual(
+            LifeOSSemanticColorPairs.warning.lightForegroundHex,
+            LifeOSSemanticColorPairs.calories.lightForegroundHex
+        )
+        XCTAssertEqual(LifeOSSemanticColorPairs.danger.darkForegroundHex, 0xFC584F)
+        XCTAssertEqual(LifeOSSemanticColorPairs.danger.lightForegroundHex, 0xB70112)
         XCTAssertEqual(
             LifeOSSemanticColorPairs.protein.darkForegroundHex,
             LifeOSPalette.proteinTealHex
@@ -588,6 +628,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
             LifeOSSemanticColorPairs.focus,
             LifeOSSemanticColorPairs.neutralTarget,
             LifeOSSemanticColorPairs.estimate,
+            LifeOSSemanticColorPairs.danger,
             LifeOSSemanticColorPairs.warningText,
             LifeOSSemanticColorPairs.calories,
             LifeOSSemanticColorPairs.protein,
@@ -599,6 +640,20 @@ final class LifeOSDesignSystemTests: XCTestCase {
             XCTAssertTrue(pair.meetsGraphicContrast, "Graphic contrast failed for \(pair)")
         }
 
+        XCTAssertGreaterThanOrEqual(
+            LifeOSContrast.contrastRatio(
+                foreground: LifeOSPalette.focusBlueHex,
+                background: LifeOSPalette.raisedDarkHex
+            ),
+            3
+        )
+        XCTAssertGreaterThanOrEqual(
+            LifeOSContrast.contrastRatio(
+                foreground: LifeOSPalette.focusBlueLightHex,
+                background: LifeOSPalette.raisedLightHex
+            ),
+            3
+        )
         XCTAssertTrue(LifeOSSemanticColorPairs.warning.meetsGraphicContrast)
 
         XCTAssertNotEqual(
@@ -635,11 +690,11 @@ final class LifeOSDesignSystemTests: XCTestCase {
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.warning.lightForegroundHex,
-            LifeOSPalette.warningOrangeLightHex
+            LifeOSPalette.warningYellowLightHex
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.warningText.lightForegroundHex,
-            LifeOSPalette.warningTextLightHex
+            LifeOSPalette.warningYellowLightHex
         )
         XCTAssertEqual(
             LifeOSModuleColorPairs.fitness.darkForegroundHex,
@@ -1449,7 +1504,14 @@ final class LifeOSDesignSystemTests: XCTestCase {
     }
     func testCanonicalMotionTimingsAndCompatibilityAliases() {
         XCTAssertEqual(LifeOSMotion.Timing.press, .easeOut(0.08))
-        XCTAssertEqual(LifeOSMotion.Timing.release, .easeOut(0.14))
+        let releaseCurve = LifeOSMotion.Curve.cubicBezier(
+            x1: 0.16, y1: 1, x2: 0.3, y2: 1, duration: 0.10
+        )
+        XCTAssertEqual(LifeOSMotion.Timing.release, releaseCurve)
+        XCTAssertEqual(
+            releaseCurve.animation,
+            .timingCurve(0.16, 1, 0.3, 1, duration: 0.10)
+        )
         XCTAssertEqual(LifeOSMotion.Timing.hover, .easeOut(0.12))
         XCTAssertEqual(LifeOSMotion.Timing.reducedNavigation, .easeOut(0.10))
         XCTAssertEqual(LifeOSMotion.Timing.primary, .easeOut(0.18))

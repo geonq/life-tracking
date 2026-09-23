@@ -49,7 +49,7 @@ public enum LifeOSChartSeriesKind: String, CaseIterable, Codable, Sendable {
         switch self {
         case .observed: "Observed"
         case .target: "Target"
-        case .estimate: "Estimate"
+        case .estimate: "Estimated"
         case .history: "History"
         }
     }
@@ -59,13 +59,13 @@ public enum LifeOSChartSeriesKind: String, CaseIterable, Codable, Sendable {
         case .observed:
             // The observed series is the sole solid 2pt line. A low-opacity
             // area supports trend reading without turning the plot into a glow.
-            LifeOSChartSeriesStyle(lineStyle: .solid, lineWidth: 2, areaOpacity: 0.08)
+            LifeOSChartSeriesStyle(lineStyle: .solid, lineWidth: 2, areaOpacity: 0.10)
         case .target:
-            LifeOSChartSeriesStyle(lineStyle: .dotted, lineWidth: 1.25, dashPattern: [2, 4])
+            LifeOSChartSeriesStyle(lineStyle: .dashed, lineWidth: 1, dashPattern: [2, 4])
         case .estimate:
-            LifeOSChartSeriesStyle(lineStyle: .dashed, lineWidth: 1.5, dashPattern: [6, 4])
+            LifeOSChartSeriesStyle(lineStyle: .dashed, lineWidth: 2, dashPattern: [6, 4])
         case .history:
-            LifeOSChartSeriesStyle(lineStyle: .dotted, lineWidth: 1.25, dashPattern: [1, 3])
+            LifeOSChartSeriesStyle(lineStyle: .dotted, lineWidth: 1.5, dashPattern: [1, 3])
         }
     }
 

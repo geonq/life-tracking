@@ -918,25 +918,30 @@ final class LifeOSChartInteractionTests: XCTestCase {
         let observed = LifeOSChartSeriesKind.observed.style
         XCTAssertEqual(observed.lineStyle, .solid)
         XCTAssertEqual(observed.lineWidth, 2, accuracy: 0.0001)
-        XCTAssertEqual(observed.areaOpacity, 0.08, accuracy: 0.0001)
+        XCTAssertEqual(observed.areaOpacity, 0.10, accuracy: 0.0001)
         XCTAssertEqual(observed.dashPattern.map(Double.init), [])
 
         let target = LifeOSChartSeriesKind.target.style
-        XCTAssertEqual(target.lineStyle, .dotted)
-        XCTAssertEqual(target.lineWidth, 1.25, accuracy: 0.0001)
+        XCTAssertEqual(target.lineStyle, .dashed)
+        XCTAssertEqual(target.lineWidth, 1, accuracy: 0.0001)
+        XCTAssertEqual(target.areaOpacity, 0, accuracy: 0.0001)
         XCTAssertEqual(target.dashPattern.map(Double.init), [2, 4])
-        XCTAssertEqual(LifeOSChartSeriesKind.target.color, LifeOSTokens.Series.target)
+        XCTAssertEqual(LifeOSChartSeriesKind.target.color, LifeOSTokens.neutralTarget)
 
         let estimate = LifeOSChartSeriesKind.estimate.style
         XCTAssertEqual(estimate.lineStyle, .dashed)
-        XCTAssertEqual(estimate.lineWidth, 1.5, accuracy: 0.0001)
+        XCTAssertEqual(estimate.lineWidth, 2, accuracy: 0.0001)
+        XCTAssertEqual(estimate.areaOpacity, 0, accuracy: 0.0001)
         XCTAssertEqual(estimate.dashPattern.map(Double.init), [6, 4])
-        XCTAssertEqual(LifeOSChartSeriesKind.estimate.color, LifeOSTokens.Series.estimate)
+        XCTAssertEqual(LifeOSChartSeriesKind.estimate.label, "Estimated")
+        XCTAssertEqual(LifeOSChartSeriesKind.estimate.color, LifeOSTokens.estimate)
 
         let history = LifeOSChartSeriesKind.history.style
         XCTAssertEqual(history.lineStyle, .dotted)
-        XCTAssertEqual(history.lineWidth, 1.25, accuracy: 0.0001)
+        XCTAssertEqual(history.lineWidth, 1.5, accuracy: 0.0001)
+        XCTAssertEqual(history.areaOpacity, 0, accuracy: 0.0001)
         XCTAssertEqual(history.dashPattern.map(Double.init), [1, 3])
+        XCTAssertEqual(LifeOSChartSeriesKind.history.color, LifeOSTokens.metadataText)
     }
 
     func testChartStyleSanitizesNonFiniteGeometry() {

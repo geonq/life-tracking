@@ -44,7 +44,7 @@
 | Selected navigation label | `#F7F7F8 / #1B1B1E` | `#101012 / #F4F4F5` |
 | Disabled control | `#A1A1AA / #1B1B1E` | `#52525B / #F4F4F5` |
 - Disabled buttons use the listed neutral pair plus disabled semantics; don't multiply the whole control's opacity. Input placeholders use secondary text, not a lower-contrast tertiary invention.
-- Decorative border: dark `#232329`, light `#E4E4E7`, 1/displayScale pt. Essential unfilled-control edge: dark `#73737D`, light `#767680`, 1 pt. Focus: dark `#5DA0FD`, light `#0253C4`, 2 pt outside with 2 pt clearance.
+- Decorative border: dark `#232329`, light `#E4E4E7`, 1/displayScale pt. Essential unfilled-control edge: dark `#73737D`, light `#767680`, 1 pt. Focus: dark `#3085FD`, light `#0244A2`, 2 pt outside with 2 pt clearance.
 - Limit backgrounds to canvas, surface, and raised; floating uses an existing fill. Sidebar uses canvas. No permanent card shadows; only floating overlays use black opacity 0.24 dark/0.12 light, radius 16, x 0/y 8. Native sheet shadow is system-owned, never doubled.
 - Radius: Home/Usage summary card 12 continuous, other content card 16 continuous; control/input/navigation 10 continuous; event 7 (joined overlap edge 2); tooltip 8; sheet 24 when configurable, otherwise system-native. Capsules only for progress arcs and truly compact status badges.
 - Spacing scale: 4, 8, 12, 16, 24, 32, 48 pt. Page gutters 16 compact/24 regular; card padding 16; section gap 24; sibling card gap 16; label/value gap 8; label/helper gap 4. No screen-specific 13/18/22 pt padding fixes.
