@@ -76,23 +76,8 @@ python3 -B scripts/validate_xcodegen.py \
   --spec ios/project.yml \
   --expected-version "$XCODEGEN_VERSION"
 
-DEVICE_INFO="$(xcrun simctl list devices available -j | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-devices = [
-    device
-    for runtime, entries in data["devices"].items()
-    if "iOS" in runtime
-    for device in entries
-    if device.get("isAvailable") and "iPhone" in device["name"]
-]
-preferred = [device for device in devices if device["name"] == "iPhone 17"]
-if not preferred:
-    preferred = [device for device in devices if "Pro" not in device["name"] and "SE" not in device["name"]]
-selected = preferred[0] if preferred else (devices[-1] if devices else None)
-if selected:
-    print(selected["udid"] + "|" + selected.get("state", "Shutdown"))
-')"
+DEVICE_INFO="$(xcrun simctl list -j | python3 -B \
+  "$ROOT/scripts/ios_simulator_selector.py")"
 
 if [[ -z "$DEVICE_INFO" ]]; then
   echo "No available iPhone simulator was found." >&2
