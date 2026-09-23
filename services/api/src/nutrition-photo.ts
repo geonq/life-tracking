@@ -8,7 +8,7 @@ import {
   type FoodEstimateProposal as FoodEstimateProposalValue,
   type FoodPhotoManifest as FoodPhotoManifestValue,
 } from '@iphone-life-os/contracts';
-import { lstatSync, readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
 import { TextDecoder } from 'node:util';
 import { z } from 'zod';
 import { parseStrictJSON } from './json-boundary.js';
@@ -141,14 +141,63 @@ function validSecret(value: unknown): string | undefined {
 }
 
 function readConfiguredSecret(pathValue: unknown): string | undefined {
-  if (typeof pathValue !== 'string' || pathValue.length === 0 || pathValue.length > 4_096) return undefined;
+  if (typeof pathValue !== 'string' || pathValue.length === 0 || pathValue.length > 4_096 || pathValue.includes('\0')) return undefined;
+  let descriptor: number | undefined;
+  let secret: string | undefined;
   try {
-    const metadata = lstatSync(pathValue);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 4_096) return undefined;
-    return validSecret(readFileSync(pathValue, 'utf8').trim());
+    const metadata = lstatSync(pathValue, { bigint: true });
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 0n || metadata.size > 4_096n) return undefined;
+
+    let flags = constants.O_RDONLY;
+    if (process.platform !== 'win32') {
+      if (typeof constants.O_NOFOLLOW !== 'number') return undefined;
+      flags |= constants.O_NOFOLLOW | constants.O_NONBLOCK;
+    }
+
+    descriptor = openSync(pathValue, flags);
+    const opened = fstatSync(descriptor, { bigint: true });
+    if (
+      !opened.isFile()
+      || opened.size < 0n
+      || opened.size > 4_096n
+      || opened.dev !== metadata.dev
+      || opened.ino !== metadata.ino
+      || opened.size !== metadata.size
+    ) return undefined;
+
+    const buffer = Buffer.alloc(4_097);
+    let total = 0;
+    while (total < buffer.length) {
+      const count = readSync(descriptor, buffer, total, buffer.length - total, total);
+      if (count === 0) break;
+      total += count;
+      if (total > 4_096) return undefined;
+    }
+    if (BigInt(total) !== opened.size) return undefined;
+
+    const afterRead = fstatSync(descriptor, { bigint: true });
+    if (
+      !afterRead.isFile()
+      || afterRead.dev !== opened.dev
+      || afterRead.ino !== opened.ino
+      || afterRead.size !== opened.size
+      || afterRead.mtimeNs !== opened.mtimeNs
+      || afterRead.ctimeNs !== opened.ctimeNs
+    ) return undefined;
+
+    secret = validSecret(buffer.subarray(0, total).toString('utf8').trim());
   } catch {
-    return undefined;
+    secret = undefined;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        secret = undefined;
+      }
+    }
   }
+  return secret;
 }
 
 function validModel(value: unknown): string | undefined {
