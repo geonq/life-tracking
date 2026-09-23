@@ -1,8 +1,8 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
-Latest pushed checkpoint: 09f5575 (CP-B Batch B); main and origin/main are
-synchronized. Astra static review and 57/57 focused iOS 27 tests passed. Focused FitnessTrainingStoreTests pass 57/57 on iOS 27. The broader lane
+Latest code checkpoints: CP-B B 09f5575 and selector 596077d; local/origin
+parity was verified after the selector push. Astra review and 20 tests passed. Focused FitnessTrainingStoreTests pass 57/57 on iOS 27. The broader lane
 selected iPhone 17/iOS 26.5 and completed 1,621/1,640 with 19 Planning/HealthKit
 failures; the full-suite gate is not green.
 Use artifacts/final/completion/requirements.json instead of percentages.
@@ -108,8 +108,8 @@ Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## Ordered implementation
 
-1. Finish the selector fix and repair the known Planning/HealthKit test failures;
-   rerun the full logic lane on iOS 27 before calling that gate green.
+1. Repair the known Planning/HealthKit failures and verify the full iOS 27
+   logic lane; the selector correction is pushed at 596077d.
 2. Implement CP-B C/D with injected bindings and durable local application;
    keep production registration blocked until E's trust gates pass.
 3. Continue P06-B native picker presentation and real-vault round-trip evidence

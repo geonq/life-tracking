@@ -47,9 +47,11 @@ in Coordination/archive; task contracts remain authoritative for execution.
 
 ## Current evidence
 
-- main and origin/main match at 09f5575; CP-B Batch B is pushed.
+- CP-B Batch B is pushed at 09f5575; selector fix is at 596077d. Local/origin
+  parity was verified after the selector push.
 - Astra static review is GO and 57/57 focused training tests passed on iOS 27.
-- Broad logic result is 1,621/1,640 on iOS 26.5; the simulator selector fix
-  and 19 narrow Planning/HealthKit test failures remain open.
+- Selector unit suite passes 20/20 and live full-list selection returns the
+  iOS 27 iPhone 17. Broad logic result is 1,621/1,640 on iOS 26.5; 19
+  Planning/HealthKit tests remain open pending an iOS 27 rerun.
 - Windows runtime/ACL, physical iPhone, live provider, native picker/vault,
   final security and whole-app acceptance are still unverified.

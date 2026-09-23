@@ -7,8 +7,8 @@ NO-GO. Updated 2026-09-23.
 
 ## Current checkpoint
 
-Latest pushed checkpoint is 09f5575 (CP-B Batch B); main and origin/main
-are synchronized.
+Latest feature checkpoints: CP-B Batch B at 09f5575 and selector at
+596077d; local/origin parity was verified after the selector push.
 P04 SyncStoreKind is at ebef1ac; native picker tests remain at
 7cc189f, following chooser 433ea64, workspace 86baaa8, inspector 454f4d1, and
 lifecycle checkpoint 4436211.
@@ -21,9 +21,9 @@ arm64 iOS 27 build-for-testing and five focused iPhone 17/iOS 27 design tests
 passed. Focused FitnessTrainingStoreTests pass 57/57 on iOS 27. The broader lane
 selected iPhone 17/iOS 26.5 and completed 1,621/1,640; 19 Planning/HealthKit
 tests remain red. The full suite is not green. The selector fix is in review;
-The selector candidate is not approved; its input must include runtime metadata
-and emitted state must be allowlisted. CoreSimulator is currently reachable for
-read-only inventory only. Nutrition-photo descriptor fix at `c1b811e` is Astra READY; 31 focused API tests, API typecheck
+Selector fix 596077d has Astra GO; 20 tests pass and the live full simctl
+pipeline selects the iOS 27 iPhone 17. No simulator booted. Nutrition-photo
+descriptor fix at `c1b811e` is Astra READY; 31 focused API tests, API typecheck
 and diff-check passed. Mac evidence does not establish Windows reparse-point
 behavior; native Windows tests and protected file/parent ACLs remain required.
 
@@ -111,16 +111,15 @@ remain pending; the earlier macOS XCTest launch canceled before tests began.
 
 ## Next execution
 
-1. Finish Astra review and push the selector fix; confirm the script selects
-   the installed iOS 27 iPhone 17 without booting a simulator.
+1. Repair the shared Planning fixture and stale assertions; investigate picker
+   dismissal, then rerun focused and full iOS 27 logic lanes serially.
 2. Batch C seals intents with the replication key and atomically commits signed
    bytes, entity heads and contiguous sequence allocation.
 3. Batch D applies verified operations and persists receipts before ACKs; do
    not compact tombstones or replay evidence in CP-B.
 4. Keep batch E production registration blocked until trusted descriptor
    membership and populated-remote legacy reconciliation are resolved.
-5. Repair the shared Planning fixture and stale assertions; investigate picker
-   dismissal and rerun focused and full iOS 27 logic lanes serially.
+5. Continue P06-B native picker runtime and real-vault round-trip evidence.
 6. Continue remaining visual, motion, widgets, providers, Windows, device and
    final-security gates.
 

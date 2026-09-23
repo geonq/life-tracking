@@ -2,7 +2,8 @@
 
 Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
 
-- Pushed main/origin/main: 09f5575. CP-B Batch B is reviewed and pushed.
+- CP-B Batch B: 09f5575. Selector: 596077d. Local/origin parity verified
+  after the selector push.
 - CP-B A is complete. B static review is GO; focused iOS 27 training tests
   pass 57/57. C/D remain ahead; E registration is blocked by trusted
   membership and populated-remote legacy reconciliation.
@@ -17,6 +18,5 @@ Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
 - Finance/live providers, workouts/Zepp provenance, widgets, physical iPhone,
   final security, performance and whole-app acceptance remain open.
 
-Next: finish Astra review and push the selector fix, repair the shared
-Planning fixture and stale assertions, investigate picker dismissal, then rerun
-affected and full iOS 27 logic lanes serially.
+Next: repair the shared Planning fixture and stale assertions, investigate
+picker dismissal, then rerun focused and full iOS 27 logic lanes serially.
