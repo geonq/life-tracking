@@ -2,16 +2,17 @@
 
 Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
 
-- Current pushed source checkpoint: `c1b811e` on `main` and `origin/main`;
-  this includes shared design, CP-B bootstrap, token-removal and handoff
-  checkpoints. Do not infer other branch parity.
+- Current pushed source checkpoint: `cb5b3fd` on `main` and `origin/main`;
+  this includes shared design, CP-B bootstrap, token-removal and Windows log
+  redaction. Do not infer other branch parity.
 - Design correction `4fdf23e`: Astra READY; generic arm64 iOS 27
   build-for-testing passed and five focused iPhone 17/iOS 27 design tests
   passed; Simulator is shut down.
 - Nutrition-photo descriptor fix `c1b811e`: Astra READY; 31 focused API tests,
-  API typecheck and diff-check pass. Windows runtime, filesystem identity
-  behavior and ACL verification remain pending; no universal reparse-point
-  protection is claimed.
+  API typecheck and diff-check pass. Windows filesystem identity and ACL
+  verification remain pending; no universal reparse-point protection is claimed.
+- Windows child-log redaction `cb5b3fd`: Astra GO; .NET 9 serial suite 40/40 on
+  macOS. Windows runtime, ACL enforcement and service execution remain open.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
 - P01: shared sync contract/codec complete at `a21ccf3` + `673dc0a`.
@@ -81,14 +82,11 @@ Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
   physical iPhone, Windows, and live-provider evidence remain unknown or
   unavailable.
 
-- Remaining security follow-up before CP-B batch B: Windows `RotatingLogSink`
-  chunk-boundary redaction remains in source. The nutrition-photo fix at
-  `c1b811e` is reviewed/tested on macOS; Windows runtime is unverified. GitHub
-  review-thread state is unverified because the saved `gh` token is invalid;
-  SSH Git authentication/push works.
+- Windows log-redaction blocker is resolved at `cb5b3fd`; macOS source/test
+  evidence is not Windows service or ACL evidence. GitHub review-thread state is
+  unverified because the saved `gh` token is invalid; SSH push succeeded.
 
-Next: fix/review bounded Windows streaming redaction, then resume CP-B B-D with
-injected bindings under `tasks/p04-cpb-training-adapter-contract.md`. Keep
-registration E blocked on trusted membership and legacy reconciliation. Retry
-P06-B picker/vault runtime evidence, then continue visual/motion, widgets,
-providers, Windows, device and final-security gates. Release stays NO-GO.
+Next: execute CP-B batch B under `tasks/p04-cpb-training-adapter-contract.md`,
+then C-D with injected bindings. Keep production registration blocked by
+trusted membership and legacy reconciliation. Retry P06-B picker/vault runtime
+when Apple test services permit; continue remaining product gates. Release NO-GO.

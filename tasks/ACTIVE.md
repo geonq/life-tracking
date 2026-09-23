@@ -1,14 +1,14 @@
 # Active LifeOS execution
 
 Status: IN PROGRESS — P00/P01/P02/P03 calendar, P04 training payload, P05
-D1 graph/session, Xcode 27 compatibility, bounded P06-A native Canvas, and
-P06-B planning workspace transaction checkpoint complete; CP-B batch A
-complete. Two source-confirmed security fixes are next, before CP-B batch B;
-release NO-GO. Updated 2026-09-23.
+D1 graph/session, Xcode 27 compatibility, bounded P06-A native Canvas, P06-B
+planning workspace transaction, and CP-B batch A complete. Nutrition-photo
+hardening and Windows child-log redaction are pushed; CP-B batch B is next.
+Release remains NO-GO. Updated 2026-09-23.
 
 ## Current checkpoint
 
-main and origin/main are pushed at `c1b811e`, including `fbeb81c`,
+main and origin/main are pushed at `cb5b3fd`, including `fbeb81c`,
 `4fdf23e`, `0171b2a`, `691590d`, and `79dcf69`. Do not infer other branch
 parity. P04 SyncStoreKind is at ebef1ac; native picker tests remain at
 7cc189f, following chooser 433ea64, workspace 86baaa8, inspector 454f4d1, and
@@ -108,21 +108,20 @@ remain pending; the earlier macOS XCTest launch canceled before tests began.
 
 ## Next execution
 
-1. Fix/test bounded Windows `RotatingLogSink` redaction across arbitrary
-   output chunks and EOF/flush; Astra medium reviews the diff.
-2. Resume CP-B batch B: persist each successful local command as an intent in
-   the same transaction as its local receipt; export is never a sync ACK.
-3. Batch C seals intents with the replication key and atomically commits signed
+1. Execute CP-B batch B exactly under `tasks/p04-cpb-training-adapter-contract.md`:
+   capture each successful local command intent in the same transaction as its
+   receipt; export is never a sync ACK.
+2. Batch C seals intents with the replication key and atomically commits signed
    bytes, entity heads and contiguous sequence allocation.
-4. Batch D applies verified operations and persists receipts before ACKs; do
+3. Batch D applies verified operations and persists receipts before ACKs; do
    not compact tombstones or replay evidence in CP-B.
-5. Keep batch E production registration blocked until trusted descriptor
+4. Keep batch E production registration blocked until trusted descriptor
    membership and populated-remote legacy reconciliation are resolved.
-6. Retry P06-B native picker runtime and isolated vault-manifest evidence when
+5. Retry P06-B native picker runtime and isolated vault-manifest evidence when
    Apple test services permit it; continue remaining visual, motion, widgets,
    providers, Windows, device and final-security gates.
 
-The remaining source-confirmed PR #1 issue is Windows `RotatingLogSink`; GitHub
-review-thread state is unverified after `c1b811e` because the saved `gh` token
-is invalid. SSH Git authentication/push works. No completion percentage is
-calculated from these checkpoints.
+Windows child-log redaction is fixed and pushed at `cb5b3fd`; Astra GO and the
+macOS .NET 9 suite passed 40/40. Windows runtime/ACL evidence remains open.
+GitHub review-thread state is unverified because the saved `gh` token is
+invalid; SSH push works. No completion percentage is calculated from checkpoints.
