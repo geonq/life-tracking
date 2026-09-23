@@ -280,6 +280,35 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         )
     }
 
+    func testInitializationRemovesOnlyLegacySyncTokenPreference() {
+        let suiteName = "LifeOS.TailscaleSyncClientSecurityTests.legacy-token." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let serverURL = "https://lifeos.example-tailnet.ts.net:8420"
+        let lastSuccess = 1_789_000_000.0
+        defaults.set(Data([0xA5]), forKey: TailscaleSyncClient.legacySyncTokenDefaultsKey)
+        defaults.set(serverURL, forKey: TailscaleSyncClient.serverURLDefaultsKey)
+        defaults.set(lastSuccess, forKey: "LifeOS.Sync.LastSuccess")
+
+        _ = TailscaleSyncClient(defaults: defaults)
+        XCTAssertNil(defaults.object(forKey: TailscaleSyncClient.legacySyncTokenDefaultsKey))
+        XCTAssertEqual(defaults.string(forKey: TailscaleSyncClient.serverURLDefaultsKey), serverURL)
+        XCTAssertEqual(defaults.object(forKey: "LifeOS.Sync.LastSuccess") as? Double, lastSuccess)
+
+        defaults.set(Data([0xA5]), forKey: TailscaleSyncClient.legacySyncTokenDefaultsKey)
+        let session = preflightSession()
+        defer { session.invalidateAndCancel() }
+        _ = TailscaleSyncClient(
+            session: session,
+            defaults: defaults,
+            approvedHosts: ["lifeos.example-tailnet.ts.net"]
+        )
+        XCTAssertNil(defaults.object(forKey: TailscaleSyncClient.legacySyncTokenDefaultsKey))
+        XCTAssertEqual(defaults.string(forKey: TailscaleSyncClient.serverURLDefaultsKey), serverURL)
+        XCTAssertEqual(defaults.object(forKey: "LifeOS.Sync.LastSuccess") as? Double, lastSuccess)
+    }
+
     func testServerURLAcceptsOnlyCanonicalPrivateHTTPSOrigin() {
         let approved: Set<String> = ["lifeos.example-tailnet.ts.net"]
         XCTAssertNotNil(TailscaleSyncClient.validatedServerURL("https://lifeos.example-tailnet.ts.net", approvedHosts: approved))

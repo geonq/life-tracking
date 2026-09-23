@@ -225,6 +225,7 @@ private final class CancellableSyncTaskDelegate: NSObject, URLSessionTaskDelegat
 /// mint, store, or forward a bearer or any `Tailscale-User-*` header.
 public actor TailscaleSyncClient {
     static let serverURLDefaultsKey = "LifeOS.Sync.ServerURL"
+    static let legacySyncTokenDefaultsKey = "LifeOS.Sync.Token"
     static let approvedHostsInfoPlistKey = "LIFEOS_SYNC_APPROVED_HOSTS"
 
     private let session: URLSession
@@ -272,12 +273,17 @@ public actor TailscaleSyncClient {
                           delegateQueue: nil)
     }
 
+    private static func removeLegacySyncToken(from defaults: UserDefaults) {
+        defaults.removeObject(forKey: Self.legacySyncTokenDefaultsKey)
+    }
+
     public init(
         defaults: UserDefaults = .standard
     ) {
         self.session = Self.makeSession(timeout: Self.calendarTimeout)
         self.financeSession = Self.makeSession(timeout: Self.financeSummaryTimeout)
         self.defaults = defaults
+        Self.removeLegacySyncToken(from: defaults)
         self.approvedHosts = Self.configuredApprovedHosts()
     }
 
@@ -289,6 +295,7 @@ public actor TailscaleSyncClient {
         self.session = session
         self.financeSession = session
         self.defaults = defaults
+        Self.removeLegacySyncToken(from: defaults)
         self.approvedHosts = Set(approvedHosts.map { $0.lowercased() })
     }
 #endif
