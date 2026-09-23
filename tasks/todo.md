@@ -1,7 +1,10 @@
 # TODO — LifeOS completion gates
 
 Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
-Current source checkpoint: 4436211; main and origin/main are synchronized.
+Latest pushed checkpoint: 09f5575 (CP-B Batch B); main and origin/main are
+synchronized. Astra static review and 57/57 focused iOS 27 tests passed. Focused FitnessTrainingStoreTests pass 57/57 on iOS 27. The broader lane
+selected iPhone 17/iOS 26.5 and completed 1,621/1,640 with 19 Planning/HealthKit
+failures; the full-suite gate is not green.
 Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## P00 complete
@@ -45,8 +48,8 @@ Use artifacts/final/completion/requirements.json instead of percentages.
   Durable store adapters are not included in this checkpoint; Astra static
   review passed. The native Mac lane is green; iOS and physical-device
   evidence remain open.
-  CP-B must seal the replication envelope migration, command/wire identity,
-  sequence/signing ownership and tombstone contract before adapter code.
+  CP-B's contract is sealed; B is pushed at 09f5575. C/D remain ahead and
+  E production registration stays blocked by its explicit trust gates.
 - P05 D1 graph/session checkpoint: ca2caf1. Bounded Markdown link scanning,
   graph projection, spatial indexing, Canvas reducer/session state, atomic vault
   access-context validation, and focused regressions are reviewed and pushed.
@@ -105,11 +108,12 @@ Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## Ordered implementation
 
-1. P04 adapts finance, fitness, nutrition,
-   supplements and lifestyle stores with local durability before acknowledgement.
-2. P06-B continues with native picker presentation tests and a real-vault
-   round trip from tasks/p06b-mounted-picker-plan.md; no worker may guess CP-B
-   adapter identities.
+1. Finish the selector fix and repair the known Planning/HealthKit test failures;
+   rerun the full logic lane on iOS 27 before calling that gate green.
+2. Implement CP-B C/D with injected bindings and durable local application;
+   keep production registration blocked until E's trust gates pass.
+3. Continue P06-B native picker presentation and real-vault round-trip evidence
+   from tasks/p06b-mounted-picker-plan.md.
 3. P07 shared visual/motion primitives; P08 calendar; P09 finance; P10 fitness;
    P11 HealthKit/Zepp provenance; P12 usage; P13 tax; P14 widgets/intents.
 4. P15 security/dead-path hardening; P16 composition and target membership.
@@ -118,8 +122,9 @@ Use artifacts/final/completion/requirements.json instead of percentages.
 
 ## Release gates still open
 
-- iOS 27 simulator/runtime UI, signing, App Group, Shortcuts, and physical
-  iPhone behavior. Logic tests pass; UI/device evidence is still open.
+- iOS 27 simulator/runtime UI, signing, App Group, Shortcuts and physical
+  iPhone behavior. Focused store tests pass; the broad logic suite has 19
+  failures on iOS 26.5 and needs a full iOS 27 rerun.
 - Windows identity/ACL/service/Serve/health/readiness/restart/rollback.
 - Enable Banking, Trade Republic, Robinhood/net-worth, outage/rejoin and live
   provider readback.

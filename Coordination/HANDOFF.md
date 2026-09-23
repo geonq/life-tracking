@@ -1,51 +1,45 @@
 # HANDOFF — LifeOS native app
 
-Updated 2026-09-23 Europe/Berlin.
+Updated 2026-09-23 Europe/Berlin. Release remains NO-GO.
 
-## Active task
+## Active work
 
-Proceed with CP-B batch B under its sealed contract after the Windows log
-redaction checkpoint. Release remains NO-GO; this is not a whole-app completion claim.
+CP-B Batch B implementation and regression coverage are pushed at 09f5575.
+Astra medium static review is GO after three test corrections; the focused
+iOS 27 FitnessTrainingStore suite passed 57/57. Latest broad logic result:
+1,621/1,640 passed on iPhone 17/iOS 26.5 because the validation script chose
+the older runtime while iOS 27 was installed. This is not a full-suite pass.
 
-## Current source and evidence
+Astra traced the 19 failures to five narrow issues: 15 Planning tests use an
+unmounted workspace fixture; one path test rejects a valid PlanningStorageError;
+one picker dismissal callback has a suspected post-dismissal identity mismatch
+(not confirmed); one expected stable error omits the unavailable. prefix; one
+HealthKit test counts a YAML formatting pattern despite all four target
+exclusions. One late-result test also needs bounded gate cleanup after setup
+failure.
 
-- `main` and `origin/main` are pushed at `cb5b3fd`, including `c1b811e`,
-  `fbeb81c`, `4fdf23e`, `0171b2a`, `691590d`, and `79dcf69`.
-- Astra medium marked the design-contract correction READY. iOS 27 generic
-  arm64 `LifeOSLogic build-for-testing` succeeded using normal Xcode service
-  access. Five focused iPhone 17/iOS 27 tests passed for palette separation,
-  contrast, release timing, Reduce Motion/direct interaction, and chart series.
-- `git diff --check` and Swift parse passed. Simulator booted list is empty.
-  Serial build left 22 GiB free. Default-sandbox Xcode failed in its SwiftUI
-  macro plugin under restricted Apple services; the normal Xcode retry passed.
-- Windows log redaction `cb5b3fd`: Astra medium GO; serial .NET 9 service-host
-  tests passed 40/40 on macOS. Windows runtime, ACLs and service execution remain
-  unverified.
-- CP-B batch A (schema-3 replication state, stable entity key map, bind and
-  bootstrap) is complete. Full immutable execution contract remains at
-  `tasks/p04-cpb-training-adapter-contract.md`.
+## Checkpoints and constraints
 
-## Security findings and blocker
+Latest pushed code is 09f5575; main and origin/main match. CP-B A and B are complete;
+B must remain injected. CP-B production registration stays blocked until
+trusted descriptor membership and populated-remote legacy reconciliation are
+resolved. The current selector candidate is not approved: its shell input
+omits runtime metadata and its state output needs an allowlist. An xhigh worker
+is correcting the input contract and fixture coverage. Full simctl inventory
+selects the iOS 27 device; no simulator was booted.
 
-- Nutrition-photo path-swap fix is pushed at `c1b811e`; Astra READY, 31 focused
-  tests and API typecheck pass. Windows runtime remains unverified; native
-  Windows behavior and protected file/parent ACLs are still required. This
-  does not guarantee every reparse-point or concurrent-write case.
-- Windows child-log redaction is fixed at `cb5b3fd`; its bounded parser, sink
-  lifecycle and pump-failure shutdown are reviewed and covered by the 40-test
-  macOS suite. Native Windows behavior and protected ACLs remain required.
-- GitHub review-thread state was not rechecked after `c1b811e`; saved `gh`
-  token invalid. SSH Git pushes work; do not claim threads are closed.
+Windows log redaction cb5b3fd has 40/40 macOS .NET tests; Windows runtime,
+ACL and service execution remain unverified. Nutrition-photo hardening is
+pushed at c1b811e; Windows reparse-point behavior remains unverified.
+GitHub issue/PR state is not current because the saved gh token is invalid.
+Do not expose the Windows edge token or deploy the stale August 28 artifact.
 
-## Exact next sequence
+## Next
 
-1. Execute CP-B batch B exactly as specified in
-   `tasks/p04-cpb-training-adapter-contract.md`; keep production registration
-   blocked and use injected bindings only.
-2. Continue CP-B batches C and D after B review and checkpoint.
-   Keep E production registration blocked by trusted descriptor membership
-   and populated-remote legacy reconciliation.
-3. Continue P06-B native picker runtime and isolated real-vault evidence when
-   Apple test services permit it; then continue remaining product gates.
-
-No registration, live sync, full release, or whole-app completion is claimed.
+1. Finish Astra review and push the simulator-selector fix; then repair the
+   Planning/HealthKit failures and rerun the full logic lane on iOS 27.
+2. Repair the Planning fixture and stale assertions; investigate the picker
+   dismissal callback, then rerun focused and full iOS logic lanes on iOS 27.
+3. Continue CP-B C/D with injected bindings; keep production registration
+   blocked until its explicit gates pass. Continue remaining app/device,
+   Windows, provider, visual and security acceptance work.

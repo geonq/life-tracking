@@ -1,16 +1,15 @@
 # Active LifeOS execution
 
-Status: IN PROGRESS — P00/P01/P02/P03 calendar, P04 training payload, P05
-D1 graph/session, Xcode 27 compatibility, bounded P06-A native Canvas, P06-B
-planning workspace transaction, and CP-B batch A complete. Nutrition-photo
-hardening and Windows child-log redaction are pushed; CP-B batch B is next.
-Release remains NO-GO. Updated 2026-09-23.
+Status: IN PROGRESS — CP-B Batch B source/tests are implemented; Astra
+static review is GO and focused iOS 27 tests pass 57/57. P00/P01/P02/P03,
+CP-B A, P05 D1, P06-A and P06-B source tranches are complete. Release remains
+NO-GO. Updated 2026-09-23.
 
 ## Current checkpoint
 
-main and origin/main are pushed at `cb5b3fd`, including `fbeb81c`,
-`4fdf23e`, `0171b2a`, `691590d`, and `79dcf69`. Do not infer other branch
-parity. P04 SyncStoreKind is at ebef1ac; native picker tests remain at
+Latest pushed checkpoint is 09f5575 (CP-B Batch B); main and origin/main
+are synchronized.
+P04 SyncStoreKind is at ebef1ac; native picker tests remain at
 7cc189f, following chooser 433ea64, workspace 86baaa8, inspector 454f4d1, and
 lifecycle checkpoint 4436211.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
@@ -19,10 +18,14 @@ The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
 
 The design-contract correction at `4fdf23e` is Astra medium READY; generic
 arm64 iOS 27 build-for-testing and five focused iPhone 17/iOS 27 design tests
-passed. Nutrition-photo descriptor fix at `c1b811e` is Astra READY; 31 focused
-API tests, API typecheck and diff-check passed. Mac evidence does not establish
-Windows reparse-point behavior; native Windows tests and protected file/parent
-ACLs remain required. Simulator is shut down; 22 GiB remain free.
+passed. Focused FitnessTrainingStoreTests pass 57/57 on iOS 27. The broader lane
+selected iPhone 17/iOS 26.5 and completed 1,621/1,640; 19 Planning/HealthKit
+tests remain red. The full suite is not green. The selector fix is in review;
+The selector candidate is not approved; its input must include runtime metadata
+and emitted state must be allowlisted. CoreSimulator is currently reachable for
+read-only inventory only. Nutrition-photo descriptor fix at `c1b811e` is Astra READY; 31 focused API tests, API typecheck
+and diff-check passed. Mac evidence does not establish Windows reparse-point
+behavior; native Windows tests and protected file/parent ACLs remain required.
 
 ## Current native checkpoint
 
@@ -108,18 +111,18 @@ remain pending; the earlier macOS XCTest launch canceled before tests began.
 
 ## Next execution
 
-1. Execute CP-B batch B exactly under `tasks/p04-cpb-training-adapter-contract.md`:
-   capture each successful local command intent in the same transaction as its
-   receipt; export is never a sync ACK.
+1. Finish Astra review and push the selector fix; confirm the script selects
+   the installed iOS 27 iPhone 17 without booting a simulator.
 2. Batch C seals intents with the replication key and atomically commits signed
    bytes, entity heads and contiguous sequence allocation.
 3. Batch D applies verified operations and persists receipts before ACKs; do
    not compact tombstones or replay evidence in CP-B.
 4. Keep batch E production registration blocked until trusted descriptor
    membership and populated-remote legacy reconciliation are resolved.
-5. Retry P06-B native picker runtime and isolated vault-manifest evidence when
-   Apple test services permit it; continue remaining visual, motion, widgets,
-   providers, Windows, device and final-security gates.
+5. Repair the shared Planning fixture and stale assertions; investigate picker
+   dismissal and rerun focused and full iOS 27 logic lanes serially.
+6. Continue remaining visual, motion, widgets, providers, Windows, device and
+   final-security gates.
 
 Windows child-log redaction is fixed and pushed at `cb5b3fd`; Astra GO and the
 macOS .NET 9 suite passed 40/40. Windows runtime/ACL evidence remains open.
