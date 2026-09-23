@@ -2,19 +2,30 @@
 
 Status: IN PROGRESS — P00/P01/P02/P03 calendar, P04 training payload, P05
 D1 graph/session, Xcode 27 compatibility, bounded P06-A native Canvas, and
-P06-B planning workspace transaction checkpoint complete; CP-B adapters paused;
-release NO-GO,
-updated 2026-09-23.
+P06-B planning workspace transaction checkpoint complete; CP-B batch A
+complete. Two source-confirmed security fixes are next, before CP-B batch B;
+release NO-GO. Updated 2026-09-23.
 
 ## Current checkpoint
 
-main, origin/main, and codex/p06-b are synchronized at the latest
-coordination checkpoint. P04 SyncStoreKind is pushed at ebef1ac; native picker
-tests remain at 7cc189f, following chooser 433ea64, workspace 86baaa8,
-inspector 454f4d1, and lifecycle checkpoint 4436211.
+main and origin/main are pushed at `4fdf23e`, including `0171b2a` (shared
+native design primitives), `691590d` (CP-B replication bootstrap state), and
+`79dcf69` (legacy plaintext sync-token preference removal). Do not infer other
+branch parity. P04 SyncStoreKind is at ebef1ac; native picker tests remain at
+7cc189f, following chooser 433ea64, workspace 86baaa8, inspector 454f4d1, and
+lifecycle checkpoint 4436211.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
 The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
 75 missing states. It is evidence-led, not a completion percentage.
+
+The design-contract correction at `4fdf23e` is Astra medium READY. Generic
+iOS 27 arm64 `LifeOSLogic build-for-testing` passed with normal Xcode service
+access; five focused iPhone 17/iOS 27 tests passed for palette separation,
+contrast, release timing, Reduce Motion/direct interaction, and chart series.
+Swift parse and `git diff --check` passed; simulator is shut down. The default
+sandbox Xcode attempt failed in the SwiftUI macro plugin under restricted
+Apple services; the normal Xcode retry succeeded. Serial build left 22 GiB
+free.
 
 ## Current native checkpoint
 
@@ -46,11 +57,12 @@ numeric/domain/parser regressions are pushed at b0e52e1 after Astra static PASS.
 No durable fitness store adapter is claimed yet; native logic lanes are green,
 while signed UI, physical-device, and external-provider evidence remain open.
 The closed 17-case SyncStoreKind registry is pushed at ebef1ac; macOS and
-iOS arm64 builds pass and protocol tests compile, but runtime is unverified.
-Astra sealed tasks/p04-cpb-training-adapter-contract.md: batches A-D may run
-against injected bindings. Production registration E remains blocked by
-trusted descriptor membership and populated-remote legacy reconciliation.
-The plan defines schema-3 bootstrap, intents, sequence/signing, remote apply,
+iOS arm64 builds pass and protocol tests compiled, but their runtime remains
+unverified. Astra sealed tasks/p04-cpb-training-adapter-contract.md. CP-B
+batch A schema-3 bootstrap state, stable entity-key map, bind and bootstrap is
+complete. B-D may run only against injected bindings. Production registration
+E remains blocked by trusted descriptor membership and populated-remote legacy
+reconciliation. The full plan defines intents, sequence/signing, remote apply,
 receipt retention, exact tests and complexity limits; no worker may guess.
 
 P06-B now has a pushed read-only Calendar-to-Obsidian Canvas workspace with
@@ -94,23 +106,28 @@ cancellation/lifetime reacquisition; four iOS cases cover mounted presentation,
 occupied-presenter rejection, adaptive-dismissal callback, and task
 cancellation/lifetime reacquisition. Astra medium returned READY TO CHECKPOINT.
 Mirrored suites parse and match; serial macOS 27 and iOS Simulator arm64
-build-for-testing passed. Runtime and isolated vault-manifest evidence remain
-pending because XCTest previously canceled before starting and CoreSimulator
-is currently unavailable.
+build-for-testing passed. Picker runtime and isolated vault-manifest evidence
+remain pending; the earlier macOS XCTest launch canceled before tests began.
 
 ## Next execution
 
-1. Luna xhigh batch A: schema-3 replication state, stable entity-key hash,
-   migration validation, explicit bind/bootstrap transaction, and restart/
-   collision tests from tasks/p04-cpb-training-adapter-contract.md.
-2. Batch B captures each successful local training command as a durable intent
-   in the same transaction as its local receipt; export never means sync ACK.
-3. Batch C seals intents with the replication key and commits signed bytes,
-   entity heads and contiguous sequence allocation atomically.
-4. Batch D applies verified operations and persists receipts before ACKs; do
+1. Fix/test the nutrition-photo secret read using one bounded no-follow file
+   descriptor plus `fstat` identity comparison; Astra medium reviews the diff.
+2. Fix/test bounded Windows `RotatingLogSink` streaming redaction across split
+   secret chunks and EOF/flush; Astra medium reviews the diff.
+3. Resume CP-B batch B: persist each successful local command as an intent in
+   the same transaction as its local receipt; export is never a sync ACK.
+4. Batch C seals intents with the replication key and atomically commits signed
+   bytes, entity heads and contiguous sequence allocation.
+5. Batch D applies verified operations and persists receipts before ACKs; do
    not compact tombstones or replay evidence in CP-B.
-5. Keep batch E production registration blocked until trusted descriptor
+6. Keep batch E production registration blocked until trusted descriptor
    membership and populated-remote legacy reconciliation are resolved.
-6. Retry P06-B native picker runtime and isolated vault-manifest evidence when
-   LaunchServices and CoreSimulator recover; continue remaining visual, widget,
-   provider, Windows, device and security gates afterward.
+7. Retry P06-B native picker runtime and isolated vault-manifest evidence when
+   Apple test services permit it; continue remaining visual, motion, widgets,
+   providers, Windows, device and final-security gates.
+
+The two security findings are source-confirmed from merged PR #1; GitHub review
+thread state has not been rechecked after `4fdf23e` because the saved `gh`
+token is invalid. SSH git authentication/push works. No completion percentage
+is calculated from these checkpoints.

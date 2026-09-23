@@ -2,9 +2,18 @@
 
 Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
 
-- Current source checkpoint: `ebef1ac`; main, origin/main, and codex/p06-b
-  are synchronized. Native picker source checkpoint 7cc189f remains compiled
-  but runtime/vault evidence is pending.
+- Current pushed source checkpoint: `4fdf23e` on `main` and `origin/main`.
+  It includes `0171b2a` (shared native design primitives), `691590d` (CP-B
+  replication bootstrap state), and `79dcf69` (legacy plaintext sync-token
+  preference removal). Do not infer other branch parity.
+- Design-contract correction at `4fdf23e`: Astra medium READY; generic iOS 27
+  arm64 `LifeOSLogic build-for-testing` passed using normal Xcode service
+  access; five focused iPhone 17/iOS 27 design tests passed (palette
+  separation, contrast, release timing, Reduce Motion/direct interaction,
+  chart series). `git diff --check` and Swift parse passed; simulator is shut
+  down. Default-sandbox Xcode failed in the SwiftUI macro plugin under
+  restricted Apple services; elevated normal Xcode retry succeeded. Serial
+  build left 22 GiB free.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
 - P01: shared sync contract/codec complete at `a21ccf3` + `673dc0a`.
@@ -18,8 +27,9 @@ Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
   pushed at `ebef1ac`; Astra medium READY and macOS/iOS arm64
   build-for-testing passed. Protocol tests compiled but were not executed.
   The CP-B training contract is in tasks/p04-cpb-training-adapter-contract.md.
-  Batches A-D may use injected bindings; production registration is blocked by
-  trusted descriptor membership and legacy remote reconciliation.
+  Batch A (schema-3 replication state, entity-key map, bind/bootstrap) is
+  complete. B-D may use injected bindings; production registration is blocked
+  by trusted descriptor membership and legacy remote reconciliation.
 - P05 D1: bounded graph/parser/spatial/session/vault work is pushed at `ca2caf1`.
 - `0451afb` restores URL-safe Base64 decoding, Xcode 27 public-key compatibility,
   and the actor-safe store URL surface.
@@ -62,21 +72,25 @@ Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
   and real-vault runtime mutation evidence remain pending.
 - P06-B native picker probes are checkpointed at `7cc189f`. Astra medium
   returned READY TO CHECKPOINT; mirrored Swift suites parse and match, and
-  macOS 27 / iOS Simulator arm64 build-for-testing passed. Runtime remains
-  pending: XCTest canceled the earlier macOS launch before any test, and simctl
-  currently cannot connect to CoreSimulatorService.
+  macOS 27 / iOS Simulator arm64 build-for-testing passed. Picker runtime and
+  isolated vault evidence remain open; the earlier macOS XCTest launch
+  canceled before tests began.
 - Evidence: API typecheck and 160 tests pass; gateway replication is 23 passed
   with one cryptography-dependent skip; `LifeOSMacLogic` passed 405/405 tests
   on Xcode 27/macOS 26.6.2.
-- Host: Xcode 27 and macOS 27.0 arm64 are available. CoreSimulatorService
-  is currently unreachable and no simulator runtimes are discoverable. Signing,
+- Host: Xcode 27 and macOS 27.0 arm64 are available. Latest iPhone 17/iOS 27
+  focused simulator run passed and the simulator is shut down. Signing,
   physical iPhone, Windows, and live-provider evidence remain unknown or
   unavailable.
 
-Next: execute P04 training batches A-D from
-tasks/p04-cpb-training-adapter-contract.md against injected bindings. Keep
-production registration blocked until trusted membership and legacy remote
-reconciliation are sealed. Retry P06-B native picker runtime and isolated
-vault-manifest evidence when Apple test services recover, then continue
-visual/motion, widgets, providers, Windows, device and final security gates.
-Release remains NO-GO.
+- Security follow-up before CP-B batch B: source still contains the observed
+  PR #1 nutrition-photo secret-file `lstat`/read TOCTOU and Windows
+  `RotatingLogSink` chunk-boundary redaction leak. GitHub review-thread state
+  has not been checked since `4fdf23e`; saved `gh` token is invalid, while SSH
+  git authentication/push works.
+
+Next: apply the two reviewed security fixes in HANDOFF, then resume CP-B B-D
+with injected bindings under `tasks/p04-cpb-training-adapter-contract.md`.
+Keep registration E blocked on trusted membership and legacy reconciliation.
+Retry P06-B picker/vault runtime evidence, then continue visual/motion, widgets,
+providers, Windows, device and final-security gates. Release stays NO-GO.

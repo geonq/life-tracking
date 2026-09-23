@@ -4,64 +4,44 @@ Updated 2026-09-23 Europe/Berlin.
 
 ## Active task
 
-The P04 CP-B contract is sealed for injected batches A-D; batch A starts
-next. Production registration remains blocked by trusted-descriptor membership
-and legacy reconciliation. P06-B native picker runtime and isolated vault
-round-trip evidence remain open. Release remains NO-GO.
+Remediate two source-confirmed security findings before CP-B training batch B.
+Release remains NO-GO; this is not a whole-app completion claim.
 
-## Current source state
+## Current source and evidence
 
-- main, origin/main, and codex/p06-b are synchronized. P04
-  SyncStoreKind is at ebef1ac; native picker tests are at 7cc189f. The
-  execution contract is tasks/p04-cpb-training-adapter-contract.md.
-- P01–P05 foundations are in main: authenticated sync, durable calendar,
-  fitness payload boundary, graph/session, and native Canvas viewport.
-- P06-B prior checkpoints: workspace transaction 86baaa8, inspector
-  454f4d1, chooser 433ea64, picker lifecycle hardening 1df4642, hosted
-  source probes c4243a3.
-- 4436211 stores the native presenter weakly behind owner-token attach/detach,
-  avoids state writes during SwiftUI representable updates, and keeps
-  isMounted synchronous without publishing unused observation changes.
-  DEBUG-only probes exercise mounted view lifecycle, picker actions, viewport,
-  inspector, and readiness. macOS/iOS tests are mirrored.
+- `main` and `origin/main` are pushed at `4fdf23e`, including `0171b2a`,
+  `691590d`, and `79dcf69`.
+- Astra medium marked the design-contract correction READY. iOS 27 generic
+  arm64 `LifeOSLogic build-for-testing` succeeded using normal Xcode service
+  access. Five focused iPhone 17/iOS 27 tests passed for palette separation,
+  contrast, release timing, Reduce Motion/direct interaction, and chart series.
+- `git diff --check` and Swift parse passed. Simulator booted list is empty.
+  Serial build left 22 GiB free. Default-sandbox Xcode failed in its SwiftUI
+  macro plugin under restricted Apple services; the normal Xcode retry passed.
+- CP-B batch A (schema-3 replication state, stable entity key map, bind and
+  bootstrap) is complete. Full immutable execution contract remains at
+  `tasks/p04-cpb-training-adapter-contract.md`.
 
-## Verification
+## Security findings and blocker
 
-- Astra medium reviewed the source patch READY with no P0–P3 findings.
-- Xcode 27 / macOS 27.0 focused hosted suite: 15 passed, 0 failed,
-  0 runtime warnings. This includes the idle-hosted restore regression and
-  ten mounted chooser/workspace cases.
-- Astra medium returned READY TO CHECKPOINT with no actionable findings.
-  Swift parse, diff-check, and mirrored-suite parity pass. Serial arm64
-  build-for-testing passes for LifeOSMacLogic on macOS 27 and LifeOSLogic for
-  iOS Simulator.
-- Runtime remains unverified. The prior macOS picker run was canceled during
-  XCTest LaunchServices worker startup with zero tests executed. Current
-  simctl cannot connect to CoreSimulatorService or discover runtimes. No
-  native picker runtime result or real-vault round trip is claimed.
-- P04 SyncStoreKind implementation at ebef1ac has a closed 17-case raw
-  value set and exhaustive O(1) domain mapping. Astra medium returned READY.
-  LifeOSMacLogic and LifeOSLogic arm64 build-for-testing passed after the
-  change; the new protocol tests compiled but were not executed.
-- Both serial build sessions exited; 24 GiB remained available on the volume.
-- Earlier mainline evidence remains: LifeOSMacLogic 405/405; focused iPhone 17
-  P06-B suite 62/62. API tests 160/160; gateway replication 23 passed with
-  one crypto-dependent skip.
-- No owned xcodebuild, xctest, or LifeOSMac process remains. Old project-scoped
-  temporary intermediates were removed, reclaiming about 11 GiB; active test
-  bundles and current build caches were retained.
+- Source still has the observed PR #1 nutrition-photo secret `lstat`/read
+  TOCTOU and Windows `RotatingLogSink` chunk-boundary redaction leak. Fix and
+  test the first with one bounded no-follow descriptor plus `fstat` identity;
+  fix and test streaming redaction across chunk boundaries and EOF/flush.
+- GitHub review-thread state was not rechecked after the latest push: `gh auth
+  status` reports the saved token invalid. SSH authentication and authorized
+  Git pushes work; do not claim the GitHub threads are resolved.
 
-## Limits and next action
+## Exact next sequence
 
-Native AppKit/UIKit picker presentation, interactive cancellation, actual
-production-vault round trip, signed device/App Group behavior, Windows/live
-providers, physical iPhone, whole-app design/security gates, and final
-registry evidence remain open. The hosted chooser tests use controlled
-selection closures and fixture vaults; they do not prove native picker
-presentation or access to the user's real vault.
+1. Luna xhigh fixes/tests the nutrition-photo descriptor read; Astra medium
+   reviews the actual diff. Then checkpoint serially.
+2. Luna xhigh fixes/tests bounded Windows streaming log redaction, including
+   split-secret and flush/EOF cases; Astra medium reviews. Then checkpoint.
+3. Resume CP-B batch B, followed by C and D, using injected bindings only.
+   Keep E production registration blocked by trusted descriptor membership
+   and populated-remote legacy reconciliation.
+4. Continue P06-B native picker runtime and isolated real-vault evidence when
+   Apple test services permit it; then continue remaining product gates.
 
-Start Luna xhigh batch A under tasks/p04-cpb-training-adapter-contract.md.
-Keep A-D bound to injected identities and tests. Do not register production
-sync until trusted descriptor membership and populated-remote reconciliation
-are independently resolved. Continue P06-B native runtime/vault evidence when
-Apple test services recover; builds are not runtime acceptance.
+No registration, live sync, full release, or whole-app completion is claimed.
