@@ -2,18 +2,16 @@
 
 Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
 
-- Current pushed source checkpoint: `4fdf23e` on `main` and `origin/main`.
-  It includes `0171b2a` (shared native design primitives), `691590d` (CP-B
-  replication bootstrap state), and `79dcf69` (legacy plaintext sync-token
-  preference removal). Do not infer other branch parity.
-- Design-contract correction at `4fdf23e`: Astra medium READY; generic iOS 27
-  arm64 `LifeOSLogic build-for-testing` passed using normal Xcode service
-  access; five focused iPhone 17/iOS 27 design tests passed (palette
-  separation, contrast, release timing, Reduce Motion/direct interaction,
-  chart series). `git diff --check` and Swift parse passed; simulator is shut
-  down. Default-sandbox Xcode failed in the SwiftUI macro plugin under
-  restricted Apple services; elevated normal Xcode retry succeeded. Serial
-  build left 22 GiB free.
+- Current pushed source checkpoint: `c1b811e` on `main` and `origin/main`;
+  this includes shared design, CP-B bootstrap, token-removal and handoff
+  checkpoints. Do not infer other branch parity.
+- Design correction `4fdf23e`: Astra READY; generic arm64 iOS 27
+  build-for-testing passed and five focused iPhone 17/iOS 27 design tests
+  passed; Simulator is shut down.
+- Nutrition-photo descriptor fix `c1b811e`: Astra READY; 31 focused API tests,
+  API typecheck and diff-check pass. Windows runtime, filesystem identity
+  behavior and ACL verification remain pending; no universal reparse-point
+  protection is claimed.
 - P00: complete; 258 leaves and 7 aliases reconciled, with acceptance evidence
   still pending where the ledger says pending.
 - P01: shared sync contract/codec complete at `a21ccf3` + `673dc0a`.
@@ -83,14 +81,14 @@ Updated 2026-09-23 Europe/Berlin. Release: NO-GO.
   physical iPhone, Windows, and live-provider evidence remain unknown or
   unavailable.
 
-- Security follow-up before CP-B batch B: source still contains the observed
-  PR #1 nutrition-photo secret-file `lstat`/read TOCTOU and Windows
-  `RotatingLogSink` chunk-boundary redaction leak. GitHub review-thread state
-  has not been checked since `4fdf23e`; saved `gh` token is invalid, while SSH
-  git authentication/push works.
+- Remaining security follow-up before CP-B batch B: Windows `RotatingLogSink`
+  chunk-boundary redaction remains in source. The nutrition-photo fix at
+  `c1b811e` is reviewed/tested on macOS; Windows runtime is unverified. GitHub
+  review-thread state is unverified because the saved `gh` token is invalid;
+  SSH Git authentication/push works.
 
-Next: apply the two reviewed security fixes in HANDOFF, then resume CP-B B-D
-with injected bindings under `tasks/p04-cpb-training-adapter-contract.md`.
-Keep registration E blocked on trusted membership and legacy reconciliation.
-Retry P06-B picker/vault runtime evidence, then continue visual/motion, widgets,
+Next: fix/review bounded Windows streaming redaction, then resume CP-B B-D with
+injected bindings under `tasks/p04-cpb-training-adapter-contract.md`. Keep
+registration E blocked on trusted membership and legacy reconciliation. Retry
+P06-B picker/vault runtime evidence, then continue visual/motion, widgets,
 providers, Windows, device and final-security gates. Release stays NO-GO.

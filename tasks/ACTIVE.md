@@ -8,24 +8,21 @@ release NO-GO. Updated 2026-09-23.
 
 ## Current checkpoint
 
-main and origin/main are pushed at `4fdf23e`, including `0171b2a` (shared
-native design primitives), `691590d` (CP-B replication bootstrap state), and
-`79dcf69` (legacy plaintext sync-token preference removal). Do not infer other
-branch parity. P04 SyncStoreKind is at ebef1ac; native picker tests remain at
+main and origin/main are pushed at `c1b811e`, including `fbeb81c`,
+`4fdf23e`, `0171b2a`, `691590d`, and `79dcf69`. Do not infer other branch
+parity. P04 SyncStoreKind is at ebef1ac; native picker tests remain at
 7cc189f, following chooser 433ea64, workspace 86baaa8, inspector 454f4d1, and
 lifecycle checkpoint 4436211.
 P00 generated the schemaVersion 2 requirement ledger and capability inventory.
 The ledger has 258 leaves, 7 aliases, 0 accepted, 183 partial source states and
 75 missing states. It is evidence-led, not a completion percentage.
 
-The design-contract correction at `4fdf23e` is Astra medium READY. Generic
-iOS 27 arm64 `LifeOSLogic build-for-testing` passed with normal Xcode service
-access; five focused iPhone 17/iOS 27 tests passed for palette separation,
-contrast, release timing, Reduce Motion/direct interaction, and chart series.
-Swift parse and `git diff --check` passed; simulator is shut down. The default
-sandbox Xcode attempt failed in the SwiftUI macro plugin under restricted
-Apple services; the normal Xcode retry succeeded. Serial build left 22 GiB
-free.
+The design-contract correction at `4fdf23e` is Astra medium READY; generic
+arm64 iOS 27 build-for-testing and five focused iPhone 17/iOS 27 design tests
+passed. Nutrition-photo descriptor fix at `c1b811e` is Astra READY; 31 focused
+API tests, API typecheck and diff-check passed. Mac evidence does not establish
+Windows reparse-point behavior; native Windows tests and protected file/parent
+ACLs remain required. Simulator is shut down; 22 GiB remain free.
 
 ## Current native checkpoint
 
@@ -111,23 +108,21 @@ remain pending; the earlier macOS XCTest launch canceled before tests began.
 
 ## Next execution
 
-1. Fix/test the nutrition-photo secret read using one bounded no-follow file
-   descriptor plus `fstat` identity comparison; Astra medium reviews the diff.
-2. Fix/test bounded Windows `RotatingLogSink` streaming redaction across split
-   secret chunks and EOF/flush; Astra medium reviews the diff.
-3. Resume CP-B batch B: persist each successful local command as an intent in
+1. Fix/test bounded Windows `RotatingLogSink` redaction across arbitrary
+   output chunks and EOF/flush; Astra medium reviews the diff.
+2. Resume CP-B batch B: persist each successful local command as an intent in
    the same transaction as its local receipt; export is never a sync ACK.
-4. Batch C seals intents with the replication key and atomically commits signed
+3. Batch C seals intents with the replication key and atomically commits signed
    bytes, entity heads and contiguous sequence allocation.
-5. Batch D applies verified operations and persists receipts before ACKs; do
+4. Batch D applies verified operations and persists receipts before ACKs; do
    not compact tombstones or replay evidence in CP-B.
-6. Keep batch E production registration blocked until trusted descriptor
+5. Keep batch E production registration blocked until trusted descriptor
    membership and populated-remote legacy reconciliation are resolved.
-7. Retry P06-B native picker runtime and isolated vault-manifest evidence when
+6. Retry P06-B native picker runtime and isolated vault-manifest evidence when
    Apple test services permit it; continue remaining visual, motion, widgets,
    providers, Windows, device and final-security gates.
 
-The two security findings are source-confirmed from merged PR #1; GitHub review
-thread state has not been rechecked after `4fdf23e` because the saved `gh`
-token is invalid. SSH git authentication/push works. No completion percentage
-is calculated from these checkpoints.
+The remaining source-confirmed PR #1 issue is Windows `RotatingLogSink`; GitHub
+review-thread state is unverified after `c1b811e` because the saved `gh` token
+is invalid. SSH Git authentication/push works. No completion percentage is
+calculated from these checkpoints.
